@@ -1,0 +1,27 @@
+# Row-level security.
+#
+# Policies live with the TOOL, not inside any one semantic layer, so the same
+# rules hold whichever adapter is connected. A policy names a governed column
+# and the principal attribute that must match it.
+#
+# Enforcement is transitive: a policy on dim_users.country also constrains any
+# table that joins to dim_users, and the join is FORCED rather than optional --
+# otherwise querying fct_mrr_movements without joining dim_users would bypass
+# the policy entirely.
+policies:
+  - id: region
+    table: dim_users
+    column: country
+    claim: regions          # principal attribute holding the allowed values
+    description: A regional manager sees only their assigned territories.
+
+principals:
+  admin:
+    name: Ada (global admin)
+    regions: "*"
+  emea:
+    name: Bo (EMEA manager)
+    regions: [GB, DE, FR, NL, SE]
+  amer:
+    name: Cy (Americas manager)
+    regions: [US, CA, BR]

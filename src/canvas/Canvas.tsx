@@ -1,0 +1,173 @@
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import type { TileSpec } from "../compiler/spec.ts";
+import type { CanvasSpec } from "./presets.ts";
+import { guidesFor, snapTo, type Box } from "./geometry.ts";
+
+const HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
+type Handle = typeof HANDLES[number];
+
+/**
+ * A free-positioning canvas: absolute coordinates, overlap permitted, z-order
+ * explicit. Deliberately not a packing grid -- a grid prevents overlap and
+ * reflows your neighbours, which is the behaviour that makes a dashboard feel
+ * like it is fighting you.
+ */
+export function Canvas({
+  canvas, tiles, zoom, selected, onSelect, onChange, onCommit, renderTile, scrollRef,
+}: {
+  canvas: CanvasSpec;
+  tiles: TileSpec[];
+  zoom: number;
+  selected: string[];
+  onSelect: (ids: string[]) => void;
+  /** Called continuously during a gesture. Must NOT record undo history. */
+  onChange: (tiles: TileSpec[]) => void;
+  /** Called once when a gesture ends. This is the undo boundary. */
+  onCommit: (before: TileSpec[]) => void;
+  renderTile: (t: TileSpec, selected: boolean) => React.ReactNode;
+  scrollRef?: React.MutableRefObject<HTMLDivElement | null>;
+}) {
+  const surface = useRef<HTMLDivElement>(null);
+  const [guides, setGuides] = useState<{ axis: "v" | "h"; at: number }[]>([]);
+  const drag = useRef<any>(null);
+
+  const boxOf = (t: TileSpec): Box => ({ ...t.layout });
+
+  const begin = useCallback((e: React.PointerEvent, id: string, handle: Handle | null) => {
+    if (canvas.locked) return;
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    const ids = selected.includes(id) ? selected : [id];
+    if (!selected.includes(id)) onSelect(e.shiftKey ? [...selected, id] : [id]);
+    drag.current = {
+      handle, ids, startX: e.clientX, startY: e.clientY,
+      // Snapshot before the gesture so one drag is one undo step, however many
+      // hundred pointermove frames it takes.
+      before: tiles,
+      moved: false,
+      origin: Object.fromEntries(tiles.filter((t) => ids.includes(t.id))
+        .map((t) => [t.id, { ...t.layout }])),
+    };
+  }, [canvas.locked, selected, tiles, onSelect]);
+
+  useEffect(() => {
+    if (canvas.locked) return;
+    const move = (e: PointerEvent) => {
+      const d = drag.current;
+      if (!d) return;
+      let dx = (e.clientX - d.startX) / zoom;
+      let dy = (e.clientY - d.startY) / zoom;
+
+      // Single-tile moves get alignment guides against everything else.
+      if (!d.handle && d.ids.length === 1) {
+        const o = d.origin[d.ids[0]];
+        const proposed: Box = { ...o, x: o.x + dx, y: o.y + dy };
+        const others = tiles.filter((t) => !d.ids.includes(t.id)).map(boxOf);
+        const g = guidesFor(proposed, others);
+        dx += g.dx; dy += g.dy;
+        setGuides(g.lines.slice(0, 4));
+      }
+
+      d.moved = true;
+      const next = tiles.map((t) => {
+        if (!d.ids.includes(t.id)) return t;
+        const o = d.origin[t.id];
+        const l = d.handle ? resize(o, d.handle, dx, dy) : { ...o, x: o.x + dx, y: o.y + dy };
+        return { ...t, layout: {
+          ...t.layout,
+          x: snapTo(Math.max(0, l.x), canvas.grid, canvas.snap),
+          y: snapTo(Math.max(0, l.y), canvas.grid, canvas.snap),
+          w: Math.max(80, snapTo(l.w, canvas.grid, canvas.snap)),
+          h: Math.max(60, snapTo(l.h, canvas.grid, canvas.snap)),
+        } };
+      });
+      onChange(next);
+    };
+    const up = () => {
+      const d = drag.current;
+      if (d?.moved) onCommit(d.before);
+      drag.current = null;
+      setGuides([]);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+  }, [tiles, zoom, canvas, onChange, onCommit, canvas.locked]);
+
+  // Keyboard nudge, delete, and layer order -- the shortcuts any design surface
+  // is expected to have.
+  useEffect(() => {
+    if (canvas.locked) return;
+    const key = (e: KeyboardEvent) => {
+      if (!selected.length) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      const step = e.shiftKey ? 10 : canvas.snap ? canvas.grid : 1;
+      const nudge: Record<string, [number, number]> = {
+        ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step],
+      };
+      if (nudge[e.key]) {
+        e.preventDefault();
+        const [dx, dy] = nudge[e.key];
+        onChange(tiles.map((t) => selected.includes(t.id)
+          ? { ...t, layout: { ...t.layout, x: Math.max(0, t.layout.x + dx), y: Math.max(0, t.layout.y + dy) } } : t));
+      }
+      if (e.key === "Escape") onSelect([]);
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [selected, tiles, canvas, onChange, onSelect]);
+
+  return (
+    <div className="canvas-scroll" ref={scrollRef}>
+      <div className="canvas-stage" style={{ width: canvas.width * zoom, height: canvas.height * zoom }}>
+        <div ref={surface} className={"canvas-surface" + (canvas.locked ? " locked" : "")}
+             style={{ width: canvas.width, height: canvas.height,
+                      transform: `scale(${zoom})`, transformOrigin: "top left",
+                      backgroundSize: canvas.snap ? `${canvas.grid * 4}px ${canvas.grid * 4}px` : undefined }}
+             onPointerDown={() => onSelect([])}>
+          {tiles.map((t) => {
+            const on = selected.includes(t.id);
+            return (
+              <div key={t.id}
+                   className={"node" + (on ? " selected" : "")}
+                   style={{ left: t.layout.x, top: t.layout.y,
+                            width: t.layout.w, height: t.layout.h,
+                            zIndex: (t.layout as any).z ?? 1 }}
+                   onPointerDown={(e) => { e.stopPropagation();
+                     if (canvas.locked) return;
+                     onSelect(e.shiftKey
+                       ? (selected.includes(t.id) ? selected.filter((s) => s !== t.id) : [...selected, t.id])
+                       : [t.id]); }}>
+                <div className="node-inner" onPointerDown={(e) => begin(e, t.id, null)}>
+                  {renderTile(t, on)}
+                </div>
+                {on && !canvas.locked && HANDLES.map((h) => (
+                  <span key={h} className={`handle ${h}`}
+                        onPointerDown={(e) => begin(e, t.id, h)} />
+                ))}
+              </div>
+            );
+          })}
+
+          {guides.map((g, i) => (
+            <div key={i} className={"guide " + g.axis}
+                 style={g.axis === "v" ? { left: g.at } : { top: g.at }} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function resize(o: Box, h: Handle, dx: number, dy: number): Box {
+  let { x, y } = o;
+  let width = o.w, height = o.h;
+  if (h.includes("e")) width = o.w + dx;
+  if (h.includes("s")) height = o.h + dy;
+  if (h.includes("w")) { x = o.x + dx; width = o.w - dx; }
+  if (h.includes("n")) { y = o.y + dy; height = o.h - dy; }
+  return { x, y, w: width, h: height };
+}
+
+export { HANDLES };

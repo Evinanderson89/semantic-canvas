@@ -1,0 +1,41 @@
+# Data sources.
+#
+# A source pairs a SEMANTIC ADAPTER (what the model is written in) with a
+# CONNECTOR (where the SQL runs). They are independent axes: a dbt project can
+# sit on DuckDB, and a duckglue model can sit on Snowflake.
+#
+# Everything downstream -- compiler, canvas, row-level security, cache -- is
+# source-agnostic, so adding a warehouse is config, not code.
+
+defaultPrincipal: admin      # who the UI acts as before anyone picks
+
+sources:
+  - id: duckglue-local
+    label: duckglue on DuckDB
+    adapter: duckglue
+    model: ~/Github/duckglue/semantic/warehouse.yaml
+    connector:
+      type: duckdb
+      lakeRoot: ~/Github/duckglue/lake
+      poolSize: 4
+
+  # Uncomment and fill in to attach a warehouse. A source that fails to connect
+  # is reported as unavailable; it does not take the others down with it.
+  #
+  # Credentials referenced as ${VAR} below come from .env (copy .env.example
+  # to .env and fill in the SNOWFLAKE_* values) -- nothing here should hold a
+  # secret directly.
+  # - id: dbt-snowflake
+  #   label: dbt on Snowflake
+  #   adapter: dbt
+  #   model: ~/analytics/target          # directory holding the dbt manifests
+  #   connector:
+  #     type: snowflake
+  #     account: ${SNOWFLAKE_ACCOUNT}
+  #     username: ${SNOWFLAKE_USER}
+  #     privateKey: ${SNOWFLAKE_PRIVATE_KEY}
+  #     role: ANALYTICS_READER
+  #     warehouse: COMPUTE_WH
+  #     database: ANALYTICS
+  #     schema: MARTS
+  #     poolSize: 6

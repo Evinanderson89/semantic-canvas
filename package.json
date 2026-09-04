@@ -1,0 +1,45 @@
+{
+  "name": "semantic-canvas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "server": "tsx src/server.ts",
+    "mcp": "tsx src/mcp/server.ts",
+    "start": "concurrently -k \"npm:server\" \"npm:dev\"",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test && npm run e2e",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "^1.1.3-alpha.7",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@observablehq/plot": "^0.6.16",
+    "@types/topojson-client": "^3.1.5",
+    "d3": "^7.9.0",
+    "express": "^4.21.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "snowflake-sdk": "^3.3.0",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2",
+    "yaml": "^2.6.1",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/d3": "^7.4.3",
+    "@types/express": "^5.0.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.9"
+  }
+}
