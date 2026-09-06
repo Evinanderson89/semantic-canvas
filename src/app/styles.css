@@ -35,7 +35,12 @@ button{font:inherit;cursor:pointer}
 .sidebar{grid-column:1}
 .main{grid-column:2}
 .inspector{grid-column:3}
-.main{overflow:auto;min-width:0}
+/* flex column, not just a block box: .main stacks a topbar/title/tabs/EditBar
+   above the canvas, and .canvas-scroll needs to fill exactly what's LEFT
+   after those, not 100% of .main's own height on top of them (that briefly
+   made .main itself the scroller again, with .canvas-scroll's box bleeding
+   past .main's bottom edge -- see .canvas-scroll's own comment). */
+.main{overflow:auto;min-width:0;display:flex;flex-direction:column}
 
 /* ----------------------------------------------------------- sidebar -- */
 .sidebar{background:var(--panel);border-right:1px solid var(--line);
@@ -109,13 +114,22 @@ button{font:inherit;cursor:pointer}
 .react-grid-item{display:flex}
 .react-grid-item > div{width:100%;height:100%}
 .react-grid-item.react-grid-placeholder{background:var(--accent);opacity:.16;border-radius:10px}
+/* No overflow:hidden here on purpose -- .body below already clips the
+   chart on its own (see its comment), and a tile's own popovers (Explain,
+   Beautify, Export) are absolutely positioned children of THIS element, so
+   clipping here cut off any popover taller than the tile itself -- exactly
+   what a short KPI card's popover needs to do when the agent has more to
+   say than fits inside a 156px-tall tile. */
 .tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;
-  display:flex;flex-direction:column;overflow:hidden;width:100%;height:100%}
+  display:flex;flex-direction:column;width:100%;height:100%;position:relative}
 .tile header{display:flex;align-items:center;gap:8px;padding:11px 14px;
   border-bottom:1px solid var(--line);cursor:grab}
 .tile header h4{margin:0;font-size:13px;font-weight:600;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .tile .ms{font-size:10.5px;color:var(--ink-3);flex:none}
+/* Same size as .ms (the query-time badge) but a warning tint -- this one's
+   worth actually reading, not just incidental timing info. */
+.tile .partial-note{color:var(--warn,#d8a24d);cursor:help;margin-left:6px}
 .actions{display:flex;gap:2px;opacity:0;transition:opacity .12s}
 .tile:hover .actions{opacity:1}
 .actions button{background:none;border:0;color:var(--ink-3);padding:3px 4px;border-radius:4px}
@@ -155,6 +169,9 @@ td{padding:5px 10px 5px 0;border-bottom:1px solid var(--line);font-variant-numer
 .entry h2{font-size:28px;margin:0 0 8px;letter-spacing:-.02em}
 .entry .lede{color:var(--ink-2);margin:0 0 32px;max-width:64ch;line-height:1.6}
 .paths{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+/* A bonus third option, not equal weight to the two primary entry points --
+   spans its own row below them rather than squeezing into a 3-column grid. */
+.path.demo{grid-column:1 / -1}
 .path{text-align:left;background:var(--surface);border:1px solid var(--line);
   border-radius:10px;padding:20px;color:inherit}
 .path:hover{border-color:var(--accent)}
@@ -246,14 +263,27 @@ td{padding:5px 10px 5px 0;border-bottom:1px solid var(--line);font-variant-numer
 .editbar .lock.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
 
 /* ------------------------------------------------------------- canvas -- */
-.canvas-scroll{overflow:auto;padding:22px;background:var(--ground)}
+/* flex:1 + min-height:0 (not just overflow:auto) is what makes THIS box the
+   one that actually clips and scrolls, sized to whatever's left of .main
+   after its topbar/title/tabs/EditBar siblings -- without it, .canvas-scroll
+   just grows to fit .canvas-stage and .main scrolls instead, leaving
+   .canvas-scroll's own scrollHeight/clientHeight always equal and any
+   scrollRef-based scrollTo() on it a silent no-op. min-height:0 overrides a
+   flex item's default min-height:auto, which would otherwise still let this
+   grow past its share of .main and defeat the whole thing the same way. */
+.canvas-scroll{overflow:auto;padding:22px;background:var(--ground);flex:1;min-height:0}
 .canvas-stage{position:relative}
 .canvas-surface{position:relative;background:var(--panel);border:1px solid var(--line);
   border-radius:10px;overflow:hidden;
   background-image:radial-gradient(var(--line) 1px,transparent 1px);
   background-position:-1px -1px}
 .canvas-surface.locked{background-image:none}
-.node{position:absolute}
+.node{position:absolute;transition:left .18s ease,top .18s ease,width .18s ease,height .18s ease}
+/* Suppressed for the duration of an actual drag (Canvas.tsx toggles this
+   directly, not through React state) -- otherwise the transition fights
+   the cursor and dragging feels laggy. Only meant for a position/size
+   change nothing directly touched: the tile-overlap self-healing reflow. */
+.canvas-surface.dragging .node{transition:none}
 .node-inner{width:100%;height:100%;cursor:move}
 .canvas-surface.locked .node-inner{cursor:default}
 .node.selected{outline:1.5px solid var(--accent);outline-offset:1px;border-radius:11px}
@@ -297,6 +327,32 @@ td{padding:5px 10px 5px 0;border-bottom:1px solid var(--line);font-variant-numer
 .pop.static{width:100%;margin-top:4px;box-shadow:none;padding:0;
   display:flex;flex-direction:column;gap:4px}
 .iv.agent-ask{width:min(480px,92vw)}
+
+/* ------------------------------------------------- agent chat -- */
+.agent-chat-toggle{position:fixed;right:20px;bottom:20px;z-index:55;width:44px;height:44px;
+  border-radius:50%;background:var(--accent);border:1px solid var(--accent);color:#fff;
+  display:grid;place-items:center;box-shadow:0 4px 16px rgba(0,0,0,.35);cursor:pointer}
+.agent-chat-toggle:hover{filter:brightness(1.08)}
+.agent-chat-panel{position:fixed;right:20px;bottom:76px;z-index:55;width:min(360px,90vw);
+  height:min(480px,70vh);background:var(--panel);border:1px solid var(--line-2);
+  border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.4);display:flex;flex-direction:column;overflow:hidden}
+.agent-chat-panel header{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px;border-bottom:1px solid var(--line);font-weight:600;font-size:13px}
+.agent-chat-panel header button.icon{background:none;border:none;color:var(--ink-3);cursor:pointer}
+.agent-chat-log{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.agent-chat-empty{color:var(--ink-3);font-size:12.5px;line-height:1.5}
+.agent-chat-msg{font-size:13px;line-height:1.5;padding:7px 10px;border-radius:9px;
+  max-width:88%;white-space:pre-wrap;word-break:break-word}
+.agent-chat-msg.user{align-self:flex-end;background:var(--accent);color:#fff}
+.agent-chat-msg.assistant{align-self:flex-start;background:var(--surface-2);border:1px solid var(--line)}
+.agent-chat-msg.error{align-self:stretch;background:var(--accent-soft);color:#e05252;border:1px solid #e0525240}
+.agent-chat-thinking{color:var(--ink-3)}
+.agent-chat-input{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}
+.agent-chat-input textarea{flex:1;resize:none;background:var(--surface);border:1px solid var(--line-2);
+  border-radius:8px;padding:7px 9px;font:inherit;font-size:12.5px;color:inherit}
+.agent-chat-input button.primary{align-self:flex-end;background:var(--accent);border:1px solid var(--accent);
+  color:#fff;border-radius:8px;padding:7px 12px;font-weight:600;font-size:12.5px;cursor:pointer}
+.agent-chat-input button.primary:disabled{opacity:.5;cursor:default}
 
 /* ------------------------------------------------- non-data tiles -- */
 .tile.bare{background:transparent;border:1px dashed transparent;position:relative}
@@ -625,3 +681,64 @@ button.img-empty:hover{border-color:var(--accent);color:var(--accent)}
 .xf.clear{border-style:dashed;color:var(--ink-3);border-color:var(--line-2)}
 .who-sel{background:var(--surface-2);border:1px solid var(--line);border-radius:6px;
   color:var(--ink);padding:4px 7px;font:inherit;font-size:12px;flex:1;min-width:0}
+
+/* ------------------------------------------------------------ explain -- */
+.explain-pop{position:absolute;top:44px;left:8px;right:8px;z-index:6;
+  max-height:min(70vh,520px);overflow:auto;
+  background:var(--panel);border:1px solid var(--line-2);border-radius:10px;
+  box-shadow:0 18px 44px -16px rgba(0,0,0,.75)}
+.explain-head{display:flex;align-items:center;justify-content:space-between;
+  padding:8px 10px;border-bottom:1px solid var(--line);font-size:11px;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:700}
+.explain-head button.icon{background:none;border:none;color:var(--ink-3);cursor:pointer}
+.explain-body{margin:0;padding:10px;font-size:12.5px;line-height:1.55;color:var(--ink)}
+.explain-body p{margin:0 0 6px}
+.explain-body p:last-child{margin-bottom:0}
+.explain-body ul{margin:0 0 6px;padding-left:16px}
+.explain-body ul:last-child{margin-bottom:0}
+.explain-body li{margin-bottom:2px}
+.explain-body code{background:var(--surface-2);padding:1px 4px;border-radius:4px;
+  font-size:11px;font-family:ui-monospace,Menlo,monospace}
+.explain-body.loading{color:var(--ink-3)}
+.explain-body.error{color:#e05252}
+.export-pop{width:min(220px,90%)}
+.export-opts{display:flex;flex-direction:column;padding:6px}
+.export-opts button{text-align:left;background:none;border:none;color:inherit;
+  padding:8px 9px;border-radius:7px;font:inherit;font-size:12.5px;cursor:pointer}
+.export-opts button:hover{background:var(--surface-2)}
+.beautify-pop{width:min(300px,92%)}
+.beautify-body{padding-bottom:6px}
+.beautify-suggestion{padding:0 10px 8px}
+.beautify-suggestion .explain-body{padding:0 0 8px}
+.explain-body.hint{color:var(--ink-3);font-size:11.5px}
+.dash-beautify-pop{position:fixed;top:120px;right:24px;width:min(360px,92vw);
+  max-height:min(70vh,560px);overflow:auto;z-index:20;
+  background:var(--panel);border:1px solid var(--line-2);border-radius:10px;
+  box-shadow:0 18px 44px -16px rgba(0,0,0,.75)}
+.noise-hit{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:6px 0}
+.noise-hit span{font-size:12.5px;color:var(--ink);flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.story-actions{display:flex;gap:6px;padding:2px 0 6px}
+.story-notes{margin:4px 0 0;padding:0 0 0 16px;font-size:12px;color:var(--ink-2);
+  line-height:1.6}
+.story-additions{margin-top:6px}
+.addition-item{padding:6px 0;border-top:1px solid var(--line)}
+.addition-item .explain-body{padding:0 0 6px}
+button.primary.small{background:var(--accent);border:1px solid var(--accent);color:#fff;
+  border-radius:7px;padding:6px 10px;font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+button.primary.small:hover{filter:brightness(1.08)}
+button.link-btn{display:block;width:100%;text-align:left;background:none;border:none;
+  color:var(--accent);padding:9px 10px;font:inherit;font-size:12.5px;cursor:pointer;
+  border-top:1px solid var(--line)}
+button.link-btn:hover:not(:disabled){background:var(--surface-2)}
+button.link-btn:disabled{opacity:.6;cursor:default}
+
+/* ---------------------------------------------------------- drill-down -- */
+.drill-crumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;
+  padding:0 12px 6px;font-size:11px;color:var(--ink-3)}
+.drill-crumbs i{font-style:normal;margin:0 2px;color:var(--ink-3)}
+.drill-crumbs .crumb{background:none;border:none;padding:1px 3px;border-radius:4px;
+  color:var(--accent);cursor:pointer;font:inherit;font-size:11px}
+.drill-crumbs .crumb:hover:not(:disabled){background:var(--accent-soft)}
+.drill-crumbs .crumb:disabled{color:var(--ink-2);cursor:default;font-weight:600}

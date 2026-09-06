@@ -108,15 +108,25 @@ export function suggestDashboard(
       .sort((a, b) => b[1].length - a[1].length)
       .slice(0, 3);
     ordered.forEach(([unit, ms], i) => {
+      // An ODD count (3 unit-class groups, the common case) leaves the last
+      // one alone in its row -- half-width with no partner, same dead
+      // margin down the right half of the canvas that arrange()'s own
+      // stretch cap exists to avoid elsewhere. Detected directly rather
+      // than routed through arrange(): this hand-rolled layout interleaves
+      // several DIFFERENT-height sections (KPIs, trends, breakdowns) back
+      // to back, and repacking by width alone, the way arrange() does,
+      // risks welding a shorter tile from the NEXT section into this row's
+      // leftover space instead.
+      const alone = i % 2 === 0 && i === ordered.length - 1;
       tiles.push({
         id: id(),
         title: `${ms.slice(0, 3).map((m) => m.label).join(", ")} over time`,
         metrics: ms.slice(0, 3).map((m) => m.name),
         dimensions: [`${grain}:${tcol}`],
         layout: {
-          x: ordered.length === 1 ? PAD : colX(i % 2, 2),
+          x: ordered.length === 1 || alone ? PAD : colX(i % 2, 2),
           y: y + Math.floor(i / 2) * (300 + GAP),
-          w: ordered.length === 1 ? span(1, 1) : span(1, 2),
+          w: ordered.length === 1 || alone ? span(1, 1) : span(1, 2),
           h: 300, z: 1,
         },
       });
@@ -166,8 +176,15 @@ export function suggestDashboard(
   }
 
   return {
+    // A picked table used to only steer which metrics get featured, not the
+    // title -- the client papered over that by showing a synthetic
+    // "${table} Dashboard" instead of this title whenever a table was
+    // picked, which also meant a LATER edit to the real title (Beautify
+    // dashboard's suggested title, say) had nowhere visible to land: the
+    // override kept winning regardless of what this field actually held.
     title: opts.text?.trim()
       ? opts.text.trim().replace(/^\w/, (c) => c.toUpperCase()).slice(0, 70)
+      : opts.table ? `${prettyTitle(opts.table)} Dashboard`
       : `${prettifyModelName(model.name)} overview`,
     description: `Suggested from ${Object.keys(model.metrics).length} metrics across ` +
       `${Object.keys(model.tables).length} tables in the ${model.source} semantic layer.`,

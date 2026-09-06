@@ -81,8 +81,15 @@ export async function connectOne(s: SourceConfig): Promise<Source> {
   }
 }
 
+/** Config for the embedded in-app agent (src/agent/loop.ts) -- a pluggable
+ *  port the same way a data source is: provider + model in sources.yaml,
+ *  credential resolved from .env via the same ${VAR} expansion. Absent (or
+ *  apiKey unset) just means that agent isn't available; nothing else here
+ *  depends on it. */
+export interface AiConfig { provider: string; model: string; apiKey: string }
+
 export async function loadSources(path: string): Promise<{
-  sources: Source[]; defaultPrincipal: string | null;
+  sources: Source[]; defaultPrincipal: string | null; ai: AiConfig | null;
 }> {
   let cfg: any = {};
   try {
@@ -95,7 +102,12 @@ export async function loadSources(path: string): Promise<{
   }
   const list: SourceConfig[] = cfg.sources ?? [];
   const sources = await Promise.all(list.map(connectOne));
-  return { sources, defaultPrincipal: cfg.defaultPrincipal ?? null };
+  const ai: AiConfig | null = cfg.ai ? {
+    provider: String(cfg.ai.provider ?? "anthropic"),
+    model: String(cfg.ai.model ?? "claude-opus-5"),
+    apiKey: expand(String(cfg.ai.apiKey ?? "")),
+  } : null;
+  return { sources, defaultPrincipal: cfg.defaultPrincipal ?? null, ai };
 }
 
 /** What the UI needs to render a source picker, without leaking credentials. */

@@ -127,6 +127,15 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
         </p>
       )}
 
+      <h4 className="ex-h">AI agent</h4>
+      <p className="tbl-body-p">
+        The embedded chat panel on the canvas -- not the MCP port, which needs no key of its own.
+        Tested before it saves, the same way a source is: the key is checked against Anthropic
+        before it's written to <code className="mono">.env</code> (never to{" "}
+        <code className="mono">sources.yaml</code>).
+      </p>
+      <AiAgentSection />
+
       <h4 className="ex-h">Row-level security</h4>
       <p className="tbl-body-p">
         Every query is scoped server-side to the acting principal on top of whatever the client
@@ -157,6 +166,120 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
         {principals.length === 0 && <span className="conn-meta mono">none configured</span>}
       </div>
     </div>
+  );
+}
+
+interface AiStatus { configured: boolean; provider: string; model: string }
+
+/**
+ * Same shape as adding a source: nothing is saved until the server has
+ * validated it (here, a models.retrieve() auth check rather than a trial
+ * connection), and the credential never round-trips back to the browser
+ * once it's set -- this section only ever knows "configured" or not.
+ */
+function AiAgentSection() {
+  const [status, setStatus] = useState<AiStatus | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
+  const refresh = () => fetch("/api/agent/status").then((r) => r.json()).then(setStatus).catch(() => {});
+  useEffect(() => { refresh(); }, []);
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      const r = await fetch("/api/agent/key", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ apiKey: key }),
+      });
+      const d = await r.json();
+      if (!r.ok) { setError(d.error ?? "Could not validate that key."); return; }
+      setKey("");
+      setEditing(false);
+      refresh();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    try {
+      await fetch("/api/agent/key", { method: "DELETE" });
+      setConfirmRemove(false);
+      refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!status) return null;
+
+  return (
+    <>
+      <div className="mlist">
+        <div className="mrow">
+          <div className="mrow-top">
+            <span className={"dot " + (status.configured ? "ready" : "error")} />
+            <b>Embedded agent</b>
+            <span className="base mono">{status.provider}/{status.model}</span>
+            {status.configured
+              ? <span className="active-badge">Configured</span>
+              : <span className="active-badge err">Not configured</span>}
+            {!editing && !confirmRemove && (
+              <>
+                <button className="link conn-action" onClick={() => setEditing(true)}>
+                  {status.configured ? "Replace key" : "Add key"}
+                </button>
+                {status.configured && (
+                  <button className="link conn-action" onClick={() => setConfirmRemove(true)}>Remove</button>
+                )}
+              </>
+            )}
+          </div>
+          <p className="mono conn-meta">
+            {status.configured
+              ? "Chat panel is live on the canvas."
+              : "The chat panel on the canvas stays hidden until a key is added."}
+          </p>
+          {confirmRemove && (
+            <div className="conn-confirm">
+              <span>Remove the AI key? The chat panel disappears until a new one is added.</span>
+              <button className="link" disabled={busy} onClick={remove}>
+                {busy ? "Removing…" : "Confirm remove"}
+              </button>
+              <button className="link" disabled={busy} onClick={() => setConfirmRemove(false)}>Cancel</button>
+            </div>
+          )}
+        </div>
+      </div>
+      {editing && (
+        <form className="cform" onSubmit={save}>
+          <div className="cform-grid">
+            <label className="ctl span2">
+              <span>Anthropic API key</span>
+              <input required type="password" value={key} placeholder="sk-ant-…" autoFocus
+                     onChange={(e) => setKey(e.target.value)} />
+            </label>
+          </div>
+          <div className="cform-actions">
+            <button type="submit" className="primary" disabled={busy}>
+              {busy ? "Validating…" : "Save"}
+            </button>
+            <button type="button" className="ghost" disabled={busy}
+                    onClick={() => { setEditing(false); setKey(""); setError(null); }}>Cancel</button>
+          </div>
+          {error && <div className="cform-err">{error}</div>}
+        </form>
+      )}
+    </>
   );
 }
 

@@ -5,15 +5,20 @@ import { Picker } from "./Picker.tsx";
 import { Sidebar, prettyTable } from "./Sidebar.tsx";
 import { Canvas } from "../canvas/Canvas.tsx";
 import { EditBar } from "./EditBar.tsx";
+import { DashboardBeautify } from "./DashboardBeautify.tsx";
 import { InsertMenu } from "./InsertMenu.tsx";
 import { Interview } from "./Interview.tsx";
 import { AgentQuestions } from "./AgentQuestions.tsx";
+import { AgentChat } from "./AgentChat.tsx";
 import { Inspector } from "./Inspector.tsx";
 import { MetricRegistry, DataModel } from "./Explore.tsx";
 import { Connections, type Principal, type RlsPolicy, type SourceInfo } from "./Connections.tsx";
 import type { Brief } from "../suggest/match.ts";
 import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
+import { applyLayout } from "../canvas/layouts.ts";
+import { demoDashboard, demoDashboardAvailable } from "../suggest/demo.ts";
+import { downloadPng, slugForFilename } from "./export.ts";
 import { metricsByTable, prettifyModelName, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
@@ -79,6 +84,28 @@ export function App() {
   const [openList, setOpenList] = useState(false);
   const [dirty, setDirty] = useState(false);
 
+  // Per-tile drill-down stacks. Ephemeral view state, keyed by tile id, not
+  // part of the saved spec -- the same reasoning as crossFilters vs. a
+  // tile's own `where`. Never explicitly cleared on dashboard switch: a
+  // stale entry for a tile id from a previous dashboard is simply never
+  // looked up again once that tile isn't on screen, so it's inert rather
+  // than a leak worth the bookkeeping to null out.
+  const [drills, setDrills] = useState<Record<string, import("./drill.ts").DrillEntry[]>>({});
+
+  // Same status the AgentChat toggle polls for -- whether "Explain this" on
+  // a tile should even offer itself, rather than showing a button that
+  // always 503s. Polled independently rather than lifting AgentChat's own
+  // state up: cheap, and keeps that component self-contained.
+  const [aiAvailable, setAiAvailable] = useState(false);
+  React.useEffect(() => {
+    let stopped = false;
+    const poll = () => fetch("/api/agent/status").then((r) => r.json())
+      .then((d) => { if (!stopped) setAiAvailable(Boolean(d.configured)); }).catch(() => {});
+    poll();
+    const id = setInterval(poll, 4000);
+    return () => { stopped = true; clearInterval(id); };
+  }, []);
+
   // Undo history. Every edit pushes; the canvas is a design surface and Cmd+Z is
   // the first thing anyone tries after moving something by accident.
   const past = React.useRef<DashboardSpec[]>([]);
@@ -127,6 +154,22 @@ export function App() {
     fetch("/api/model").then((r) => r.json()).then(setModel);
     refreshSaved();
   }, [refreshSaved]);
+
+  const [exportingPng, setExportingPng] = useState(false);
+  const exportDashboardPng = async () => {
+    const surface = scrollRef.current?.querySelector<HTMLElement>(".canvas-surface");
+    if (!surface || exportingPng) return;
+    setExportingPng(true);
+    try {
+      await downloadPng(`${slugForFilename(dash?.title ?? "dashboard")}.png`, surface);
+    } catch (e: any) {
+      // A one-off failure (e.g. a cross-origin image on the canvas) isn't
+      // worth a whole toast system -- logged for anyone who hits it.
+      console.error("dashboard PNG export failed:", e);
+    } finally {
+      setExportingPng(false);
+    }
+  };
 
   const save = async () => {
     if (!dash) return;
@@ -177,11 +220,113 @@ export function App() {
     ? dash.tiles.find((t) => t.id === selected[0]) ?? null : null;
   const inspecting = !!selectedTile && !canvas.locked;
 
+  // Selecting a tile opens the Inspector, which takes real width out of the
+  // canvas viewport (the `.shell` grid's third column) -- so a tile sitting
+  // near the right edge, fully visible a moment ago, can end up with part
+  // of itself behind the panel that just opened to edit it. Scrolling alone
+  // can't fix this when the tile itself is wider than what's left of the
+  // viewport -- bringing the right edge into view pushes the left edge out,
+  // and vice versa, there's no scroll position that shows both. So this
+  // shrinks zoom just enough to make the WHOLE tile fit first (never grows
+  // it -- only ever gives back room the Inspector took), the same clamped
+  // fit-to-available-space `fit()` already does for the whole canvas.
+  useEffect(() => {
+    if (!selectedTile) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const pad = 16;
+    const { w, h } = selectedTile.layout;
+    const viewW = el.clientWidth, viewH = el.clientHeight;
+    const neededW = w + pad * 2, neededH = h + pad * 2;
+    if (neededW * zoom > viewW || neededH * zoom > viewH) {
+      // Floor, not round, and stop here for this pass -- the resulting
+      // reflow re-fires this same effect (zoom is a dependency), and only
+      // THEN is it safe to measure the real DOM below: rounding up, or
+      // trusting the arithmetic without a real re-measure, can leave the
+      // tile a few px past the very edge it was just rescued from (fixed
+      // chrome around the canvas -- padding, the surface's own margin --
+      // doesn't scale with zoom the way the tile itself does).
+      const z = Math.floor(Math.max(0.25, Math.min(zoom, viewW / neededW, viewH / neededH)) * 100) / 100;
+      if (z < zoom) { setZoom(z); return; }
+    }
+    // Measured from the actual rendered node, not reconstructed from the
+    // layout spec's x/y/w/h -- that formula would have to know every bit of
+    // fixed chrome between the canvas edge and the tile, and getting one
+    // wrong is exactly how the first version of this effect still left the
+    // tile a few pixels into the Inspector.
+    const node = el.querySelector<HTMLElement>(".node.selected");
+    if (!node) return;
+    const elRect = el.getBoundingClientRect(), nodeRect = node.getBoundingClientRect();
+    let { scrollLeft, scrollTop } = el;
+    const left = nodeRect.left - elRect.left + scrollLeft - pad;
+    const top = nodeRect.top - elRect.top + scrollTop - pad;
+    const right = nodeRect.right - elRect.left + scrollLeft + pad;
+    const bottom = nodeRect.bottom - elRect.top + scrollTop + pad;
+    if (right - scrollLeft > viewW) scrollLeft = right - viewW;
+    if (left < scrollLeft) scrollLeft = left;
+    if (bottom - scrollTop > viewH) scrollTop = bottom - viewH;
+    if (top < scrollTop) scrollTop = top;
+    el.scrollTo({ left: Math.max(0, scrollLeft), top: Math.max(0, scrollTop), behavior: "auto" });
+  }, [selectedTile?.id, inspecting, zoom]);
+
   /** Zoom so the authored canvas fits the space actually available. */
   const fit = React.useCallback(() => {
     const avail = (mainRef.current?.clientWidth ?? 900) - 44;
     setZoom(Math.max(0.25, Math.min(1, Math.round((avail / canvas.width) * 100) / 100)));
   }, [canvas.width]);
+
+  // A fresh `dash` from `/api/suggest` is exactly when the editor mounts for
+  // the first time -- switching away from the Entry screen, not just
+  // updating a tile within it. A bare `requestAnimationFrame(fit)` fired
+  // right at fetch-resolution time raced that mount: React's commit for
+  // the new `dash` (and the DOM it brings -- `.main`, the canvas surface)
+  // isn't guaranteed to have landed by the time that single rAF callback
+  // runs, so `fit()` could measure `mainRef`'s width from the OLD screen
+  // (the Entry page's `<main>`, wider, no sidebar categories yet) --
+  // computing a zoom that fits THAT, not the dashboard actually on screen,
+  // and leaving a wide suggested dashboard overflowing the real viewport
+  // at 100%. A `useEffect` keyed on `dash` is guaranteed by React to run
+  // AFTER the DOM for that render has committed, so `mainRef.current` is
+  // always the real, current editor layout by the time this fires. Only
+  // armed by `pendingFit` -- an ordinary tile edit also changes `dash` and
+  // must NOT re-fit, or every edit would silently undo a zoom level the
+  // user set on purpose.
+  const pendingFit = React.useRef(false);
+  useEffect(() => {
+    if (!pendingFit.current) return;
+    pendingFit.current = false;
+    fit();
+  }, [dash, fit]);
+
+  // Same race, different trigger: adding a tile below existing content
+  // (dropPoint's "below everything" fallback, see growCanvasFor above) can
+  // grow `canvas.height` in the very same call -- but that's a SEPARATE
+  // `setCanvas` state update, not guaranteed to have reached the DOM by
+  // the time a scroll immediately afterward reads `.canvas-scroll`'s
+  // scrollHeight. Measured directly once: `el.scrollTo()` right after
+  // `growCanvasFor()` left `scrollHeight === clientHeight` (the container
+  // hadn't grown yet), so the scroll had nothing to move into and silently
+  // no-opped. Deferred to a `useEffect` keyed on `dash` for the same
+  // reason `pendingFit` is -- guaranteed to run after React has actually
+  // committed both the new tile and the taller canvas.
+  const pendingReveal = React.useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  useEffect(() => {
+    const at = pendingReveal.current;
+    if (!at) return;
+    pendingReveal.current = null;
+    const el = scrollRef.current;
+    if (!el) return;
+    const pad = 16;
+    const left = at.x * zoom - pad, top = at.y * zoom - pad;
+    const right = (at.x + at.w) * zoom + pad, bottom = (at.y + at.h) * zoom + pad;
+    let { scrollLeft, scrollTop } = el;
+    const viewW = el.clientWidth, viewH = el.clientHeight;
+    if (right - scrollLeft > viewW) scrollLeft = right - viewW;
+    if (left < scrollLeft) scrollLeft = left;
+    if (bottom - scrollTop > viewH) scrollTop = bottom - viewH;
+    if (top < scrollTop) scrollTop = top;
+    el.scrollTo({ left: Math.max(0, scrollLeft), top: Math.max(0, scrollTop), behavior: "auto" });
+  }, [dash, zoom]);
 
   useEffect(() => { fetch("/api/model").then((r) => r.json()).then(setModel); }, []);
 
@@ -191,8 +336,8 @@ export function App() {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...brief, width: canvas.width }),
     }).then((r) => r.json()).then((d) => {
+      pendingFit.current = true;
       setDash(d); setRefreshed(new Date()); setTable(brief.table ?? null);
-      requestAnimationFrame(fit);
       if (brief.grain) setGrain(brief.grain);
     });
   }, [canvas.width]);
@@ -201,9 +346,9 @@ export function App() {
     const q = new URLSearchParams({ grain: g, width: String(canvas.width),
                                     ...(t ? { table: t } : {}) });
     return fetch(`/api/suggest?${q}`).then((r) => r.json()).then((d) => {
-      setDash(d); setRefreshed(new Date());
       // Show the whole authored canvas rather than clipping it at the viewport.
-      requestAnimationFrame(fit);
+      pendingFit.current = true;
+      setDash(d); setRefreshed(new Date());
     });
   }, [canvas.width]);
 
@@ -227,6 +372,12 @@ export function App() {
   const growCanvasFor = (bottom: number) => {
     if (bottom > canvas.height) setCanvas((c) => ({ ...c, height: Math.round(bottom) }));
   };
+  // The same "below everything" fallback dropPoint uses to avoid hiding a
+  // new tile UNDER existing content can just as easily place it below the
+  // current SCROLL position instead -- growing the canvas fixes the tile
+  // being clipped past canvas.height, but does nothing for a viewport that
+  // simply never scrolled there. Arms the `pendingReveal` effect above
+  // rather than scrolling right here -- see its own comment for why.
   const addTile = (t: Omit<TileSpec, "id" | "layout">, size?: { w: number; h: number }) => {
     if (!dash) return;
     const id = nextId();
@@ -235,6 +386,7 @@ export function App() {
     commit({ ...dash, tiles: [...dash.tiles, { ...t, id, layout: { ...at, w, h, z: 1 } }] });
     setSelected([id]);
     growCanvasFor(at.y + h + 24);
+    pendingReveal.current = { x: at.x, y: at.y, w, h };
   };
 
   const addMany = (drafts: Omit<TileSpec, "id" | "layout">[]) => {
@@ -247,6 +399,7 @@ export function App() {
     commit({ ...dash, tiles: [...dash.tiles, ...made] });
     setSelected(made.map((m) => m.id));
     growCanvasFor(y + 156 + 24);
+    pendingReveal.current = { x: PAD, y, w: canvas.width - PAD * 2, h: 156 };
   };
 
   return (
@@ -287,7 +440,11 @@ export function App() {
         ) : !dash ? (
           <Entry model={model} onSuggest={() => setInterview(true)}
                  onScratch={() => { setDash({ title: "Untitled dashboard", tiles: [] });
-                                    setRefreshed(new Date()); }} />
+                                    setRefreshed(new Date()); }}
+                 onDemo={demoDashboardAvailable(model) ? () => {
+                   pendingFit.current = true;
+                   setDash(demoDashboard()); setRefreshed(new Date());
+                 } : null} />
         ) : (
           <>
             <div className="topbar">
@@ -317,15 +474,18 @@ export function App() {
                 <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <rect x="7" y="3" width="10" height="12" rx="2" /><path d="M13 17H5a2 2 0 0 1-2-2V7" /></svg>
               </button>
+              <button className="icon" title={exportingPng ? "Exporting…" : "Export dashboard as PNG"}
+                      disabled={exportingPng} onClick={exportDashboardPng}>
+                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 15h12" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </button>
               <button className="icon primary" title="Add tile" onClick={() => setPicking(true)}>
                 <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8">
                   <path d="M10 4v12M4 10h12" /></svg>
               </button>
             </div>
 
-            <h1 className="dash-title">
-              {table ? `${prettyTable(table)} Dashboard` : dash.title}
-            </h1>
+            <h1 className="dash-title">{dash.title}</h1>
 
             <div className="tabs">
               {tabs.map((t) => (
@@ -355,7 +515,9 @@ export function App() {
             {!canvas.locked && (
               <EditBar canvas={canvas} onCanvas={setCanvas} zoom={zoom} onZoom={setZoom} onFit={fit}
                        selected={selected} tiles={dash.tiles}
-                       onTiles={(t) => commit({ ...dash, tiles: t })} />
+                       onTiles={(t) => commit({ ...dash, tiles: t })}
+                       beautify={<DashboardBeautify dash={dash} canvas={canvas} model={model}
+                                                     aiAvailable={aiAvailable} onDash={commit} />} />
             )}
             {canvas.locked && (
               <div className="editbar slim">
@@ -399,9 +561,31 @@ export function App() {
                               crossFilters: [
                                 ...(d.crossFilters ?? []).filter((x) => x.field !== f.field), f],
                             }))}
+                            aiAvailable={aiAvailable}
+                            drill={drills[t.id]}
+                            onDrill={(entry) => setDrills((d) => ({ ...d, [t.id]: [...(d[t.id] ?? []), entry] }))}
+                            onDrillUp={(toIndex) => setDrills((d) => ({
+                              ...d, [t.id]: (d[t.id] ?? []).slice(0, toIndex) }))}
                             onRemove={(id) => commit({ ...dash, tiles: dash.tiles.filter((x) => x.id !== id) })}
-                            onUpdate={(next) => commit({ ...dash,
-                              tiles: dash.tiles.map((x) => (x.id === next.id ? next : x)) })} />
+                            onUpdate={(next) => {
+                              const merged = dash.tiles.map((x) => (x.id === next.id ? next : x));
+                              // A tile's own edit can change its HEIGHT (Beautify's
+                              // "Remove breakdown"/"Show over time" resize the tile
+                              // to match what it now shows) without knowing what
+                              // sits below it -- so a tile that grew, or a neighbor
+                              // that never moved to make room, can end up visually
+                              // overlapping. Only reflows when that update actually
+                              // produced a collision, never on an ordinary edit that
+                              // didn't touch layout at all.
+                              const collided = merged.some((t) => t.id !== next.id && overlaps(t.layout, next.layout));
+                              // stretch:false -- this is a correction, not the
+                              // user asking for a clean layout. Stretching the
+                              // tile that just grew would only make the NEXT
+                              // resize's collision harder to resolve without
+                              // stretching again, the same compounding this
+                              // option exists to avoid for repeated additions.
+                              commit({ ...dash, tiles: collided ? applyLayout("grid", merged, canvas.width, false) : merged });
+                            }} />
                       </TileBoundary>
                     )} />
           </>
@@ -437,6 +621,7 @@ export function App() {
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
+      <AgentChat />
       {dash && !canvas.locked && (
         <InsertMenu model={model} onInsert={addTile} onInsertMany={addMany}
                     onOpenPicker={() => setPicking(true)} />
@@ -446,7 +631,7 @@ export function App() {
   );
 }
 
-function Entry({ model, onSuggest, onScratch }: any) {
+function Entry({ model, onSuggest, onScratch, onDemo }: any) {
   return (
     <div className="entry">
       <h2>{prettifyModelName(model.name)}</h2>
@@ -468,6 +653,18 @@ function Entry({ model, onSuggest, onScratch }: any) {
           <p>An empty canvas. Add tiles by picking metrics and dimensions; the
              picker only offers combinations that compile.</p>
         </button>
+        {/* Only offered for a model with the specific bundled-sample tables
+            and metrics this fixed spec names (see demo.ts) -- a real
+            connected source just doesn't get this card, rather than
+            showing one that would fail to compile against it. */}
+        {onDemo && (
+          <button className="path demo" onClick={onDemo}>
+            <h3>See Beautify in action →</h3>
+            <p>A deliberately rough dashboard -- a noisy chart, a breakdown that
+               doesn't actually vary, a chart-kind mismatch, and a messy layout.
+               Try Beautify and Smart Arrange on it.</p>
+          </button>
+        )}
       </div>
     </div>
   );

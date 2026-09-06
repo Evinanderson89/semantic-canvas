@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { duckglueAdapter } from "../src/semantic/duckglue.ts";
 import { duckdbConnector } from "../src/connectors/duckdb.ts";
-import { compileTile, validateTile } from "../src/compiler/compile.ts";
+import { compileTile, splitPartialPeriods, validateTile } from "../src/compiler/compile.ts";
+import { demoDashboard, demoDashboardAvailable } from "../src/suggest/demo.ts";
 import { metricsByTable, isTemporal, type Model } from "../src/semantic/model.ts";
 import type { Connector } from "../src/connectors/types.ts";
 import type { TileSpec } from "../src/compiler/spec.ts";
@@ -22,9 +23,12 @@ import type { TileSpec } from "../src/compiler/spec.ts";
  * cannot compile is a failure here, by construction, with no imagination
  * required from whoever wrote the test.
  */
+// Defaults to the sample warehouse bundled in this repo (sample-data/), so
+// this runs out of the box on a fresh clone and in CI. MODEL_PATH/LAKE_ROOT
+// still override it for testing against a real, larger warehouse instead.
 const MODEL_PATH = process.env.MODEL_PATH ??
-  join(homedir(), "Github/duckglue/semantic/warehouse.yaml");
-const LAKE_ROOT = process.env.LAKE_ROOT ?? join(homedir(), "Github/duckglue/lake");
+  join(import.meta.dirname, "../sample-data/warehouse.yaml");
+const LAKE_ROOT = process.env.LAKE_ROOT ?? join(import.meta.dirname, "../sample-data/lake");
 const available = existsSync(MODEL_PATH) && existsSync(LAKE_ROOT);
 
 let model: Model;
@@ -103,4 +107,116 @@ describe.skipIf(!available)("every metric in the real model compiles and runs", 
                       `${ms[0].name} by ${dim}`);
     }
   }, 300_000);
+});
+
+describe.skipIf(!available)("demoDashboard (the checked-in Beautify/Smart-Arrange demo)", () => {
+  it("is available against the bundled sample warehouse", () => {
+    expect(demoDashboardAvailable(model)).toBe(true);
+  });
+
+  it("every tile validates and actually runs against the real model", async () => {
+    for (const t of demoDashboard().tiles) await mustRun(t, `demo tile ${t.id}`);
+  }, 60_000);
+
+  it("d2's noisy chart survives being genuinely noisy in the real data", async () => {
+    // Guards the DEMO's premise, not detectNoisy() itself (already covered
+    // in recommend.test.ts) -- if the sample data generator ever changes,
+    // this is what would silently turn d2 from "a real bug to find" into
+    // "just a smooth line", quietly breaking the demo without a code change
+    // anywhere near it.
+    const t = demoDashboard().tiles.find((x) => x.id === "d2")!;
+    const sql = compileTile(model, conn, t);
+    const r = await conn.execute(sql, 500);
+    const idx = r.columns.indexOf("web_sessions");
+    const vals = r.rows.map((row) => Number(row[idx])).filter(Number.isFinite);
+    const range = Math.max(...vals) - Math.min(...vals);
+    const meanAbsStep = vals.slice(1)
+      .reduce((sum, v, i) => sum + Math.abs(v - vals[i]), 0) / (vals.length - 1);
+    expect(meanAbsStep / range).toBeGreaterThan(0.08);
+  });
+
+  it("d3's breakdown survives actually being degenerate in the real data", async () => {
+    const t = demoDashboard().tiles.find((x) => x.id === "d3")!;
+    const sql = compileTile(model, conn, t);
+    const r = await conn.execute(sql, 500);
+    const idx = r.columns.indexOf("new_mrr");
+    const nonZero = r.rows.filter((row) => Number(row[idx]) !== 0);
+    expect(nonZero.length).toBe(1);
+  });
+});
+
+describe.skipIf(!available)("coarsening web_sessions to week drops the partial edge buckets", () => {
+  // Directly what a user saw after clicking d2's own "Switch to week"
+  // suggestion: the real data starts 2024-09-01 and ends 2026-08-31,
+  // neither a Monday, so date_trunc('week', ...) buckets the very first
+  // and last real rows with a week that's mostly outside the data --
+  // Aug 26-Sep 1 has only Sep-1's rows, Aug 31-Sep 6 has only Aug-31's.
+  // Verified against the actual warehouse, not a synthetic fixture, so a
+  // change to the sample data's date range would fail this instead of
+  // quietly making the regression untestable.
+  it("excludes exactly the two partial weeks, and no others", async () => {
+    const t = tile({ metrics: ["web_sessions"], dimensions: ["week:fct_web_sessions.session_date"] });
+    const sql = compileTile(model, conn, t);
+    const r = await conn.execute(sql, 2000);
+    const { rows, partial } = splitPartialPeriods(r);
+    const dateIdx = r.columns.findIndex((c) => c.includes("session_date"));
+    const dates = rows.map((row) => String(row[dateIdx]));
+    expect(dates).not.toContain("2024-08-26");
+    expect(dates).not.toContain("2026-08-31");
+    // Exact count, not just "some were dropped" -- 106 real weeks minus the
+    // 2 partial ones. A loose "at least one excluded" check would still
+    // pass if the fix over- or under-trimmed by one week at either edge.
+    expect(rows.length).toBe(104);
+    expect(partial).toEqual({ start: true, end: true });
+    // Every remaining week should be a real, full one -- none of them
+    // should read anywhere near the single-day totals (365, 602) the
+    // partial buckets had.
+    const valIdx = r.columns.indexOf("web_sessions");
+    const vals = rows.map((row) => Number(row[valIdx]));
+    expect(Math.min(...vals)).toBeGreaterThan(1000);
+  });
+
+  it("keeps every full week that WAS already reading correctly", async () => {
+    // The fix should be a pure trim, not a resize -- a week untouched by
+    // the boundary problem must come back with the exact same total it
+    // always had.
+    const t = tile({ metrics: ["web_sessions"], dimensions: ["week:fct_web_sessions.session_date"] });
+    const sql = compileTile(model, conn, t);
+    const r = await conn.execute(sql, 2000);
+    const { rows } = splitPartialPeriods(r);
+    const dateIdx = r.columns.findIndex((c) => c.includes("session_date"));
+    const valIdx = r.columns.indexOf("web_sessions");
+    const row = rows.find((row) => String(row[dateIdx]) === "2024-09-02");
+    expect(Number(row![valIdx])).toBe(2399);
+  });
+
+  it("reports no trimming at all for a grain that already lines up cleanly", async () => {
+    // month grain here happens to still have partial edges (same reasoning,
+    // different period length) -- day grain is the true negative case,
+    // since compileTile() never wraps it at all.
+    const t = tile({ metrics: ["web_sessions"], dimensions: ["day:fct_web_sessions.session_date"] });
+    const sql = compileTile(model, conn, t);
+    const r = await conn.execute(sql, 2000);
+    expect(r.columns).not.toContain("__partial_start");
+    expect(r.columns).not.toContain("__partial_end");
+    expect(splitPartialPeriods(r).partial).toEqual({ start: false, end: false });
+  });
+
+  it("a data set that's entirely inside one partial period returns zero rows, correctly flagged", async () => {
+    // A 5-day window comfortably inside the MIDDLE of September (not
+    // touching either edge of the month) -- at month grain this is
+    // entirely one bucket whose natural span (the whole of September)
+    // extends both before AND after this narrow real range, so both
+    // flags should be true, and there's no complete month left to show.
+    const t = tile({
+      metrics: ["web_sessions"], dimensions: ["month:fct_web_sessions.session_date"],
+      where: [{ id: "w", field: "fct_web_sessions.session_date", source: "dimension", mode: "range",
+                min: "2024-09-10", max: "2024-09-15" }],
+    });
+    const sql = compileTile(model, conn, t);
+    const r = await conn.execute(sql, 10);
+    const { rows, partial } = splitPartialPeriods(r);
+    expect(rows).toEqual([]);
+    expect(partial).toEqual({ start: true, end: true });
+  });
 });

@@ -37,6 +37,15 @@ export function Canvas({
     if (canvas.locked) return;
     e.stopPropagation();
     (e.target as Element).setPointerCapture?.(e.pointerId);
+    // Direct DOM toggle, not React state -- a drag already fires onChange
+    // (and a re-render) on every pointermove; a state update just to flip
+    // one class would add a second one for no reason. Suppresses the
+    // tile's own position/size transition (added so an automatic reflow --
+    // tile-overlap self-healing -- reads as "the system moved this" rather
+    // than a silent teleport) for exactly the duration a drag is what's
+    // actually moving the tile, so the transition can't fight the cursor
+    // and make dragging feel laggy.
+    surface.current?.classList.add("dragging");
     const ids = selected.includes(id) ? selected : [id];
     if (!selected.includes(id)) onSelect(e.shiftKey ? [...selected, id] : [id]);
     drag.current = {
@@ -88,6 +97,7 @@ export function Canvas({
       if (d?.moved) onCommit(d.before);
       drag.current = null;
       setGuides([]);
+      surface.current?.classList.remove("dragging");
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);

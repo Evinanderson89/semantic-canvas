@@ -56,19 +56,32 @@ export function boundsOf(boxes: Box[]): Box {
 
 /**
  * Repacks a set of boxes into clean top-to-bottom rows within `width`,
- * preserving each box's own size and z -- this fixes overlapping tiles,
- * ragged gaps and drift after a bunch of manual moves, without
- * second-guessing how anything was deliberately sized.
+ * preserving each box's own HEIGHT and z, and its WIDTH relative to the
+ * other boxes sharing its row -- but not its absolute width. A row that
+ * doesn't quite fill `width` on its own stretches every box in it
+ * proportionally to close that gap, rather than leaving the rest of the
+ * row as dead margin: a tile that was twice as wide as its row-mate stays
+ * twice as wide, it just isn't allowed to leave the canvas edge empty
+ * doing it. That dead margin -- one lone chart at half the canvas width
+ * with nothing beside it -- is exactly what "clean rows" is supposed to
+ * rule out, so leaving widths untouched was working against this
+ * function's own job, not respecting deliberate sizing. The stretch
+ * itself is capped well short of the full row, though: a box entirely
+ * alone in its row stretching all the way to the canvas edge trades one
+ * problem (dead margin) for another (a chart with a modest number of
+ * points spread thin across an unnaturally wide tile) -- see the cap
+ * below.
  *
  * Reading order is the CURRENT layout's top-to-bottom, then left-to-right
  * position, not creation order -- so re-arranging keeps roughly the same
  * story a viewer would already read into the jumbled version.
  */
 export function arrange<T extends { layout: Box }>(
-  items: T[], width: number, opts: { pad?: number; gap?: number } = {},
+  items: T[], width: number,
+  opts: { pad?: number; gap?: number; stretch?: boolean } = {},
 ): T[] {
   if (!items.length) return items;
-  const pad = opts.pad ?? 24, gap = opts.gap ?? 16;
+  const pad = opts.pad ?? 24, gap = opts.gap ?? 16, stretch = opts.stretch ?? true;
   const avail = Math.max(1, width - pad * 2);
   const ordered = [...items].sort((a, b) =>
     a.layout.y - b.layout.y || a.layout.x - b.layout.x);
@@ -89,12 +102,44 @@ export function arrange<T extends { layout: Box }>(
   let y = pad;
   for (const r of rows) {
     const rowH = Math.max(...r.map((it) => it.layout.h));
+    const rawWidths = r.map((it) => Math.min(it.layout.w, avail));
+    const rawSum = rawWidths.reduce((a, b) => a + b, 0);
+    const leftover = avail - gap * (r.length - 1) - rawSum;
+    // Grow each box by its own share of the row's raw width -- a box
+    // already twice as wide as its row-mate gets twice as much of the
+    // leftover too, so relative sizing survives even though nothing keeps
+    // its EXACT original width. Capped, not unbounded: a box that ends up
+    // ALONE in its row -- easy to happen after a reorder, since reading
+    // order, not width-compatibility, decides what shares a row -- would
+    // otherwise stretch to fill the entire row on its own, and a chart
+    // with a modest number of points spread across the full canvas width
+    // reads as sparse and thin, not clean. Proportional to `avail`, not a
+    // fixed pixel count, so the cap scales with the canvas instead of
+    // being wrong at both a narrow and a very wide one; never below any
+    // box's own raw width, so this only ever limits a STRETCH, never
+    // shrinks a box that's already bigger than the cap.
+    // Skippable entirely (`stretch: false`): stretching is exactly right
+    // for a deliberate, one-shot "make this look clean" pass (Smart
+    // Arrange, Beautify's "Reorder top to bottom") where the tile set is
+    // final -- but repacking after adding ONE new tile (Beautify's
+    // "Add this tile", applied one at a time and each repacking from
+    // scratch) or after a collision correction is a different situation:
+    // stretching the tile that just became a lone row means the NEXT
+    // addition inherits that wider row and can no longer share it either,
+    // compounding into every addition landing in its own full-width row --
+    // the exact "have to scroll forever" a growing dashboard shouldn't
+    // produce. Leaving raw widths alone there means a same-sized tile added
+    // right after still fits beside it.
+    const cap = Math.max(avail * 0.72, ...rawWidths);
+    const widths = stretch && leftover > 0
+      ? rawWidths.map((w) => Math.min(w + leftover * (w / rawSum), cap))
+      : rawWidths;
     let x = pad;
-    for (const it of r) {
-      const w = Math.min(it.layout.w, avail);
+    r.forEach((it, i) => {
+      const w = widths[i];
       out.push({ ...it, layout: { ...it.layout, x: Math.round(x), y: Math.round(y), w: Math.round(w) } });
       x += w + gap;
-    }
+    });
     y += rowH + gap;
   }
   return out;

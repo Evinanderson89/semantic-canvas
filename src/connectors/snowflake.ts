@@ -82,6 +82,7 @@ export async function snowflakeConnector(
     quote: (i) => `"${i.replace(/"/g, '""')}"`,
     // Snowflake spells this the same as DuckDB, but the unit must be unquoted.
     dateTrunc: (grain, expr) => `DATE_TRUNC(${grain}, ${expr})`,
+    dateAdd: (unit, expr, n) => `DATEADD(${unit}, ${n}, ${expr})`,
     relation: (table) => qualify(table),
 
     async execute(sql: string, limit = 5000): Promise<QueryResult> {

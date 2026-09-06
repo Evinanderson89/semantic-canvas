@@ -76,7 +76,7 @@ export interface TileSpec {
 export type ChartKind =
   | "line" | "area" | "areaStacked"
   | "bar" | "barGrouped" | "barStacked" | "barH" | "barHorizontal"
-  | "scatter" | "heatmap" | "map" | "donut"
+  | "scatter" | "heatmap" | "map" | "donut" | "waterfall" | "funnel" | "smallMultiples" | "combo"
   | "stat" | "kpi" | "table";
 
 export interface DashboardSpec {
@@ -108,8 +108,10 @@ export interface FilterSpec {
   /** discrete = pick from values; range = between bounds. */
   mode: "discrete" | "range";
   values?: (string | number | boolean | null)[];
-  min?: number | null;
-  max?: number | null;
+  /** A date column's range bound is a string ("2026-03-01"), e.g. from a
+   *  drill-down's clicked bucket -- not every range is numeric. */
+  min?: number | string | null;
+  max?: number | string | null;
   exclude?: boolean;
 }
 

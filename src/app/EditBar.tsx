@@ -1,12 +1,18 @@
+import type { ReactNode } from "react";
 import { PRESETS, presetById, type CanvasSpec } from "../canvas/presets.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import { boundsOf } from "../canvas/geometry.ts";
 import { applyBestLayout } from "../canvas/layouts.ts";
 
-export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles }: {
+export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, beautify }: {
   canvas: CanvasSpec; onCanvas: (c: CanvasSpec) => void;
   zoom: number; onZoom: (z: number) => void; onFit: () => void;
   selected: string[]; tiles: TileSpec[]; onTiles: (t: TileSpec[]) => void;
+  /** Dashboard-level Beautify's own trigger button + popover (see
+   *  DashboardBeautify.tsx) -- rendered as a slot rather than built here so
+   *  its state/logic stays in one place, but still lands inside this same
+   *  toolbar row next to Smart Arrange, which is where it visually belongs. */
+  beautify?: ReactNode;
 }) {
   const sel = tiles.filter((t) => selected.includes(t.id));
   const many = sel.length > 1;
@@ -120,13 +126,24 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
       <span className="sep" />
 
       <button className="tgl" onClick={smartArrange} disabled={tiles.length < 2}
-              title="Repack every tile into clean rows, in reading order -- fixes overlap, gaps and drift after a bunch of manual moves">
+              title="Repack every tile into clean rows, in reading order -- fixes overlap, gaps and drift after a bunch of manual moves. Only ever moves and resizes tiles; never changes a metric, dimension, or chart kind.">
         <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6">
           <rect x="3" y="3" width="6" height="6" rx="1" /><rect x="11" y="3" width="6" height="6" rx="1" />
           <rect x="3" y="11" width="14" height="6" rx="1" />
         </svg>
         Smart arrange
       </button>
+
+      {/* A real visual gap, not just adjacent buttons -- these get
+          confused for two settings of the same "clean up the dashboard"
+          action often enough (they sat with no separator at all before
+          this) that a click on one has been mistaken for the other's
+          effect. Smart arrange only ever repositions tiles; Beautify
+          dashboard proposes changes that still need a click to apply --
+          different enough to deserve to look like two tools, not one. */}
+      <span className="sep" />
+
+      {beautify}
 
       <span className="sep" />
 

@@ -109,8 +109,44 @@ export function tileFill(f: FormatSpec, defaultColor = "var(--surface)"): string
 export function inferNumberStyle(model: Model, tile: TileSpec): NumberStyle {
   const ms = tile.metrics.map((n) => model.metrics[n]).filter(Boolean);
   if (!ms.length) return "auto";
-  const text = ms.map((m) => `${m.name} ${m.label}`).join(" ").toLowerCase();
-  if (/\brate\b|retention|ratio|\bnrr\b|\bgrr\b|percent|share|conversion/.test(text)) return "percent";
+  // The FIRST selected metric decides, not every metric's label text
+  // pooled together -- the same convention a combo chart's "first measure
+  // is the bar" already relies on. A tile pairing a currency measure with
+  // a rate one (exactly what a combo is for) used to see "rate" in the
+  // pooled text and format the whole axis -- including the currency bars
+  // -- as a percent, turning $480,000 into a nonsense "48000000.0%".
+  //
+  // Includes synonyms, not just name/label -- curated short alternate names
+  // for what the metric IS, same spirit as the "read the model's own
+  // words" source `semanticHints()` already draws chart-kind hints from.
+  // Regression: logo_churn_annualized's own LABEL, "Logo churn
+  // (annualized)", drops the word "rate" that its sibling logo_churn_rate
+  // has, so name+label alone matched none of the percent keywords and it
+  // fell through to "compact" -- a real value of 0.6 rendered via
+  // SI-prefix notation as "600m" (600 milli-units), reading like six
+  // hundred million. Its synonyms (["...", "yearly churn rate"]) already
+  // say the word. `description` deliberately excluded, unlike
+  // semanticHints() -- free prose explaining what a metric depends on
+  // ("ARPA divided by logo churn RATE") reads fine to a person but plants
+  // a false keyword for a metric (ltv, a currency amount) that isn't
+  // itself that thing; a synonym is curated to BE another name for the
+  // metric, not a sentence about it, so it doesn't carry that risk.
+  const ms0 = ms[0];
+  const text = [ms0.name, ms0.label, ...ms0.synonyms].join(" ").toLowerCase();
+  // Checked before either regex below: a metric literally named/labeled as
+  // a ratio is a unitless multiple (LTV/CAC, SaaS quick ratio -- read as
+  // "5.85x", not "585%"), even when it's built from currency inputs or
+  // reads like a fraction. Otherwise "ltv_cac_ratio" would fall through to
+  // the currency check on "ltv"/"cac" alone and read as "$5.85" -- right
+  // about as wrong as the percent misread this exists to avoid, just from
+  // the opposite regex. Bounded by "not a letter" rather than `\b` --
+  // `\bratio\b` treats the underscore in a snake_case NAME as part of the
+  // word, so it silently fails to match "ltv_cac_ratio" -- but a plain
+  // unbounded substring match is too loose the other way: it fires inside
+  // an unrelated word sharing those five letters, like "new_signups"'s own
+  // synonym "regisTRATIOns".
+  if (/(?:^|[^a-z])ratio(?:$|[^a-z])/.test(text)) return "compact";
+  if (/\brate\b|retention|\bnrr\b|\bgrr\b|percent|share|conversion/.test(text)) return "percent";
   if (/usd|\$|revenue|mrr|arr|spend|cost|price|cac|ltv|arpa|arpu/.test(text)) return "currency";
   return "compact";
 }

@@ -94,6 +94,7 @@ const stubConn: Connector = {
   id: "test", label: "test",
   quote: (i) => `"${i.replace(/"/g, '""')}"`,
   dateTrunc: (g, e) => `date_trunc('${g}', ${e})`,
+  dateAdd: (u, e, n) => `(${e} + INTERVAL '${n} ${u}')`,
   relation: (t) => `"ANALYTICS"."MARTS"."${t}"`,
   async execute(): Promise<QueryResult> { return { columns: [], rows: [], sql: "", ms: 0 }; },
   async close() {},

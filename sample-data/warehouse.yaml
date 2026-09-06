@@ -1,0 +1,518 @@
+# ---------------------------------------------------------------------------
+# duckglue semantic model -- THE source of truth.
+#
+# Terraform reads this file and materialises every table into the AWS Glue
+# Data Catalog (columns, types, comments, and the semantic metadata below,
+# stored as Glue table Parameters). Nothing here is duplicated anywhere else.
+#
+# The MCP server reads it back OUT of Glue at query time, so Claude always
+# sees whatever is actually deployed -- not a stale local copy.
+# ---------------------------------------------------------------------------
+
+model:
+  name: sample_warehouse
+  description: >-
+    A small but realistic product-analytics warehouse for a portfolio of
+    consumer apps and content sites. Grain-per-table is documented below.
+    Use it to explore metrics, cohorts, funnels and subscription revenue.
+  default_date_column: event_date
+
+tables:
+
+  # ------------------------------------------------------------------ dims --
+  dim_users:
+    description: One row per registered user account, with acquisition context.
+    grain: one row per user_id
+    synonyms: [users, accounts, people, signups]
+    partition_keys: []
+    primary_key: user_id
+    columns:
+      - {name: user_id, type: string,  description: "Surrogate user identifier. Join key for every fact table."}
+      - {name: signup_date, type: date,    description: "Calendar date the account was created (UTC)."}
+      - {name: signup_source, type: string,  description: "Acquisition source: organic, paid_search, social, referral, direct."}
+      - {name: country, type: string,  description: "ISO-3166 alpha-2 country of the account at signup."}
+      - {name: device_platform, type: string,  description: "Platform of first session: ios, android, web."}
+      - {name: plan_id, type: string,  description: "Current plan. Join to dim_plans.plan_id."}
+      - {name: is_active, type: boolean, description: "True if the account has not been deleted or hard-churned."}
+
+  dim_plans:
+    description: Subscription plan catalogue. Small, static reference table.
+    grain: one row per plan_id
+    synonyms: [plans, tiers, pricing, packages]
+    partition_keys: []
+    primary_key: plan_id
+    columns:
+      - {name: plan_id, type: string, description: "Plan identifier."}
+      - {name: plan_name, type: string, description: "Human-readable plan name."}
+      - {name: plan_tier, type: string, description: "One of: free, plus, pro, team, business. Ordered by value ascending."}
+      - {name: monthly_price_usd, type: double, description: "List price per month in USD. 0 for the free tier."}
+      - {name: billing_interval, type: string, description: "monthly or annual."}
+
+  # ----------------------------------------------------------------- facts --
+  fct_events:
+    description: >-
+      In-app behavioural event stream. This is the main table for engagement,
+      retention and feature-adoption questions.
+    grain: one row per event occurrence
+    synonyms: [events, activity, usage, telemetry, event stream]
+    partition_keys: [event_date]
+    columns:
+      - {name: event_id, type: string,    description: "Unique event identifier."}
+      - {name: user_id, type: string,    description: "User who produced the event. Join to dim_users.user_id."}
+      - {name: session_id, type: string,    description: "Client session the event belongs to."}
+      - {name: event_ts, type: timestamp, description: "Event timestamp in UTC."}
+      - {name: event_name, type: string,    description: "Event type: app_open, entry_created, entry_viewed, prompt_shown, share_tapped, settings_opened, upgrade_viewed."}
+      - {name: duration_seconds, type: double,    description: "Time spent on the action, where meaningful. Null for instantaneous events."}
+      - {name: app_version, type: string,    description: "Client build that emitted the event."}
+      - {name: event_date, type: date,      description: "Hive partition column. Calendar date of event_ts (UTC)."}
+
+  fct_subscriptions:
+    description: >-
+      One row per subscription term. Revenue questions should come from here,
+      not from dim_users.
+    grain: one row per subscription_id (a single paid term for one user)
+    synonyms: [subscriptions, revenue, billing, mrr, subs]
+    partition_keys: []
+    columns:
+      - {name: subscription_id, type: string, description: "Unique subscription identifier."}
+      - {name: user_id, type: string, description: "Subscriber. Join to dim_users.user_id."}
+      - {name: plan_id, type: string, description: "Plan purchased. Join to dim_plans.plan_id."}
+      - {name: started_on, type: date,   description: "First day of the subscription term."}
+      - {name: ended_on, type: date,   description: "Last day of the term. Null while the subscription is still running."}
+      - {name: mrr_usd, type: double, description: "Normalised monthly recurring revenue in USD for this subscription."}
+      - {name: status, type: string, description: "active, cancelled (churned), or expired (term closed by a plan change). Only 'active' counts toward live MRR."}
+
+  fct_web_sessions:
+    description: >-
+      Marketing-site sessions across the content-site portfolio. Use this for
+      traffic and top-of-funnel conversion, not for in-app engagement.
+    grain: one row per web session
+    synonyms: [web traffic, sessions, visits, marketing sessions, site traffic]
+    partition_keys: [session_date]
+    columns:
+      - {name: session_id, type: string,  description: "Unique web session identifier."}
+      - {name: user_id, type: string,  description: "Set only if the visitor was logged in or later signed up. Null otherwise."}
+      - {name: source_site, type: string,  description: "Which property the session landed on."}
+      - {name: channel, type: string,  description: "Acquisition channel: organic, paid_search, social, referral, direct, email."}
+      - {name: pageviews, type: bigint,  description: "Pages viewed in the session."}
+      - {name: seconds_on_site, type: double,  description: "Total session duration in seconds."}
+      - {name: converted, type: boolean, description: "True if the session ended in a signup."}
+      - {name: session_date, type: date,    description: "Hive partition column. Calendar date of the session (UTC)."}
+
+  fct_subscription_addons:
+    description: >-
+      Add-ons and seat expansions attached to a subscription. This is where
+      expansion and contraction revenue comes from -- the base subscription
+      price in fct_subscriptions is fixed for the life of a term.
+    grain: one row per add-on term (one add-on on one subscription)
+    synonyms: [addons, add-ons, seats, upsells, expansion revenue, upgrades]
+    partition_keys: []
+    primary_key: addon_id
+    columns:
+      - {name: addon_id, type: string, description: "Unique add-on term identifier."}
+      - {name: subscription_id, type: string, description: "Parent subscription. Join to fct_subscriptions.subscription_id."}
+      - {name: user_id, type: string, description: "Subscriber. Join to dim_users.user_id."}
+      - {name: plan_id, type: string, description: "Plan of the parent subscription. Join to dim_plans.plan_id."}
+      - {name: addon_name, type: string, description: "One of: extra_seats, storage_pack, priority_support, api_access."}
+      - {name: started_on, type: date, description: "First day the add-on was billed."}
+      - {name: ended_on, type: date, description: "Last day billed. Null while still attached."}
+      - {name: mrr_usd, type: double, description: "Incremental monthly recurring revenue in USD from this add-on."}
+      - {name: status, type: string, description: "active or cancelled. Only 'active' counts toward live expansion MRR."}
+
+  fct_mrr_movements:
+    description: >-
+      Every change in monthly recurring revenue, one row per movement. This is
+      the table for churn, expansion and net-new questions. Summing
+      mrr_delta_usd over all time reconciles exactly with active subscription
+      MRR plus active add-on MRR.
+    grain: one row per MRR movement (new, expansion, contraction, churn or reactivation)
+    synonyms: [mrr movements, revenue movements, churn, expansion, net new mrr, mrr waterfall]
+    partition_keys: [movement_date]
+    primary_key: movement_id
+    columns:
+      - {name: movement_id, type: string, description: "Unique movement identifier."}
+      - {name: user_id, type: string, description: "Customer the movement belongs to. Join to dim_users.user_id."}
+      - {name: subscription_id, type: string, description: "Subscription that moved. Join to fct_subscriptions.subscription_id."}
+      - {name: addon_id, type: string, description: "Set for expansion/contraction driven by an add-on. Null otherwise."}
+      - {name: plan_id, type: string, description: "Plan at the time of the movement. Join to dim_plans.plan_id."}
+      - {name: movement_type, type: string, description: "One of: new, expansion, contraction, churn, reactivation. Deltas are signed -- new, expansion and reactivation positive, contraction and churn negative. A plan change shows as expansion or contraction, never as churn plus new."}
+      - {name: mrr_delta_usd, type: double, description: "Signed change in monthly recurring revenue, USD."}
+      - {name: movement_date, type: date, description: "Hive partition column. Date the movement took effect (UTC)."}
+
+  fct_marketing_spend:
+    description: >-
+      Paid acquisition spend by channel and day. Pair with new_customers from
+      fct_saas_monthly for CAC; on its own it answers spend, click and
+      efficiency questions.
+    grain: one row per channel per day
+    synonyms: [ad spend, marketing spend, paid media, acquisition cost, cac inputs]
+    partition_keys: [spend_date]
+    primary_key: spend_id
+    columns:
+      - {name: spend_id, type: string, description: "Unique spend row identifier."}
+      - {name: channel, type: string, description: "Paid channel: paid_search, social or email. Values align with dim_users.signup_source."}
+      - {name: campaign, type: string, description: "Campaign name."}
+      - {name: spend_usd, type: double, description: "Amount spent in USD on this channel that day."}
+      - {name: impressions, type: bigint, description: "Ad impressions served."}
+      - {name: clicks, type: bigint, description: "Ad clicks received."}
+      - {name: spend_date, type: date, description: "Hive partition column. Calendar date of the spend (UTC)."}
+
+  fct_saas_monthly:
+    description: >-
+      Monthly SaaS summary rolled up from fct_mrr_movements and
+      fct_marketing_spend. It exists so ratio metrics spanning revenue and
+      acquisition -- NRR, GRR, CAC, LTV, payback -- can be computed from a
+      single base table.
+    grain: one row per calendar month
+    synonyms: [saas summary, monthly mart, unit economics, nrr, retention]
+    partition_keys: []
+    primary_key: month
+    columns:
+      - {name: month, type: date, description: "First day of the calendar month."}
+      - {name: starting_mrr_usd, type: double, description: "MRR at the start of the month."}
+      - {name: new_mrr_usd, type: double, description: "MRR added by new customers."}
+      - {name: expansion_mrr_usd, type: double, description: "MRR added by existing customers via add-ons and seats."}
+      - {name: contraction_mrr_usd, type: double, description: "MRR lost to downgrades, as a positive number."}
+      - {name: churned_mrr_usd, type: double, description: "MRR lost to cancellations, as a positive number."}
+      - {name: ending_mrr_usd, type: double, description: "MRR at the end of the month."}
+      - {name: customers_start, type: bigint, description: "Paying customers at the start of the month."}
+      - {name: customers_end, type: bigint, description: "Paying customers at the end of the month."}
+      - {name: new_customers, type: bigint, description: "Customers who started paying during the month."}
+      - {name: churned_customers, type: bigint, description: "Customers who cancelled during the month."}
+      - {name: marketing_spend_usd, type: double, description: "Total paid acquisition spend during the month."}
+
+
+# ---------------------------------------------------------------------------
+# Join graph. The engine uses this to resolve dimensions that live on a
+# different table from the metric, so nobody has to hand-write joins.
+# ---------------------------------------------------------------------------
+joins:
+  - {left: fct_events,       left_on: user_id, right: dim_users, right_on: user_id, type: left}
+  - {left: fct_subscriptions, left_on: user_id, right: dim_users, right_on: user_id, type: left}
+  - {left: fct_subscriptions, left_on: plan_id, right: dim_plans, right_on: plan_id, type: left}
+  - {left: fct_web_sessions, left_on: user_id, right: dim_users, right_on: user_id, type: left}
+  - {left: dim_users,        left_on: plan_id, right: dim_plans, right_on: plan_id, type: left}
+  - {left: fct_mrr_movements, left_on: user_id, right: dim_users, right_on: user_id, type: left}
+  - {left: fct_mrr_movements, left_on: plan_id, right: dim_plans, right_on: plan_id, type: left}
+  - {left: fct_subscription_addons, left_on: user_id, right: dim_users, right_on: user_id, type: left}
+  - {left: fct_subscription_addons, left_on: plan_id, right: dim_plans, right_on: plan_id, type: left}
+
+# ---------------------------------------------------------------------------
+# Metrics. Each is a named aggregate expression bound to a base table, with an
+# optional always-on filter. This is what makes the layer *semantic*: Claude
+# asks for "mrr by plan_tier" and never invents its own definition of MRR.
+# ---------------------------------------------------------------------------
+metrics:
+
+  active_users:
+    label: Active users
+    base_table: fct_events
+    expression: COUNT(DISTINCT fct_events.user_id)
+    description: Distinct users who produced at least one in-app event in the period.
+    synonyms: [dau, wau, mau, actives, engaged users]
+
+  event_count:
+    label: Events
+    base_table: fct_events
+    expression: COUNT(*)
+    description: Total in-app events.
+    synonyms: [events, event volume, activity count]
+
+  entries_created:
+    label: Entries created
+    base_table: fct_events
+    expression: COUNT(*)
+    filter: "fct_events.event_name = 'entry_created'"
+    description: Count of journal entries created. The core value action of the product.
+    synonyms: [entries, journals written, notes created]
+
+  avg_event_duration:
+    label: Avg event duration (s)
+    base_table: fct_events
+    expression: AVG(fct_events.duration_seconds)
+    description: Mean duration in seconds across events that record one.
+    synonyms: [average time on action]
+
+  new_signups:
+    label: New signups
+    base_table: dim_users
+    expression: COUNT(DISTINCT dim_users.user_id)
+    description: Accounts created. Filter on signup_date for a period.
+    synonyms: [registrations, new users, new accounts]
+
+  mrr:
+    label: MRR (USD)
+    base_table: fct_subscriptions
+    expression: SUM(fct_subscriptions.mrr_usd)
+    filter: "fct_subscriptions.status = 'active'"
+    description: Monthly recurring revenue in USD from subscriptions currently active.
+    synonyms: [recurring revenue, monthly revenue, subscription revenue]
+
+  paying_subscribers:
+    label: Paying subscribers
+    base_table: fct_subscriptions
+    expression: COUNT(DISTINCT fct_subscriptions.user_id)
+    filter: "fct_subscriptions.status = 'active'"
+    description: Distinct users with an active paid subscription.
+    synonyms: [subscribers, paid users, customers]
+
+  arpu:
+    label: ARPU (USD)
+    base_table: fct_subscriptions
+    expression: SUM(fct_subscriptions.mrr_usd) / NULLIF(COUNT(DISTINCT fct_subscriptions.user_id), 0)
+    filter: "fct_subscriptions.status = 'active'"
+    description: Average revenue per paying user, in USD per month.
+    synonyms: [average revenue per user]
+
+  web_sessions:
+    label: Web sessions
+    base_table: fct_web_sessions
+    expression: COUNT(*)
+    description: Marketing-site sessions.
+    synonyms: [visits, traffic, sessions]
+
+  signup_conversion_rate:
+    label: Signup conversion rate
+    base_table: fct_web_sessions
+    expression: "COUNT(*) FILTER (WHERE fct_web_sessions.converted) * 1.0 / NULLIF(COUNT(*), 0)"
+    description: Share of web sessions that ended in a signup, as a 0-1 fraction.
+    synonyms: [conversion, cvr, signup rate]
+
+  pageviews:
+    label: Pageviews
+    base_table: fct_web_sessions
+    expression: SUM(fct_web_sessions.pageviews)
+    description: Total pages viewed across marketing-site sessions.
+    synonyms: [page views, impressions]
+
+  # ---------------------------------------------------------- SaaS motion --
+  # All of these sit on fct_mrr_movements, so they can be requested together.
+  # Contraction and churn are reported as positive magnitudes.
+
+  new_mrr:
+    label: New MRR (USD)
+    base_table: fct_mrr_movements
+    expression: "SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type = 'new')"
+    description: MRR added by customers starting their first paid subscription.
+    synonyms: [new business mrr, new revenue, acquisition mrr]
+
+  expansion_mrr:
+    label: Expansion MRR (USD)
+    base_table: fct_mrr_movements
+    expression: "SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type = 'expansion')"
+    description: MRR added by existing customers through add-ons and extra seats.
+    synonyms: [upsell mrr, upgrade revenue, expansion revenue]
+
+  contraction_mrr:
+    label: Contraction MRR (USD)
+    base_table: fct_mrr_movements
+    expression: "-SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type = 'contraction')"
+    description: MRR lost when existing customers drop add-ons but stay subscribed. Positive number.
+    synonyms: [downgrade mrr, downsell]
+
+  churned_mrr:
+    label: Churned MRR (USD)
+    base_table: fct_mrr_movements
+    expression: "-SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type = 'churn')"
+    description: MRR lost to cancellations. Positive number.
+    synonyms: [lost mrr, cancelled revenue, revenue churn]
+
+  net_new_mrr:
+    label: Net new MRR (USD)
+    base_table: fct_mrr_movements
+    expression: SUM(fct_mrr_movements.mrr_delta_usd)
+    description: New plus expansion minus contraction and churn. Summed over all time this equals live MRR.
+    synonyms: [net mrr, mrr change, net revenue movement]
+
+  gross_new_mrr:
+    label: Gross new MRR (USD)
+    base_table: fct_mrr_movements
+    expression: "SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type IN ('new','expansion'))"
+    description: All MRR added, before any losses.
+    synonyms: [gross mrr added, added revenue]
+
+  quick_ratio:
+    label: SaaS quick ratio
+    base_table: fct_mrr_movements
+    expression: "SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type IN ('new','expansion')) / NULLIF(-SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type IN ('churn','contraction')), 0)"
+    description: Gross new MRR divided by lost MRR. Above 4 is healthy growth; below 1 means shrinking.
+    synonyms: [growth efficiency, sales quick ratio]
+
+  new_paying_customers:
+    label: New paying customers
+    base_table: fct_mrr_movements
+    expression: "COUNT(DISTINCT fct_mrr_movements.user_id) FILTER (WHERE fct_mrr_movements.movement_type = 'new')"
+    description: Distinct customers who began paying in the period.
+    synonyms: [new customers, new subscribers, acquisitions]
+
+  churned_customers:
+    label: Churned customers
+    base_table: fct_mrr_movements
+    expression: "COUNT(DISTINCT fct_mrr_movements.user_id) FILTER (WHERE fct_mrr_movements.movement_type = 'churn')"
+    description: Distinct customers who cancelled in the period.
+    synonyms: [logo churn, cancellations, lost customers]
+
+  # -------------------------------------------------------------- add-ons --
+
+  addon_mrr:
+    label: Add-on MRR (USD)
+    base_table: fct_subscription_addons
+    expression: SUM(fct_subscription_addons.mrr_usd)
+    filter: "fct_subscription_addons.status = 'active'"
+    description: Live incremental MRR from add-ons and seats.
+    synonyms: [expansion mrr live, seat revenue, addon revenue]
+
+  addons_attached:
+    label: Add-ons attached
+    base_table: fct_subscription_addons
+    expression: COUNT(*)
+    filter: "fct_subscription_addons.status = 'active'"
+    description: Number of add-on terms currently attached.
+    synonyms: [addon count, attach count]
+
+  # ------------------------------------------------------------ marketing --
+
+  marketing_spend:
+    label: Marketing spend (USD)
+    base_table: fct_marketing_spend
+    expression: SUM(fct_marketing_spend.spend_usd)
+    description: Paid acquisition spend.
+    synonyms: [ad spend, media spend, paid spend]
+
+  ad_clicks:
+    label: Ad clicks
+    base_table: fct_marketing_spend
+    expression: SUM(fct_marketing_spend.clicks)
+    description: Clicks received on paid channels.
+    synonyms: [clicks, paid clicks]
+
+  ad_impressions:
+    label: Ad impressions
+    base_table: fct_marketing_spend
+    expression: SUM(fct_marketing_spend.impressions)
+    description: Impressions served on paid channels.
+    synonyms: [impressions, ad views]
+
+  cost_per_click:
+    label: Cost per click (USD)
+    base_table: fct_marketing_spend
+    expression: SUM(fct_marketing_spend.spend_usd) / NULLIF(SUM(fct_marketing_spend.clicks), 0)
+    description: Blended CPC across paid channels.
+    synonyms: [cpc, click cost]
+
+  click_through_rate:
+    label: Click-through rate
+    base_table: fct_marketing_spend
+    expression: SUM(fct_marketing_spend.clicks) * 1.0 / NULLIF(SUM(fct_marketing_spend.impressions), 0)
+    description: Clicks divided by impressions, as a 0-1 fraction.
+    synonyms: [ctr, clickthrough]
+
+  # ------------------------------------------------------ unit economics --
+  # These live on fct_saas_monthly because they span revenue and acquisition.
+  # Grouped by month they are exact; ungrouped they are a blended figure over
+  # every month in scope.
+
+  starting_mrr:
+    label: Starting MRR (USD)
+    base_table: fct_saas_monthly
+    expression: SUM(fct_saas_monthly.starting_mrr_usd)
+    description: MRR at the start of the period.
+    synonyms: [opening mrr, bom mrr]
+
+  ending_mrr:
+    label: Ending MRR (USD)
+    base_table: fct_saas_monthly
+    expression: SUM(fct_saas_monthly.ending_mrr_usd)
+    description: MRR at the end of the period.
+    synonyms: [closing mrr, eom mrr]
+
+  nrr:
+    label: Net revenue retention
+    base_table: fct_saas_monthly
+    expression: "(SUM(fct_saas_monthly.starting_mrr_usd) + SUM(fct_saas_monthly.expansion_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0)"
+    description: Retained plus expansion MRR over starting MRR, excluding new business. Above 1.0 means the existing base is growing.
+    synonyms: [net revenue retention, ndr, net dollar retention]
+
+  grr:
+    label: Gross revenue retention
+    base_table: fct_saas_monthly
+    expression: "(SUM(fct_saas_monthly.starting_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0)"
+    description: Starting MRR minus losses, over starting MRR. Caps at 1.0 -- expansion is excluded.
+    synonyms: [gross revenue retention, gross retention]
+
+  logo_churn_rate:
+    label: Logo churn rate
+    base_table: fct_saas_monthly
+    expression: SUM(fct_saas_monthly.churned_customers) * 1.0 / NULLIF(SUM(fct_saas_monthly.customers_start), 0)
+    description: Customers lost over customers at period start, as a 0-1 fraction.
+    synonyms: [customer churn rate, logo churn, cancellation rate]
+
+  revenue_churn_rate:
+    label: Revenue churn rate
+    base_table: fct_saas_monthly
+    expression: SUM(fct_saas_monthly.churned_mrr_usd) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0)
+    description: Churned MRR over starting MRR, as a 0-1 fraction.
+    synonyms: [mrr churn rate, dollar churn]
+
+  cac:
+    label: CAC (USD)
+    base_table: fct_saas_monthly
+    expression: SUM(fct_saas_monthly.marketing_spend_usd) / NULLIF(SUM(fct_saas_monthly.new_customers), 0)
+    description: Paid acquisition spend divided by new paying customers.
+    synonyms: [customer acquisition cost, acquisition cost]
+
+  arpa:
+    label: ARPA (USD)
+    base_table: fct_saas_monthly
+    expression: SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0)
+    description: Average revenue per account per month, at period end.
+    synonyms: [average revenue per account, arpu monthly]
+
+  ltv:
+    label: LTV (USD)
+    base_table: fct_saas_monthly
+    expression: "(SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0)) / NULLIF(SUM(fct_saas_monthly.churned_customers) * 1.0 / NULLIF(SUM(fct_saas_monthly.customers_start), 0), 0)"
+    description: ARPA divided by logo churn rate. Revenue-based, no gross-margin adjustment.
+    synonyms: [lifetime value, customer lifetime value]
+
+  ltv_cac_ratio:
+    label: LTV / CAC
+    base_table: fct_saas_monthly
+    expression: "((SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0)) / NULLIF(SUM(fct_saas_monthly.churned_customers) * 1.0 / NULLIF(SUM(fct_saas_monthly.customers_start), 0), 0)) / NULLIF(SUM(fct_saas_monthly.marketing_spend_usd) / NULLIF(SUM(fct_saas_monthly.new_customers), 0), 0)"
+    description: Lifetime value over acquisition cost. Above 3 is the conventional healthy threshold.
+    synonyms: [ltv to cac, ltv cac]
+
+  cac_payback_months:
+    label: CAC payback (months)
+    base_table: fct_saas_monthly
+    expression: "(SUM(fct_saas_monthly.marketing_spend_usd) / NULLIF(SUM(fct_saas_monthly.new_customers), 0)) / NULLIF(SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0), 0)"
+    description: Months of ARPA needed to repay CAC.
+    synonyms: [payback period, cac payback]
+
+  mrr_growth_rate:
+    label: MRR growth rate
+    base_table: fct_saas_monthly
+    expression: (SUM(fct_saas_monthly.ending_mrr_usd) - SUM(fct_saas_monthly.starting_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0)
+    description: Period-over-period MRR growth, as a 0-1 fraction.
+    synonyms: [growth rate, mrr growth]
+
+  nrr_annualized:
+    label: NRR (annualized)
+    base_table: fct_saas_monthly
+    expression: "POWER((SUM(fct_saas_monthly.starting_mrr_usd) + SUM(fct_saas_monthly.expansion_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0), 12)"
+    description: Monthly NRR compounded to a yearly rate. This is the figure investors quote -- 1.20 means the existing base grows 20% a year without new customers.
+    synonyms: [annual nrr, net dollar retention annual, ndr]
+
+  grr_annualized:
+    label: GRR (annualized)
+    base_table: fct_saas_monthly
+    expression: "POWER((SUM(fct_saas_monthly.starting_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0), 12)"
+    description: Monthly GRR compounded to a yearly rate. Caps at 1.0.
+    synonyms: [annual grr, gross retention annual]
+
+  logo_churn_annualized:
+    label: Logo churn (annualized)
+    base_table: fct_saas_monthly
+    expression: "1 - POWER(1 - SUM(fct_saas_monthly.churned_customers) * 1.0 / NULLIF(SUM(fct_saas_monthly.customers_start), 0), 12)"
+    description: Monthly logo churn compounded to a yearly rate.
+    synonyms: [annual churn, yearly churn rate]

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { SparkOptions, TileSpec } from "../compiler/spec.ts";
 import { DEFAULT_SPARK } from "../compiler/spec.ts";
-import type { Model } from "../semantic/model.ts";
+import { semanticHints, type Model } from "../semantic/model.ts";
 import { FONT_LABELS, FONT_STACKS, PALETTES, inferNumberStyle, mergeTextFormat,
          type FormatSpec, type NumberStyle } from "../format/format.ts";
 import { recommend, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
@@ -34,7 +34,8 @@ export function Inspector({ model, tile, onChange, onClose }: {
         tile.dimensions[i]?.includes(":") ? { ...p, role: "temporal" } : p)));
   }, [tile.id, JSON.stringify(tile.dimensions)]);
 
-  const options: VizOption[] = profiles ? recommend(tile.metrics, profiles) : [];
+  const options: VizOption[] = profiles
+    ? recommend(tile.metrics, profiles, semanticHints(model, tile.metrics)) : [];
   const fmt = (p: Partial<FormatSpec>) => onChange({ ...tile, format: { ...tile.format, ...p } });
   const spark = (p: Partial<SparkOptions>) => onChange({ ...tile, spark: { ...tile.spark, ...p } });
   const sp: SparkOptions = { ...DEFAULT_SPARK, ...(tile.spark ?? {}) };

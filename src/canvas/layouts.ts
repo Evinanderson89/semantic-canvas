@@ -25,8 +25,21 @@ export const LAYOUTS: LayoutInfo[] = [
     description: "Packs every tile into clean rows, in reading order. Fits any mix." },
 ];
 
+/**
+ * A "headline number" tile: renders as a compact stat/KPI card, not a chart
+ * that needs real width to be readable. Must match inferChart's own "stat"
+ * rule (chartRules.ts) exactly -- a single-metric tile is only dimensionless
+ * stat/kpi when it has NO dimensions. A single-metric tile WITH a time or
+ * categorical dimension (revenue by month, signups by plan) still renders as
+ * an area/bar/line chart, and packing it at KPI-card width is what produced
+ * the illegible, over-cropped row this used to ship: every single-metric
+ * chart on the dashboard -- which is most of them, since one metric per tile
+ * is the common case -- got miscounted as a KPI regardless of its dimensions.
+ */
 const isKpiTile = (t: TileSpec) =>
-  (t.kind ?? "metric") === "metric" && (t.chart === "kpi" || (!t.chart && t.metrics.length === 1));
+  (t.kind ?? "metric") === "metric" &&
+  (t.chart === "kpi" || t.chart === "stat" ||
+   (!t.chart && (t.dimensions ?? []).length === 0 && t.metrics.length === 1));
 const isDataTile = (t: TileSpec) => (t.kind ?? "metric") === "metric";
 
 /**
@@ -50,11 +63,11 @@ export function bestLayout(tiles: TileSpec[]): LayoutName {
   return [...LAYOUTS].sort((a, b) => scoreLayout(b.name, tiles) - scoreLayout(a.name, tiles))[0]?.name ?? "grid";
 }
 
-function layoutGrid(tiles: TileSpec[], width: number): TileSpec[] {
-  return arrange(tiles, width);
+function layoutGrid(tiles: TileSpec[], width: number, stretch: boolean): TileSpec[] {
+  return arrange(tiles, width, { stretch });
 }
 
-function layoutExecSummary(tiles: TileSpec[], width: number): TileSpec[] {
+function layoutExecSummary(tiles: TileSpec[], width: number, stretch: boolean): TileSpec[] {
   const PAD = 24, GAP = 16;
   const kpis = tiles.filter(isKpiTile);
   const charts = tiles.filter((t) => isDataTile(t) && !isKpiTile(t));
@@ -74,7 +87,7 @@ function layoutExecSummary(tiles: TileSpec[], width: number): TileSpec[] {
 
   const packBelow = (group: TileSpec[]) => {
     if (!group.length) return;
-    const packed = arrange(group, width, { pad: PAD });
+    const packed = arrange(group, width, { pad: PAD, stretch });
     const shift = y - PAD;
     const shifted = packed.map((t) => ({ ...t, layout: { ...t.layout, y: t.layout.y + shift } }));
     out.push(...shifted);
@@ -86,8 +99,16 @@ function layoutExecSummary(tiles: TileSpec[], width: number): TileSpec[] {
   return out;
 }
 
-export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number): TileSpec[] {
-  return name === "exec-summary" ? layoutExecSummary(tiles, width) : layoutGrid(tiles, width);
+/**
+ * `stretch` defaults to true (Smart Arrange, Beautify's "Reorder top to
+ * bottom") -- a deliberate, final layout pass wants no dead margin. Pass
+ * false for an incremental repack that isn't the user asking for a clean
+ * layout: adding ONE tile, or correcting an overlap a resize just caused
+ * (see `layoutGrid`'s comment on `arrange()`'s `stretch` option for why
+ * stretching there compounds across repeated additions).
+ */
+export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, stretch = true): TileSpec[] {
+  return name === "exec-summary" ? layoutExecSummary(tiles, width, stretch) : layoutGrid(tiles, width, stretch);
 }
 
 export function applyBestLayout(tiles: TileSpec[], width: number): { name: LayoutName; tiles: TileSpec[] } {

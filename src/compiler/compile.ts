@@ -145,6 +145,64 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec): stri
           `FROM ${names[0]}${join}`;
   }
 
+  // ---- drop a coarsened bucket that isn't a full period ----------------------
+  //
+  // A metric's own date range rarely lines up with a week/month/quarter/year
+  // boundary. date_trunc('week', Sep-1) still buckets it with the Monday
+  // before -- Aug-26 -- but only ONE real day (Sep-1) actually falls in that
+  // bucket, so its total reads as a collapse next to a full week right next
+  // to it: exactly the "chart drops to zero at both ends" this fixes. Applied
+  // BEFORE the period-over-period LAG below, not after -- comparing against
+  // an already-partial neighbor would report a real-looking but meaningless
+  // swing for whichever row sits next to the trimmed one.
+  //
+  // Not needed for "day": each row already IS one full, indivisible unit at
+  // that grain (the columns this app buckets are DATE-typed, not timestamps
+  // with a partial first/last calendar day), so there's no coarser period for
+  // a day bucket to be partial within.
+  const coarseTimeDim = (tile.dimensions ?? []).find((d) => {
+    const { grain } = parseDimension(d);
+    return grain && grain !== "day";
+  });
+  // Set below when a partial edge was actually trimmed away, so the final
+  // wrap (after period-over-period) can re-attach it as real columns rather
+  // than this being silent all the way out to the caller.
+  let partialBounds: { ref: string; grain: string; unit: "day" | "month" | "year"; n: number } | null = null;
+  if (coarseTimeDim) {
+    const { grain, table, column } = parseDimension(coarseTimeDim);
+    const owner = table ?? base;
+    const ref = `${owner}.${q(column)}`;
+    const alias = q(`${column}_${grain}`);
+    // DuckDB (and Snowflake's DATEADD) have no "quarter" interval unit --
+    // expressed as 3 months instead, which is exactly equivalent for this
+    // purpose since a coarsened bucket's start is always the 1st of a month.
+    const PERIOD: Record<string, [unit: "day" | "month" | "year", n: number]> = {
+      week: ["day", 7], month: ["month", 1], quarter: ["month", 3], year: ["year", 1],
+    };
+    const [unit, n] = PERIOD[grain!];
+    const qualifiedAlias = `__periods.${alias}`;
+    // One full period after the bucket's start, minus a day, is that
+    // bucket's own last day -- date_trunc only ever rounds DOWN to a
+    // period's start, so this is the only way to get its end.
+    const bucketEnd = conn.dateAdd("day", conn.dateAdd(unit, qualifiedAlias, n), -1);
+    const periodCols = [...groupCols, ...metrics.map((m) => q(m.name))];
+    // `where` here is the tile's own dimensional/cross-filter scope, the
+    // one thing every metric on the tile shares -- correct for the common
+    // case (one metric, or several with the same always-on filter). A
+    // KNOWN, narrower gap: if two metrics on the SAME tile have DIFFERENT
+    // always-on filters (the `groups.size > 1` case above) that happen to
+    // cover different date ranges, bounds is computed against their
+    // UNION, not each metric's own narrower range -- a metric whose own
+    // filter ends earlier than its sibling's could still show a partial
+    // edge this doesn't catch. Not fixed here: it would mean a separate
+    // bounds query per filter group, and no reported case has hit it yet.
+    sql = `WITH __bounds AS (\n  SELECT MIN(${ref}) AS lo, MAX(${ref}) AS hi\n  FROM ${from}` +
+          clause("  WHERE", where) + `\n),\n__periods AS (\n${sql}\n)\n` +
+          `SELECT ${periodCols.map((c) => `__periods.${c}`).join(", ")}\nFROM __periods CROSS JOIN __bounds\n` +
+          `WHERE ${qualifiedAlias} >= __bounds.lo AND ${bucketEnd} <= __bounds.hi`;
+    partialBounds = { ref, grain: grain!, unit, n };
+  }
+
   // ---- period-over-period --------------------------------------------------
   const cmp = tile.compare && tile.compare !== "none" ? tile.compare : null;
   const timeDim = (tile.dimensions ?? []).find((d) => d.includes(":"));
@@ -172,9 +230,71 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec): stri
           `FROM __base`;
   }
 
+  // ---- report a trimmed edge, rather than trimming it silently --------------
+  //
+  // A second, independent MIN/MAX over the same rows -- deliberately not
+  // reusing the __bounds CTE above, which is scoped to a query that may by
+  // now have zero surviving rows (every period was partial: a data set
+  // that doesn't span one full period yet). `LEFT JOIN ... ON TRUE` from
+  // THIS bounds query is what guarantees at least one output row exists to
+  // carry the two flags even then -- a plain join would multiply zero rows
+  // by one and lose them, the exact failure mode a same-query flag would
+  // have had. The caller (server.ts) strips "__partial_start"/
+  // "__partial_end" before a chart ever sees them and decides what, if
+  // anything, to show about a trimmed edge -- this only ever reports
+  // whether trimming happened, never re-decides whether TO trim.
+  if (partialBounds) {
+    const { ref, grain, unit, n } = partialBounds;
+    const boundsTrunc = (v: string) => conn.dateTrunc(grain, v);
+    const hiBucketEnd = conn.dateAdd("day", conn.dateAdd(unit, boundsTrunc("__report_bounds.hi"), n), -1);
+    const startFlag = `(${boundsTrunc("__report_bounds.lo")} <> __report_bounds.lo) AS ${q("__partial_start")}`;
+    const endFlag = `(${hiBucketEnd} <> __report_bounds.hi) AS ${q("__partial_end")}`;
+    sql = `WITH __report_bounds AS (\n  SELECT MIN(${ref}) AS lo, MAX(${ref}) AS hi\n  FROM ${from}` +
+          clause("  WHERE", where) + `\n),\n__report AS (\n${sql}\n)\n` +
+          `SELECT __report.*, ${startFlag}, ${endFlag}\n` +
+          `FROM __report_bounds LEFT JOIN __report ON TRUE`;
+  }
+
   if (groupCols.length) sql += `\nORDER BY ${groupCols[0]} NULLS LAST`;
   sql += `\nLIMIT ${Math.min(tile.limit ?? 500, 5000)}`;
   return sql;
+}
+
+export interface PartialEdges { start: boolean; end: boolean }
+
+/**
+ * Strips the "__partial_start"/"__partial_end" columns compileTile() adds
+ * for a coarsened time dimension, reporting what they said instead of
+ * silently dropping them into the void along with the rows they flagged.
+ * A no-op (both false) for any tile compileTile() didn't add them to.
+ *
+ * A row where every OTHER column is null is the `LEFT JOIN ... ON TRUE`
+ * sentinel compileTile() emits when every period in range was partial (a
+ * data set that doesn't span one full period yet) -- real rows always
+ * have a non-null bucket, since it comes straight off a GROUP BY on a
+ * real date. That sentinel exists purely to carry the flags out of a
+ * query that would otherwise have zero rows to attach them to; it's
+ * dropped here, never handed to a chart as a data point.
+ */
+export function splitPartialPeriods(
+  result: { columns: string[]; rows: unknown[][] },
+): { columns: string[]; rows: unknown[][]; partial: PartialEdges } {
+  const startIdx = result.columns.indexOf("__partial_start");
+  const endIdx = result.columns.indexOf("__partial_end");
+  if (startIdx === -1 && endIdx === -1)
+    return { columns: result.columns, rows: result.rows, partial: { start: false, end: false } };
+
+  const flagIdx = new Set([startIdx, endIdx].filter((i) => i !== -1));
+  const columns = result.columns.filter((_, i) => !flagIdx.has(i));
+  let partial: PartialEdges = { start: false, end: false };
+  const rows: unknown[][] = [];
+  for (const row of result.rows) {
+    if (startIdx !== -1 && row[startIdx]) partial = { ...partial, start: true };
+    if (endIdx !== -1 && row[endIdx]) partial = { ...partial, end: true };
+    const rest = row.filter((_, i) => !flagIdx.has(i));
+    if (rest.some((v) => v !== null && v !== undefined)) rows.push(rest);
+  }
+  return { columns, rows, partial };
 }
 
 const lit = (v: unknown): string => {

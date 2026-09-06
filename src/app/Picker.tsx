@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import type { Model } from "../semantic/model.ts";
+import { semanticHints, type Model } from "../semantic/model.ts";
 import type { ChartKind, FilterSpec, TileSpec } from "../compiler/spec.ts";
 import { recommend, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
 
@@ -97,7 +97,8 @@ export function Picker({ model, onAdd, onClose }: {
   };
 
   const options: VizOption[] = useMemo(
-    () => (profiles ? recommend(metrics, profiles) : []), [profiles, metrics]);
+    () => (profiles ? recommend(metrics, profiles, semanticHints(model, metrics)) : []),
+    [profiles, metrics, model]);
 
   useEffect(() => { if (options.length && !chart) setChart(options[0].kind); }, [options]);
 

@@ -6,18 +6,21 @@ import express from "express";
 if (typeof process.loadEnvFile === "function") {
   try { process.loadEnvFile(); } catch { /* no .env file present */ }
 }
-import { compileTile, validateTile } from "./compiler/compile.ts";
+import { compileTile, splitPartialPeriods, validateTile } from "./compiler/compile.ts";
 import { suggestDashboard } from "./suggest/suggest.ts";
 import type { Connector } from "./connectors/types.ts";
 import type { Model } from "./semantic/model.ts";
 import { existsSync, statSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import YAML from "yaml";
-import { describe as describeSource, connectOne, expand, loadSources, type Source } from "./sources/registry.ts";
+import { describe as describeSource, connectOne, expand, loadSources, type AiConfig, type Source } from "./sources/registry.ts";
 import { deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard } from "./store/store.ts";
 import { loadRls, scopeFor, type RlsConfig } from "./security/rls.ts";
 import { applyBestLayout } from "./canvas/layouts.ts";
 import { DEFAULT_CANVAS } from "./canvas/presets.ts";
+import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardStory,
+         type ChatMessage, type DashboardTileSummary } from "./agent/loop.ts";
+import Anthropic from "@anthropic-ai/sdk";
 
 const SOURCES_PATH = process.env.SOURCES_PATH ?? "./sources.yaml";
 const ENV_PATH = ".env"; // matches the bare process.loadEnvFile() call above
@@ -26,6 +29,7 @@ const PORT = Number(process.env.PORT || 5174);
 let sources: Source[] = [];
 let defaultPrincipal: string | null = null;
 let rls: RlsConfig = { policies: [], principals: {} };
+let ai: AiConfig | null = null;
 
 /** Resolve the source for a request; falls back to the first ready one. */
 function pick(req: any): Source {
@@ -42,6 +46,7 @@ async function boot() {
   const loaded = await loadSources(SOURCES_PATH);
   sources = loaded.sources;
   defaultPrincipal = loaded.defaultPrincipal;
+  ai = loaded.ai;
   rls = await loadRls(process.env.RLS_PATH ?? "./security/policies.yaml");
 
   for (const s of sources) {
@@ -58,6 +63,9 @@ async function boot() {
   console.log(`store  ${storeFile}`);
   console.log(`rls    ${rls.policies.length} policies, ` +
               `${Object.keys(rls.principals).length} principals`);
+  console.log(ai?.apiKey
+    ? `ai     ${ai.provider}/${ai.model} configured`
+    : `ai     not configured (set ANTHROPIC_API_KEY in .env to enable the in-app agent)`);
 }
 
 const app = express();
@@ -225,6 +233,7 @@ async function hotReload() {
   const loaded = await loadSources(SOURCES_PATH);
   sources = loaded.sources;
   defaultPrincipal = loaded.defaultPrincipal;
+  ai = loaded.ai;
   return {
     sources: sources.map(describeSource),
     active: sources.find((x) => x.status === "ready")?.id ?? null,
@@ -510,6 +519,136 @@ app.get("/api/agent/questions/:id", safe(async (req, res) => {
   res.json({ id: q.id, question: q.question, options: q.options, answer: q.answer });
 }));
 
+/**
+ * The embedded in-app agent: the AI living behind the "ai" port in
+ * sources.yaml, as opposed to an external agent attached over MCP. Drives
+ * the same tool list (src/agent/tools.ts) the MCP server exposes, so it's
+ * exactly as governed -- including ask_user, which surfaces in this same
+ * tab either way. Conversations are in-memory and ephemeral, keyed by a
+ * client-generated id, same as the agent-questions map above.
+ */
+const agentConversations = new Map<string, ChatMessage[]>();
+
+app.get("/api/agent/status", safe((_req, res) => res.json({
+  configured: Boolean(ai?.apiKey), provider: ai?.provider ?? "anthropic", model: ai?.model ?? "claude-opus-5",
+})));
+
+/**
+ * Same idea as the Connections screen's "test before you save" sources form:
+ * the key is checked against Anthropic before it's written anywhere. A
+ * models.retrieve() call is a plain auth check -- no completion, no tokens
+ * spent -- the same shape of "does this credential actually work" test a
+ * trial source connection is. On success it goes to .env via the same
+ * upsertEnv() a Snowflake credential does, never into sources.yaml.
+ */
+app.post("/api/agent/key", safe(async (req, res) => {
+  const apiKey = String(req.body?.apiKey ?? "").trim();
+  if (!apiKey) return res.status(400).json({ error: "apiKey is required" });
+  const provider = ai?.provider ?? "anthropic";
+  const model = ai?.model ?? "claude-opus-5";
+  try {
+    await new Anthropic({ apiKey }).models.retrieve(model);
+  } catch (e: any) {
+    const msg = e instanceof Anthropic.AuthenticationError ? "that key was rejected as invalid"
+      : e instanceof Anthropic.NotFoundError ? `the model "${model}" isn't available on this key`
+      : String(e?.message ?? e);
+    return res.status(422).json({ error: msg });
+  }
+  await upsertEnv({ ANTHROPIC_API_KEY: apiKey }, "AI agent (via Connections)");
+  ai = { provider, model, apiKey };
+  res.json({ configured: true, provider, model });
+}));
+
+app.delete("/api/agent/key", safe(async (_req, res) => {
+  await upsertEnv({ ANTHROPIC_API_KEY: "" }, "AI agent (via Connections)");
+  if (ai) ai = { ...ai, apiKey: "" };
+  res.json({ configured: false });
+}));
+
+app.post("/api/agent/chat", safe(async (req, res) => {
+  if (!ai) return res.status(503).json({ error: "no ai provider configured -- add an ai: block to sources.yaml" });
+  const conversationId = String(req.body?.conversationId ?? "").trim();
+  const message = String(req.body?.message ?? "").trim();
+  if (!conversationId) return res.status(400).json({ error: "conversationId is required" });
+  if (!message) return res.status(400).json({ error: "message is required" });
+  const history = agentConversations.get(conversationId) ?? [];
+  const principal = req.header("x-sc-principal") || defaultPrincipal || undefined;
+  const source = req.header("x-sc-source") || undefined;
+  const { text, messages } = await agentChat(ai, history, message, { source, principal });
+  agentConversations.set(conversationId, messages);
+  res.json({ text });
+}));
+
+/**
+ * "Explain this" on a single tile -- a one-shot call (see explainTile),
+ * not a conversation, so there's no conversationId or history here.
+ */
+app.post("/api/agent/explain", safe(async (req, res) => {
+  if (!ai) return res.status(503).json({ error: "no ai provider configured -- add an ai: block to sources.yaml" });
+  const body = req.body ?? {};
+  const metrics = Array.isArray(body.metrics) ? body.metrics : [];
+  if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
+  const principal = req.header("x-sc-principal") || defaultPrincipal || undefined;
+  const source = req.header("x-sc-source") || undefined;
+  const text = await explainTile(ai, { source, principal }, {
+    title: String(body.title ?? metrics.join(", ")),
+    metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
+    where: body.where, compare: body.compare,
+    columns: body.columns, rows: body.rows,
+  });
+  res.json({ text });
+}));
+
+/**
+ * "Beautify" on a single tile -- critiques presentation (chart choice,
+ * breakdown, clutter), a different question from "Explain this" but the
+ * same one-shot, read-only shape (see suggestImprovements).
+ */
+app.post("/api/agent/beautify", safe(async (req, res) => {
+  if (!ai) return res.status(503).json({ error: "no ai provider configured -- add an ai: block to sources.yaml" });
+  const body = req.body ?? {};
+  const metrics = Array.isArray(body.metrics) ? body.metrics : [];
+  if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
+  const principal = req.header("x-sc-principal") || defaultPrincipal || undefined;
+  const source = req.header("x-sc-source") || undefined;
+  const text = await suggestImprovements(ai, { source, principal }, {
+    title: String(body.title ?? metrics.join(", ")),
+    metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
+    where: body.where, compare: body.compare,
+    columns: body.columns, rows: body.rows,
+  });
+  res.json({ text });
+}));
+
+/**
+ * Dashboard-level Beautify -- suggests a title and a top-to-bottom reading
+ * order for the WHOLE dashboard, not one tile. Structured JSON (see
+ * suggestDashboardStory) rather than a paragraph, because the client
+ * applies this directly (new title, reordered tiles) instead of just
+ * displaying it.
+ */
+app.post("/api/agent/dashboard-story", safe(async (req, res) => {
+  if (!ai) return res.status(503).json({ error: "no ai provider configured -- add an ai: block to sources.yaml" });
+  const body = req.body ?? {};
+  const tiles: DashboardTileSummary[] = Array.isArray(body.tiles) ? body.tiles.map((t: any) => ({
+    id: String(t.id ?? ""), title: String(t.title ?? ""), kind: String(t.kind ?? ""),
+    metrics: Array.isArray(t.metrics) ? t.metrics : [],
+    dimensions: Array.isArray(t.dimensions) ? t.dimensions : [],
+  })).filter((t: DashboardTileSummary) => t.id) : [];
+  if (!tiles.length) return res.status(400).json({ error: "tiles is required" });
+  const principal = req.header("x-sc-principal") || defaultPrincipal || undefined;
+  const source = req.header("x-sc-source") || undefined;
+  // The full governed catalog, built server-side from the connected model
+  // rather than trusted from the client -- what "additions" is allowed to
+  // propose is exactly what this model actually has, the same governance
+  // every other agent-facing surface in this app already enforces.
+  const catalog = Object.values(modelOf(req).metrics).map((m) => ({
+    name: m.name, label: m.label, description: m.description, baseTable: m.baseTable,
+  }));
+  const result = await suggestDashboardStory(ai, { source, principal }, tiles, catalog);
+  res.json(result);
+}));
+
 app.get("/api/profile", safe(async (req, res) => {
   const base = String(req.query.base ?? "");
   const fields = String(req.query.fields ?? "").split(",").filter(Boolean);
@@ -613,7 +752,13 @@ app.post("/api/query", safe(async (req, res) => {
     const scoped = { ...tile, where: [...(tile.where ?? []), ...scope.filters] };
     const sql = compileTile(modelOf(req), connOf(req), scoped);
     const out = await connOf(req).execute(sql, tile.limit ?? 5000, who?.id ?? 'anon');
-    res.json({ ...out,
+    // A coarsened time dimension's first/last bucket, if it doesn't span a
+    // full period, comes back flagged rather than silently dropped -- split
+    // out here, right at the query's only consumer, so no caller of
+    // compileTile() has to know these two columns exist at all.
+    const { columns, rows, partial } = splitPartialPeriods(out);
+    res.json({ ...out, columns, rows,
+      partial,
       principal: who?.id ?? null,
       rlsApplied: scope.filters.map((f) => f.id),
       rlsUnenforceable: scope.unenforceable.map((p) => p.id) });

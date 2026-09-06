@@ -14,6 +14,7 @@ export async function duckdbConnector(lakeRoot: string): Promise<Connector> {
     label: "DuckDB (local Parquet)",
     quote: (i) => `"${i.replace(/"/g, '""')}"`,
     dateTrunc: (grain, expr) => `date_trunc('${grain}', ${expr})`,
+    dateAdd: (unit, expr, n) => `(${expr} + INTERVAL '${n} ${unit}')`,
     relation: (table) =>
       `read_parquet('${lakeRoot.replace(/\/$/, "")}/${table}/**/*.parquet', ` +
       `hive_partitioning = true, union_by_name = true)`,
