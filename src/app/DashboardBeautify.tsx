@@ -189,12 +189,12 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash }: 
           <path d="M13 3v3M11.5 4.5h3" strokeLinecap="round" />
           <path d="M16.5 8.5v2M15.5 9.5h2" strokeLinecap="round" />
         </svg>
-        Beautify dashboard
+        Design review
       </button>
       {open && (
         <div className="dash-beautify-pop">
           <div className="explain-head">
-            <span>Beautify dashboard</span>
+            <span>Design review</span>
             <button className="icon" onClick={() => setOpen(false)} aria-label="Close">✕</button>
           </div>
           <div className="beautify-body">

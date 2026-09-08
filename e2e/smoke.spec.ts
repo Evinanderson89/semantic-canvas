@@ -114,7 +114,7 @@ test("a new element lands where the user can see it", async ({ page }) => {
 
 test("locking hides edit chrome but keeps the data", async ({ page }) => {
   await openDashboard(page);
-  await page.getByRole("button", { name: /Editing/ }).click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await expect(page.locator(".editbar select")).toHaveCount(0);
   await expect(page.locator(".tile").first()).toBeVisible();
   await expect(page.locator(".tile figure").first()).toBeVisible();

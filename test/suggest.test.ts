@@ -28,3 +28,19 @@ describe("suggestDashboard", () => {
     expect(last.layout.w).toBeGreaterThan(1300);
   });
 });
+
+it("wraps narrow dashboard charts into readable rows without changing their queries", () => {
+  const wide = suggestDashboard(model, { width: 1440, audience: "analyst" });
+  const narrow = suggestDashboard(model, { width: 640, audience: "analyst" });
+  expect(narrow.tiles.map(({ layout, ...tile }) => tile)).toEqual(wide.tiles.map(({ layout, ...tile }) => tile));
+  for (const tile of narrow.tiles) {
+    expect(tile.layout.x).toBeGreaterThanOrEqual(24);
+    expect(tile.layout.x + tile.layout.w).toBeLessThanOrEqual(616);
+    expect(tile.layout.w).toBeGreaterThanOrEqual(tile.chart === "kpi" ? 180 : 500);
+    for (const other of narrow.tiles) {
+      if (tile.id === other.id) continue;
+      const a = tile.layout, b = other.layout;
+      expect(a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y).toBe(false);
+    }
+  }
+});

@@ -13,8 +13,9 @@ type Handle = typeof HANDLES[number];
  * like it is fighting you.
  */
 export function Canvas({
-  canvas, tiles, zoom, selected, onSelect, onChange, onCommit, renderTile, scrollRef,
+  canvas, tiles, zoom, selected, onSelect, onChange, onCommit, renderTile, scrollRef, emptyState,
 }: {
+  emptyState?: React.ReactNode;
   canvas: CanvasSpec;
   tiles: TileSpec[];
   zoom: number;
@@ -137,6 +138,7 @@ export function Canvas({
                       transform: `scale(${zoom})`, transformOrigin: "top left",
                       backgroundSize: canvas.snap ? `${canvas.grid * 4}px ${canvas.grid * 4}px` : undefined }}
              onPointerDown={() => onSelect([])}>
+          {!tiles.length && emptyState}
           {tiles.map((t) => {
             const on = selected.includes(t.id);
             return (

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { Model } from "../semantic/model.ts";
 import { metricsByTable } from "../semantic/model.ts";
 
@@ -40,6 +41,13 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
   sources?: { id: string; label: string; status: "ready" | "error"; error?: string }[];
   activeSource?: { label: string; status: "ready" | "error"; error?: string } | null;
 }) {
+  const [theme, setTheme] = useState(() => {
+    try { return localStorage.getItem("sc:theme") === "dark" ? "dark" : "light"; } catch { return "light"; }
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem("sc:theme", theme); } catch { /* Appearance still works without storage. */ }
+  }, [theme]);
   const byTable = metricsByTable(model);
   const tables = Object.entries(byTable).sort((a, b) => b[1].length - a[1].length);
 
@@ -61,7 +69,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
 
       <button className="search" aria-label="Search metrics" onClick={() => onView("registry")}>
         <Icon d="M9 3a6 6 0 1 0 3.5 10.9l3.3 3.3 1.4-1.4-3.3-3.3A6 6 0 0 0 9 3zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8z" />
-        <span>Search</span><kbd>⌘K</kbd>
+        <span>Find a metric</span>
       </button>
 
       <nav>
@@ -78,7 +86,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
                  onClick={() => onView("connections")} />
       </nav>
 
-      <div className="section">Categories</div>
+      <div className="section">Explore by topic</div>
       <nav>
         {tables.map(([name, ms]) => (
           <button key={name}
@@ -91,6 +99,12 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
       </nav>
 
       <div className="who">
+        <div className="workspace-caption"><span title="Roles are simulations on this computer, not authentication">Local alpha · Role preview</span>
+          <button className="theme-toggle" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} appearance`}
+            title={`Switch to ${theme === "light" ? "dark" : "light"} appearance`} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+            {theme === "light" ? "◐" : "◑"}
+          </button>
+        </div>
         <div className="who-row">
           <span className="avatar">{(principal || "SC").slice(0, 2).toUpperCase()}</span>
           {principals.length > 0 ? (
@@ -127,5 +141,6 @@ function NavItem({ icon, label, badge, active, onClick }: any) {
 
 export function prettyTable(name: string) {
   return name.replace(/^(fct|dim)_/, "").replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\bSaas\b/g, "SaaS").replace(/\bMrr\b/g, "MRR");
 }

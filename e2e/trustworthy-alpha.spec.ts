@@ -72,7 +72,8 @@ test("canvas settings participate in save status and undo", async ({ page }) => 
   await scratch(page); await save(page);
   const canvas = page.locator(".canvas-surface");
   const before = await canvas.getAttribute("style");
-  await page.locator(".editbar select").first().selectOption("phone");
+  await page.getByRole("button", { name: "Canvas settings" }).click();
+  await page.getByLabel("Canvas size", { exact: true }).selectOption("phone");
   await expect(page.locator(".save-status")).toHaveText("Unsaved changes");
   await page.getByTitle("Refresh", { exact: true }).click();
   await page.keyboard.press("ControlOrMeta+z");

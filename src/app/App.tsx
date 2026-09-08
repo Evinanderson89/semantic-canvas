@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Tile } from "./Tile.tsx";
 import { TileBoundary } from "./TileBoundary.tsx";
 import { Picker } from "./Picker.tsx";
-import { Sidebar, prettyTable } from "./Sidebar.tsx";
+import { Sidebar } from "./Sidebar.tsx";
 import { Canvas } from "../canvas/Canvas.tsx";
 import { EditBar } from "./EditBar.tsx";
+import { Popover } from "./Popover.tsx";
 import { DashboardBeautify } from "./DashboardBeautify.tsx";
 import { InsertMenu } from "./InsertMenu.tsx";
 import { Interview } from "./Interview.tsx";
@@ -19,7 +20,7 @@ import { overlaps } from "../canvas/geometry.ts";
 import { applyLayout } from "../canvas/layouts.ts";
 import { demoDashboard, demoDashboardAvailable } from "../suggest/demo.ts";
 import { downloadPng, slugForFilename } from "./export.ts";
-import { metricsByTable, prettifyModelName, type Model } from "../semantic/model.ts";
+import { prettifyModelName, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
 import { readResponse } from "./http.ts";
@@ -265,6 +266,11 @@ export function App() {
     } catch (e: any) { setNotice(`Could not open dashboard: ${e.message}`); }
   };
   const mainRef = React.useRef<HTMLElement>(null);
+  // New compositions start at a readable size for this workspace. Saved
+  // documents keep their authored dimensions when opened or resized.
+  const freshCanvas = useCallback((): CanvasSpec => ({ ...DEFAULT_CANVAS, preset: "custom",
+    width: Math.max(640, Math.min(1440, Math.floor(((mainRef.current?.clientWidth ?? 1100) - 44) / 8) * 8)),
+  }), []);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
 
   /**
@@ -407,23 +413,25 @@ export function App() {
 
   const build = useCallback((brief: Brief) => {
     setInterview(false);
-    beginDocument(null);
+    const surface = freshCanvas();
+    beginDocument(null, { canvas: surface });
     const epoch = documentEpoch.current;
     return fetch("/api/suggest", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...brief, width: canvas.width }),
+      body: JSON.stringify({ ...brief, width: surface.width }),
     }).then(readResponse).then((d) => {
       if (documentEpoch.current !== epoch) return;
       pendingFit.current = true;
       setDash(d); setCanvas((c) => ({ ...c, height: Math.max(c.height, ...d.tiles.map((t: TileSpec) => t.layout.y + t.layout.h + 24)) })); setRefreshed(new Date()); setTable(brief.table ?? null);
       if (brief.grain) setGrain(brief.grain);
     }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
-  }, [canvas.width, beginDocument]);
+  }, [freshCanvas, beginDocument]);
 
   const load = useCallback((t: string | null, g: string) => {
-    beginDocument(null);
+    const surface = freshCanvas();
+    beginDocument(null, { canvas: surface });
     const epoch = documentEpoch.current;
-    const q = new URLSearchParams({ grain: g, width: String(canvas.width),
+    const q = new URLSearchParams({ grain: g, width: String(surface.width),
                                     ...(t ? { table: t } : {}) });
     return fetch(`/api/suggest?${q}`).then(readResponse).then((d) => {
       if (documentEpoch.current !== epoch) return;
@@ -432,12 +440,9 @@ export function App() {
       pendingFit.current = true;
       setDash(d); setCanvas((c) => ({ ...c, height: Math.max(c.height, ...d.tiles.map((t: TileSpec) => t.layout.y + t.layout.h + 24)) })); setRefreshed(new Date());
     }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
-  }, [canvas.width, beginDocument]);
+  }, [freshCanvas, beginDocument]);
 
   if (!model) return <div className="boot">{bootError ? <><p role="alert">{bootError}</p><button onClick={() => switchSource("")}>Open the default source</button></> : "Loading semantic layer…"}</div>;
-
-  const byTable = metricsByTable(model);
-  const tabs = Object.entries(byTable).sort((a, b) => b[1].length - a[1].length).map(([n]) => n);
 
   const pick = (t: string | null) => {
     setTable(t);
@@ -510,15 +515,6 @@ export function App() {
 
       <main className="main" ref={mainRef}>
         {notice && <div className="document-notice" role="alert">{notice}</div>}
-        {!dash && <div className="document-library"><span className="hint">Local alpha · Roles are simulations on this computer</span>
-          <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
-          {drafts.filter((d) => d.source === activeSourceId).map((d) => <div key={d.key}>
-            <button className="link" onClick={() => beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key })}>Recover draft: {d.spec.title}</button>
-            <button className="link" aria-label={`Discard draft ${d.spec.title}`} onClick={() => {
-              localStorage.setItem("sc:drafts", JSON.stringify(drafts.filter((x) => x.key !== d.key))); readDrafts();
-            }}>Discard</button>
-          </div>)}
-        </div>}
         {!dash && view === "connections" ? (
           <Connections sources={sources} activeId={activeSourceId} onSelect={switchSource}
                        onRefresh={refreshSources} principals={principals} policies={policies} />
@@ -530,79 +526,63 @@ export function App() {
         ) : !dash && view === "model" ? (
           <DataModel model={model} />
         ) : !dash ? (
-          <Entry model={model} onSuggest={() => setInterview(true)}
-                 onScratch={() => beginDocument({ title: "Untitled dashboard", tiles: [] })}
+          <><Entry model={model} onSuggest={() => setInterview(true)}
+                 onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }}
                  onDemo={demoDashboardAvailable(model) ? () => {
                    pendingFit.current = true;
                    beginDocument(demoDashboard());
                  } : null} />
+        <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>Saved dashboards and drafts on this computer</span></div>
+          <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
+          {drafts.filter((d) => d.source === activeSourceId).map((d) => <div key={d.key}>
+            <button className="link" onClick={() => beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key })}>Recover draft: {d.spec.title}</button>
+            <button className="link" aria-label={`Discard draft ${d.spec.title}`} onClick={() => {
+              localStorage.setItem("sc:drafts", JSON.stringify(drafts.filter((x) => x.key !== d.key))); readDrafts();
+            }}>Discard</button>
+          </div>)}
+        </div>
+          </>
         ) : (
           <>
             <div className="topbar">
-              <button className="link" onClick={() => beginDocument(null)}>← Back</button>
+              <button className="link back-link" onClick={() => beginDocument(null)}>← <span>Workspace</span></button>
               <span className="spacer" />
-              <span className="save-status" role="status">{saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
-              <span className="refreshed">
-                {refreshed && `Refresh requested ${refreshed.toLocaleString(undefined,
-                  { dateStyle: "medium", timeStyle: "short" })}`}
-              </span>
-              <button className="icon" title="Refresh" onClick={refreshData}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
+              <span className={"save-status" + (dirty ? " dirty" : "")} role="status">{saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
+              <button className="icon quiet" title="Refresh" aria-label="Refresh" onClick={refreshData}>
+                <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M16 10a6 6 0 1 1-1.8-4.2M16 3v3.5h-3.5" /></svg>
               </button>
-              <button className="icon" title="Open a saved dashboard"
-                      aria-label="Open saved dashboard" onClick={() => { refreshSaved(); setOpenList(true); }}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <path d="M3 6a2 2 0 0 1 2-2h3l2 2h5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+              <button className="save-button" onClick={() => save()} disabled={saving} aria-label="Save dashboard">
+                {saving ? "Saving…" : "Save"}
               </button>
-              <button className={"icon" + (dirty ? " primary" : "")} onClick={() => save()} disabled={saving}
-                      title={saving ? "Saving…" : dirty ? "Unsaved changes — click to save" : "Saved"}
-                      aria-label="Save dashboard">
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <path d="M4 4h9l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" /><path d="M7 4v4h6V4M7 17v-5h6v5" /></svg>
-              </button>
-              <button className="link" disabled={saving} onClick={() => save(true)}>Save a copy</button>
-              <button className="icon" title="Copy dashboard spec"
-                      onClick={() => navigator.clipboard?.writeText(JSON.stringify(dash, null, 2))}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <rect x="7" y="3" width="10" height="12" rx="2" /><path d="M13 17H5a2 2 0 0 1-2-2V7" /></svg>
-              </button>
-              <button className="icon" title={exportingPng ? "Exporting…" : "Export dashboard as PNG"}
-                      disabled={exportingPng} onClick={exportDashboardPng}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 15h12" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              </button>
-              <button className="icon primary" title="Add tile" onClick={() => setPicking(true)}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8">
-                  <path d="M10 4v12M4 10h12" /></svg>
-              </button>
+              <Popover label="Dashboard actions" trigger={<span aria-hidden="true">•••</span>} align="end" className="document-menu">
+                {(close) => <>
+                  <button onClick={() => { close(); refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
+                  <button disabled={saving} onClick={() => { close(); save(true); }}>Save a copy</button>
+                  <button disabled={exportingPng} onClick={() => { close(); exportDashboardPng(); }}>
+                    {exportingPng ? "Exporting…" : "Export dashboard as PNG"}
+                  </button>
+                  <button onClick={() => { close(); navigator.clipboard?.writeText(JSON.stringify(dash, null, 2)); }}>Copy dashboard spec</button>
+                </>}
+              </Popover>
             </div>
 
-            <h1 className="dash-title">{dash.title}</h1>
-
-            <div className="tabs">
-              {tabs.map((t) => (
-                <button key={t} className={"pill" + (t === table ? " on" : "")}
-                        onClick={() => pick(t)}>
-                  {prettyTable(t)}
-                </button>
-              ))}
-            </div>
-
-            <div className="controls">
-              <label>
+            <div className="dashboard-heading">
+              <div className="dashboard-identity">
+                <span className="eyebrow">Dashboard</span>
+                <h1 className="dash-title">{dash.title}</h1>
+                <div className="dashboard-meta">
+                  <span>{dash.tiles.length} tiles</span><span aria-hidden="true">·</span>
+                  <span>{prettifyModelName(model.name)}</span>
+                  {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
+                </div>
+              </div>
+              <label className="period-control">
                 <span>Period</span>
-                <select value={grain} onChange={(e) => { setGrain(e.target.value); setDrills({}); commit(withGrain(dash, e.target.value)); }}>
-                  {GRAINS.map((g) => (
-                    <option key={g} value={g}>{g[0].toUpperCase() + g.slice(1)}ly
-                      {g === "day" ? "" : ""}</option>
-                  ))}
+                <select aria-label="Period" value={grain} onChange={(e) => { setGrain(e.target.value); setDrills({}); commit(withGrain(dash, e.target.value)); }}>
+                  {GRAINS.map((g) => <option key={g} value={g}>{g === "day" ? "Daily" : g[0].toUpperCase() + g.slice(1) + "ly"}</option>)}
                 </select>
               </label>
-              <span className="spacer" />
-              <span className="hint mono">
-                {dash.tiles.length} tiles · {Object.keys(model.metrics).length} metrics available
-              </span>
             </div>
 
             {!canvas.locked && (
@@ -616,7 +596,7 @@ export function App() {
               <div className="editbar slim">
                 <span className="spacer" />
                 <button className="lock on" onClick={() => changeCanvas({ ...canvas, locked: false })}>
-                  🔒 Locked — click to edit
+                  Edit dashboard
                 </button>
               </div>
             )}
@@ -639,6 +619,13 @@ export function App() {
             )}
 
             <Canvas canvas={canvas} tiles={dash.tiles} zoom={zoom}
+                    emptyState={!canvas.locked ? <div className="canvas-empty">
+                      <div className="empty-composition" aria-hidden="true"><i /><i /><i /></div>
+                      <h2>Every story starts somewhere.</h2>
+                      <p>Add your first metric, then make it your own.</p>
+                      <button className="save-button" onClick={() => setPicking(true)}>Add a chart</button>
+                      <span>Or add a heading or note from the toolbar below.</span>
+                    </div> : undefined}
                     selected={selected} onSelect={setSelected}
                     onChange={(t) => { setDash({ ...dash, tiles: t }); }}
                     scrollRef={scrollRef}
@@ -727,38 +714,25 @@ export function App() {
 function Entry({ model, onSuggest, onScratch, onDemo }: any) {
   return (
     <div className="entry">
-      <h2>{prettifyModelName(model.name)}</h2>
-      <p className="lede">
-        {model.description} Every chart is built from its{" "}
-        {Object.keys(model.metrics).length} governed metrics across{" "}
-        {Object.keys(model.tables).length} tables — no SQL is written by hand, and
-        nothing outside the model can be charted.
-      </p>
+      <div className="eyebrow">Your analytics studio</div>
+      <h2>Give your data<br /><em>a point of view.</em></h2>
+      <p className="lede">A space to explore what matters, compose a dashboard, and tell the story behind the numbers.</p>
+      <div className="model-summary"><span className="dot ready" />{prettifyModelName(model.name)}<span>· {Object.keys(model.metrics).length} metrics ready to explore</span></div>
       <div className="paths">
-        <button className="path" onClick={onSuggest}>
-          <h3>Suggest a dashboard →</h3>
-          <p>Reads the model and proposes one: headline KPIs with movement, trends
-             over time grouped so unlike units never share an axis, and the
-             breakdowns the join graph actually supports.</p>
+        <button className="path suggested" onClick={onSuggest}>
+          <span className="path-glyph" aria-hidden="true">✧</span>
+          <h3>Suggest a dashboard <span>↗</span></h3>
+          <p>Start with a question. Find a useful set of metrics, trends, and comparisons.</p>
         </button>
         <button className="path" onClick={onScratch}>
-          <h3>Start from scratch →</h3>
-          <p>An empty canvas. Add tiles by picking metrics and dimensions; the
-             picker only offers combinations that compile.</p>
+          <span className="path-glyph" aria-hidden="true">+</span>
+          <h3>Start from scratch <span>↗</span></h3>
+          <p>Make room for your own perspective. Add charts, notes, and a clear narrative.</p>
         </button>
-        {/* Only offered for a model with the specific bundled-sample tables
-            and metrics this fixed spec names (see demo.ts) -- a real
-            connected source just doesn't get this card, rather than
-            showing one that would fail to compile against it. */}
-        {onDemo && (
-          <button className="path demo" onClick={onDemo}>
-            <h3>See Beautify in action →</h3>
-            <p>A deliberately rough dashboard -- a noisy chart, a breakdown that
-               doesn't actually vary, a chart-kind mismatch, and a messy layout.
-               Try Beautify and Smart Arrange on it.</p>
-          </button>
-        )}
       </div>
+      {onDemo && <button className="demo-link" onClick={onDemo}>
+        <span className="demo-mark" aria-hidden="true">↳</span><span>Try the design playground<small>A rough dashboard to explore Smart arrange and Design review.</small></span><span aria-hidden="true">→</span>
+      </button>}
     </div>
   );
 }

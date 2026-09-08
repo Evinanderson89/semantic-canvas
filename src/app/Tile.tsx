@@ -327,7 +327,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                                    borderColor: fmt.border ? undefined : "transparent" }}>
       {kind !== "kpi" && (
         <header>
-          <h4>{title}</h4>
+          <h4 title={title}>{title}</h4>
           {state.status === "ok" &&
             <span className="ms mono">{state.ms}ms</span>}
           {state.status === "ok" && state.coverage === "unknown" && <span className="ms mono" title="The source has not declared period completeness. All observed buckets are shown, including possibly incomplete periods.">Coverage unverified</span>}

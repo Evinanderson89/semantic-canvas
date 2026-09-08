@@ -46,7 +46,7 @@ export function suggestDashboard(
   const PAD = 24, GAP = 16;
   const span = (n: number, of: number) =>
     Math.round(((W - PAD * 2) - GAP * (of - 1)) / of * n + GAP * (n - 1));
-  const colX = (i: number, of: number) => PAD + Math.round(((W - PAD * 2) + GAP) / of) * i;
+  const colX = (i: number, of: number) => PAD + Math.round(((W - PAD * 2) + GAP) / of * i);
   const byTable = metricsByTable(model);
   // Most-instrumented table first: the one someone bothered to define the most
   // metrics on is almost always the subject of the dashboard.
@@ -72,16 +72,19 @@ export function suggestDashboard(
   const cap = opts.audience === "analyst" ? 6 : opts.audience === "operator" ? 4 : 3;
   const picked = (opts.metrics ?? []).map((n) => model.metrics[n]).filter(Boolean);
   const headline = (picked.length ? picked : topMetrics).slice(0, cap);
+  const headlineCols = Math.max(1, Math.min(headline.length, Math.floor((W - PAD * 2 + GAP) / (180 + GAP))));
+  const chartCols = W < 960 ? 1 : 2;
   headline.forEach((m, i) => {
     const tcol0 = timeColumnOf(model, m.baseTable);
+    const rowCols = Math.min(headlineCols, headline.length - Math.floor(i / headlineCols) * headlineCols);
     tiles.push({
       id: id(), title: m.label, metrics: [m.name],
       dimensions: tcol0 ? [`${grain}:${tcol0}`] : [],
       chart: "kpi", spark: opts.compare ? { compare: opts.compare } : undefined,
-      layout: { x: colX(i, headline.length), y, w: span(1, headline.length), h: 156, z: 1 },
+      layout: { x: colX(i % headlineCols, rowCols), y: y + Math.floor(i / headlineCols) * (156 + GAP), w: span(1, rowCols), h: 156, z: 1 },
     });
   });
-  if (headline.length) y += 156 + GAP;
+  if (headline.length) y += Math.ceil(headline.length / headlineCols) * (156 + GAP);
 
   // 2. Trends over time -- one tile PER UNIT CLASS, so nothing shares an axis
   //    with a number of a different kind.
@@ -107,21 +110,21 @@ export function suggestDashboard(
       // to back, and repacking by width alone, the way arrange() does,
       // risks welding a shorter tile from the NEXT section into this row's
       // leftover space instead.
-      const alone = i % 2 === 0 && i === ordered.length - 1;
+      const alone = chartCols === 1 || (i % chartCols === 0 && i === ordered.length - 1);
       tiles.push({
         id: id(),
         title: `${ms.slice(0, 3).map((m) => m.label).join(", ")} over time`,
         metrics: ms.slice(0, 3).map((m) => m.name),
         dimensions: [`${grain}:${tcol}`],
         layout: {
-          x: ordered.length === 1 || alone ? PAD : colX(i % 2, 2),
-          y: y + Math.floor(i / 2) * (300 + GAP),
+          x: ordered.length === 1 || alone ? PAD : colX(i % chartCols, chartCols),
+          y: y + Math.floor(i / chartCols) * (300 + GAP),
           w: ordered.length === 1 || alone ? span(1, 1) : span(1, 2),
           h: 300, z: 1,
         },
       });
     });
-    y += Math.ceil(ordered.length / 2) * (300 + GAP);
+    y += Math.ceil(ordered.length / chartCols) * (300 + GAP);
   }
 
   // 3. A breakdown by something categorical, reached through a join if needed.
@@ -136,10 +139,10 @@ export function suggestDashboard(
     tiles.push({
       id: id(), title: `${topMetrics[0].label} by ${dim.split(".").pop()}`,
       metrics: [topMetrics[0].name], dimensions: [dim],
-      layout: { x: colX(i, 2), y, w: span(1, 2), h: 280, z: 1 },
+      layout: { x: colX(i % chartCols, chartCols), y: y + Math.floor(i / chartCols) * (280 + GAP), w: span(1, chartCols), h: 280, z: 1 },
     });
   });
-  if (breakdown.length) y += 280 + GAP;
+  if (breakdown.length) y += Math.ceil(breakdown.length / chartCols) * (280 + GAP);
 
   // 4. One tile from the next table, so the dashboard is not single-subject.
   const [second, secondMetrics] = ranked[1] ?? [null, []];
@@ -189,5 +192,6 @@ export function emptyDashboard(model: Model): DashboardSpec {
 
 function prettyTitle(name: string) {
   return name.replace(/^(fct|dim)_/, "").replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\bSaas\b/g, "SaaS").replace(/\bMrr\b/g, "MRR");
 }

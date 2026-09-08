@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Popover } from "./Popover.tsx";
 import { PRESETS, presetById, type CanvasSpec } from "../canvas/presets.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import { boundsOf } from "../canvas/geometry.ts";
@@ -67,64 +68,46 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
 
   return (
     <div className="editbar">
-      <label className="ctl">
-        <span>Canvas</span>
-        <select value={canvas.preset}
-                onChange={(e) => {
-                  const p = presetById(e.target.value);
-                  if (p) onCanvas({ ...canvas, preset: p.id, width: p.width, height: p.height });
-                  else onCanvas({ ...canvas, preset: "custom" });
-                }}>
-          {["Screen", "Print"].map((g) => (
-            <optgroup key={g} label={g}>
-              {PRESETS.filter((p) => p.group === g).map((p) => (
-                <option key={p.id} value={p.id}>{p.label} — {p.hint}</option>
-              ))}
-            </optgroup>
-          ))}
-          <option value="custom">Custom…</option>
+      <Popover label="Canvas settings" trigger={<>Canvas <span aria-hidden="true">⌄</span></>}>
+        {() => <div className="canvas-settings">
+          <h4>Canvas settings</h4>
+          <label className="ctl"><span>Size</span>
+            <select aria-label="Canvas size" value={canvas.preset} onChange={(e) => {
+              const p = presetById(e.target.value);
+              if (p) onCanvas({ ...canvas, preset: p.id, width: p.width, height: p.height });
+              else onCanvas({ ...canvas, preset: "custom" });
+            }}>
+              {["Screen", "Print"].map((g) => <optgroup key={g} label={g}>
+                {PRESETS.filter((p) => p.group === g).map((p) => <option key={p.id} value={p.id}>{p.label} — {p.hint}</option>)}
+              </optgroup>)}
+              <option value="custom">Custom…</option>
+            </select>
+          </label>
+          {canvas.preset === "custom" && <div className="pair">
+            <label className="ctl"><span>Width</span><input aria-label="Canvas width" type="number" value={canvas.width} min={320} max={4000}
+              onChange={(e) => onCanvas({ ...canvas, width: +e.target.value || 320 })} /></label>
+            <span aria-hidden="true">×</span>
+            <label className="ctl"><span>Height</span><input aria-label="Canvas height" type="number" value={canvas.height} min={320} max={4000}
+              onChange={(e) => onCanvas({ ...canvas, height: +e.target.value || 320 })} /></label>
+          </div>}
+          <div className="settings-row">
+            <label><input type="checkbox" checked={canvas.snap} onChange={(e) => onCanvas({ ...canvas, snap: e.target.checked })} /> Snap to grid</label>
+            <select aria-label="Grid spacing" value={canvas.grid} disabled={!canvas.snap}
+              onChange={(e) => onCanvas({ ...canvas, grid: +e.target.value })}>
+              {[4, 8, 12, 16, 24].map((g) => <option key={g} value={g}>{g}px</option>)}
+            </select>
+          </div>
+          <p>{canvas.width} × {canvas.height} px</p>
+        </div>}
+      </Popover>
+      <div className="zoom-control">
+        <select aria-label="Canvas zoom" value={String(zoom)} onChange={(e) => onZoom(+e.target.value)}>
+          {[0.5, 0.67, 0.75, 0.9, 1, 1.25, 1.5].map((z) => <option key={z} value={z}>{Math.round(z * 100)}%</option>)}
+          {![0.5, 0.67, 0.75, 0.9, 1, 1.25, 1.5].includes(zoom) && <option value={zoom}>{Math.round(zoom * 100)}%</option>}
         </select>
-      </label>
-
-      {canvas.preset === "custom" && (
-        <label className="ctl narrow">
-          <span>Size</span>
-          <span className="pair">
-            <input type="number" value={canvas.width} min={320} max={4000}
-                   onChange={(e) => onCanvas({ ...canvas, width: +e.target.value || 320 })} />
-            <em>×</em>
-            <input type="number" value={canvas.height} min={320} max={4000}
-                   onChange={(e) => onCanvas({ ...canvas, height: +e.target.value || 320 })} />
-          </span>
-        </label>
-      )}
-
+        <button className="tgl" onClick={onFit} title="Zoom so the whole canvas fits">Fit</button>
+      </div>
       <span className="sep" />
-
-      <label className="ctl narrow">
-        <span>Zoom</span>
-        <select value={String(zoom)} onChange={(e) => onZoom(+e.target.value)}>
-          {[0.5, 0.67, 0.75, 0.9, 1, 1.25, 1.5].map((z) => (
-            <option key={z} value={z}>{Math.round(z * 100)}%</option>
-          ))}
-          {![0.5, 0.67, 0.75, 0.9, 1, 1.25, 1.5].includes(zoom) &&
-            <option value={zoom}>{Math.round(zoom * 100)}%</option>}
-        </select>
-      </label>
-      <button className="tgl" onClick={onFit} title="Zoom so the whole canvas fits">Fit</button>
-
-      <button className={"tgl" + (canvas.snap ? " on" : "")}
-              onClick={() => onCanvas({ ...canvas, snap: !canvas.snap })}
-              title="Snap to grid">Snap {canvas.snap ? canvas.grid : "off"}</button>
-      {canvas.snap && (
-        <select className="mini" value={canvas.grid}
-                onChange={(e) => onCanvas({ ...canvas, grid: +e.target.value })}>
-          {[4, 8, 12, 16, 24].map((g) => <option key={g} value={g}>{g}px</option>)}
-        </select>
-      )}
-
-      <span className="sep" />
-
       <button className="tgl" onClick={smartArrange} disabled={tiles.length < 2}
               title="Repack every tile into clean rows, in reading order -- fixes overlap, gaps and drift after a bunch of manual moves. Only ever moves and resizes tiles; never changes a metric, dimension, or chart kind.">
         <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -134,20 +117,12 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
         Smart arrange
       </button>
 
-      {/* A real visual gap, not just adjacent buttons -- these get
-          confused for two settings of the same "clean up the dashboard"
-          action often enough (they sat with no separator at all before
-          this) that a click on one has been mistaken for the other's
-          effect. Smart arrange only ever repositions tiles; Beautify
-          dashboard proposes changes that still need a click to apply --
-          different enough to deserve to look like two tools, not one. */}
-      <span className="sep" />
-
       {beautify}
-
-      <span className="sep" />
-
-      <div className={"group" + (many ? "" : " off")}>
+      <span className="spacer" />
+      <button className="lock" onClick={() => onCanvas({ ...canvas, locked: true })} title="View without editing controls">Preview</button>
+      {sel.length > 0 && <div className="selection-tools">
+      <span className="selinfo">{sel.length} selected</span>
+      {many && <div className="group">
         {([["left","Align left","M3 3v14M6 6h11v3H6zM6 12h7v3H6z"],
            ["hcenter","Align centre","M10 3v14M5 6h10v3H5zM7 12h6v3H7z"],
            ["right","Align right","M17 3v14M3 6h11v3H3zM7 12h7v3H7z"],
@@ -163,21 +138,14 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
                 disabled={sel.length < 3}>⇹</button>
         <button title="Distribute vertically" onClick={() => distribute("y")}
                 disabled={sel.length < 3}>⇳</button>
-      </div>
+      </div>}
 
-      <span className="sep" />
-
-      <div className={"group" + (sel.length ? "" : " off")}>
+      <div className="group">
         <button title="Bring to front" onClick={() => layer("front")}>⬆︎</button>
         <button title="Send to back" onClick={() => layer("back")}>⬇︎</button>
       </div>
 
-      <span className="spacer" />
-      <span className="selinfo">{sel.length ? `${sel.length} selected` : `${tiles.length} tiles`}</span>
-      <button className={"lock" + (canvas.locked ? " on" : "")}
-              onClick={() => onCanvas({ ...canvas, locked: !canvas.locked })}>
-        {canvas.locked ? "🔒 Locked" : "🔓 Editing"}
-      </button>
+      </div>}
     </div>
   );
 }

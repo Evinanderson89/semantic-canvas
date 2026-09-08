@@ -44,7 +44,7 @@ export function Inspector({ model, tile, onChange, onClose }: {
     <aside className="inspector">
       <div className="ins-head">
         <b>{tile.title ?? tile.metrics.join(", ")}</b>
-        <button className="x" onClick={onClose}>✕</button>
+        <button className="x" aria-label="Close inspector" onClick={onClose}>✕</button>
       </div>
 
       {tile.kind && tile.kind !== "metric" ? (

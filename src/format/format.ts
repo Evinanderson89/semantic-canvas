@@ -33,7 +33,7 @@ export interface FormatSpec {
 }
 
 export const PALETTES: Record<string, string[]> = {
-  default:  ["#5aa9e6", "#3fbf8f", "#d8a24d", "#e5736a", "#9b8ade", "#4fb3b1"],
+  default:  ["#5b8fb0", "#43866c", "#b18442", "#bb7460", "#9680b5", "#509b96"],
   cool:     ["#5aa9e6", "#4fb3b1", "#7c9ce8", "#57c2c8", "#8f8fe0", "#3fbf8f"],
   warm:     ["#e5934d", "#e5736a", "#d8a24d", "#cf7fa0", "#c9964f", "#e0645c"],
   mono:     ["#5aa9e6", "#7fbcea", "#a3cfee", "#c6e1f3", "#3f88bd", "#2f6b96"],
