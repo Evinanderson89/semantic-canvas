@@ -74,16 +74,17 @@ export async function snowflakeConnector(
     c.execute({ sqlText, complete: (err: any, _s: any, rows: any[]) =>
       err ? rej(err) : res(rows ?? []) }));
 
+  const quote = (i: string) => `"${i.replace(/"/g, '""')}"`;
   const qualify = (t: string) =>
-    [cfg.database, cfg.schema, t].filter(Boolean).map((p) => `"${p}"`).join(".");
+    [cfg.database, cfg.schema, t].filter(Boolean).map(quote).join(".");
 
   return {
     id: "snowflake", label: `Snowflake (${cfg.account}/${cfg.database}.${cfg.schema})`,
-    quote: (i) => `"${i.replace(/"/g, '""')}"`,
+    quote,
     // Snowflake spells this the same as DuckDB, but the unit must be unquoted.
     dateTrunc: (grain, expr) => `DATE_TRUNC(${grain}, ${expr})`,
     dateAdd: (unit, expr, n) => `DATEADD(${unit}, ${n}, ${expr})`,
-    relation: (table) => qualify(table),
+    relation: (table, physical) => physical ? [physical.database ?? cfg.database, physical.schema ?? cfg.schema, physical.table].filter(Boolean).map(quote).join(".") : qualify(table),
 
     async execute(sql: string, limit = 5000): Promise<QueryResult> {
       const conn = await acquire();

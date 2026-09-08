@@ -66,7 +66,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
 
       <nav>
         <NavItem icon="home" label="Home" active={view === "home" && active === null}
-                 onClick={() => { onView("home"); onPick(null); }} />
+                 onClick={() => onView("home")} />
         <NavItem icon="registry" label="Metric Registry" active={view === "registry"}
                  badge={String(Object.keys(model.metrics).length)}
                  onClick={() => onView("registry")} />

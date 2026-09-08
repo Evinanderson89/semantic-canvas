@@ -59,8 +59,8 @@ export interface TileSpec {
   chart?: ChartKind;
   /**
    * Period-over-period comparison. Requires a time dimension; the compiler
-   * wraps the aggregate in a CTE and LAGs it by one period ("prior") or by a
-   * full year's worth of periods ("yoy"), which is what "Month-over-Month
+   * matches the aggregate to the previous calendar period ("prior") or
+   * the same calendar date one year earlier ("yoy"), which is what "Month-over-Month
    * Revenue by Region" actually means.
    */
   compare?: "none" | "prior" | "yoy";

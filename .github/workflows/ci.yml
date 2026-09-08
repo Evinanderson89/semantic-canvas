@@ -13,7 +13,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -24,10 +24,6 @@ jobs:
 
       - run: npx playwright install --with-deps chromium
 
-      - name: Start app
-        run: npm start &
-
-      - name: Wait for dev server
-        run: npx wait-on http://localhost:5173 http://localhost:5174/api/model --timeout 60000
+      - run: npm run build
 
       - run: npm run e2e

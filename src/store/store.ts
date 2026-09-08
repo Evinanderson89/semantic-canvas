@@ -1,90 +1,84 @@
-import { DuckDBInstance } from "@duckdb/node-api";
+import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { canvasSchema, dashboardSchema, saveSchema } from "../compiler/schema.ts";
+import { DEFAULT_CANVAS } from "../canvas/presets.ts";
 
-/**
- * Dashboards persist in DuckDB, next to the connection rather than in the
- * browser: localStorage dies with a cache clear and cannot be shared, committed
- * or backed up.
- *
- * Deliberately a SEPARATE database file, not a table inside the user's
- * warehouse. Writing our furniture into someone's Snowflake is presumptuous,
- * and the read-only posture everywhere else in this tool would have to be
- * abandoned to do it. The interface below is small enough that a warehouse-table
- * implementation can be added later for teams that want shared dashboards.
- */
-export interface SavedDashboard {
-  id: string;
-  name: string;
-  model: string;
-  spec: string;
-  updated_at: string;
-}
-
-import type { DuckDBConnection } from "@duckdb/node-api";
-
+export interface DashboardScope { source: string; model: string }
+export class StoreConflict extends Error { status = 409; }
 let connection: DuckDBConnection | null = null;
-/** Throws rather than yielding `Cannot read properties of null` inside a handler. */
+let storeInstance: DuckDBInstance | null = null;
+// DuckDB connections execute one transaction at a time. Serialize reads too,
+// so no request sees the temporary delete inside a replacement transaction.
+let pending: Promise<unknown> = Promise.resolve();
+function serialized<T>(work: () => Promise<T>): Promise<T> {
+  const result = pending.then(work);
+  pending = result.catch(() => {});
+  return result;
+}
 function conn(): DuckDBConnection {
-  if (!connection) throw new Error("dashboard store not opened; call openStore() first");
+  if (!connection) throw new Error("dashboard store is not open");
   return connection;
 }
-
 export async function openStore(path?: string) {
-  const dir = join(homedir(), ".semantic-canvas");
-  await mkdir(dir, { recursive: true });
-  const file = path ?? join(dir, "dashboards.duckdb");
-  const instance = await DuckDBInstance.create(file);
-  connection = await instance.connect();
+  const file = path ?? join(process.env.SC_DATA_DIR ?? join(homedir(), ".semantic-canvas"), "dashboards.duckdb");
+  if (file !== ":memory:") await mkdir(dirname(file), { recursive: true });
+  storeInstance = await DuckDBInstance.create(file);
+  connection = await storeInstance.connect();
   await conn().run(`CREATE TABLE IF NOT EXISTS dashboards (
-    id VARCHAR PRIMARY KEY,
-    name VARCHAR NOT NULL,
-    model VARCHAR NOT NULL,
-    spec VARCHAR NOT NULL,
-    canvas VARCHAR NOT NULL,
-    updated_at TIMESTAMP NOT NULL
+    id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL, model VARCHAR NOT NULL,
+    spec VARCHAR NOT NULL, canvas VARCHAR NOT NULL, updated_at TIMESTAMP NOT NULL
   )`);
+  // Additive migration: existing dashboard JSON is never rewritten or deleted.
+  await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS source_id VARCHAR");
+  await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS schema_version INTEGER DEFAULT 1");
+  await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS revision INTEGER DEFAULT 1");
   return file;
 }
-
-/**
- * Everything below is parameterised. Dashboard titles are user text and the spec
- * is a JSON blob; concatenating either into SQL is how the injection in the
- * query compiler happened, and a hand-rolled escaper is not a second chance.
- */
-export async function listDashboards(model: string) {
+export async function closeStore() { await pending; connection?.closeSync(); storeInstance?.closeSync(); connection = null; storeInstance = null; }
+/** Legacy saves knew only the model name. Claim them only when that name has one source. */
+export const migrateLegacySources = (scopes: DashboardScope[]) => serialized(async () => {
+  for (const scope of scopes) {
+    if (scopes.filter((s) => s.model === scope.model).length !== 1) continue;
+    await conn().run("UPDATE dashboards SET source_id = ? WHERE model = ? AND source_id IS NULL", [scope.source, scope.model]);
+  }
+});
+export const listDashboards = (scope: DashboardScope) => serialized(async () => {
   const r = await conn().runAndReadAll(
-    `SELECT id, name, updated_at FROM dashboards WHERE model = ?
-      ORDER BY updated_at DESC`, [model]);
-  return r.getRows().map((row: any[]) => ({
-    id: String(row[0]), name: String(row[1]), updated_at: String(row[2]),
-  }));
-}
-
-export async function saveDashboard(d: {
-  id: string; name: string; model: string; spec: unknown; canvas: unknown;
-}) {
-  // JSON.stringify(undefined) returns the JS value undefined, not a string --
-  // an omitted canvas (or spec) then reaches DuckDB's parameter binder as an
-  // untyped value it can't bind ("Cannot create values of type ANY"), not as
-  // a clean validation error. Every caller that always sends both (the
-  // browser) never hit this; the MCP server's canvas-is-optional tool did.
-  await conn().run(
-    `INSERT OR REPLACE INTO dashboards VALUES (?, ?, ?, ?, ?, now())`,
-    [d.id, d.name, d.model, JSON.stringify(d.spec ?? {}), JSON.stringify(d.canvas ?? {})]);
-  return { ok: true };
-}
-
-export async function loadDashboard(id: string) {
+    "SELECT id, name, updated_at, revision FROM dashboards WHERE source_id = ? ORDER BY updated_at DESC", [scope.source]);
+  return r.getRows().map((row) => ({ id: String(row[0]), name: String(row[1]), updated_at: String(row[2]), revision: Number(row[3]) }));
+});
+export const saveDashboard = (input: unknown, scope: DashboardScope) => serialized(async () => {
+  const d = saveSchema.parse(input);
+  await conn().run("BEGIN TRANSACTION");
+  try {
+    const current = (await conn().runAndReadAll("SELECT source_id, revision FROM dashboards WHERE id = ?", [d.id])).getRows()[0];
+    if (current ? String(current[0]) !== scope.source || Number(current[1]) !== d.revision : d.revision !== 0)
+      throw new StoreConflict("This dashboard changed or belongs to another source. Reopen the latest version, or save your edits as a copy.");
+    const revision = d.revision + 1;
+    // Updating a large VARCHAR can trigger DuckDB's indexed UPDATE limitation.
+    // Explicit delete + insert in one transaction preserves atomic replacement.
+    if (current) await conn().run("DELETE FROM dashboards WHERE id = ?", [d.id]);
+    await conn().run(`INSERT INTO dashboards
+      (id, name, model, spec, canvas, updated_at, source_id, schema_version, revision)
+      VALUES (?, ?, ?, ?, ?, now(), ?, ?, ?)`, [d.id, d.name || d.spec.title, scope.model,
+      JSON.stringify(d.spec), JSON.stringify(d.canvas), scope.source, d.schemaVersion, revision]);
+    await conn().run("COMMIT");
+    return { ok: true, id: d.id, revision, schemaVersion: d.schemaVersion };
+  } catch (error) { await conn().run("ROLLBACK"); throw error; }
+});
+export const loadDashboard = (id: string, scope: DashboardScope) => serialized(async () => {
   const r = await conn().runAndReadAll(
-    `SELECT name, spec, canvas FROM dashboards WHERE id = ?`, [id]);
+    "SELECT name, spec, canvas, revision, schema_version FROM dashboards WHERE id = ? AND source_id = ?", [id, scope.source]);
   const row = r.getRows()[0];
   if (!row) return null;
-  return { name: String(row[0]), spec: JSON.parse(String(row[1])), canvas: JSON.parse(String(row[2])) };
-}
-
-export async function deleteDashboard(id: string) {
-  await conn().run(`DELETE FROM dashboards WHERE id = ?`, [id]);
+  if (Number(row[4]) !== 1) throw new Error("This dashboard requires a newer version of Semantic Canvas");
+  return { id, name: String(row[0]), spec: dashboardSchema.parse(JSON.parse(String(row[1]))),
+    canvas: canvasSchema.parse({ ...DEFAULT_CANVAS, ...JSON.parse(String(row[2])) }), revision: Number(row[3]), schemaVersion: 1 };
+});
+export const deleteDashboard = (id: string, scope: DashboardScope, revision: number) => serialized(async () => {
+  const r = await conn().runAndReadAll("DELETE FROM dashboards WHERE id = ? AND source_id = ? AND revision = ? RETURNING id", [id, scope.source, revision]);
+  if (!r.getRows().length) throw new StoreConflict("Dashboard changed or was not found; reopen it before deleting");
   return { ok: true };
-}
+});

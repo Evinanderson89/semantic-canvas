@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { dashboardSchema, canvasSchema, filterSchema } from "../compiler/schema.ts";
 import { z } from "zod";
 import { LAYOUTS } from "../canvas/layouts.ts";
 
@@ -9,11 +11,15 @@ import { LAYOUTS } from "../canvas/layouts.ts";
  * there's no second copy of validation/RLS/compiler logic to fall out of
  * sync, and no "the MCP agent is governed but the in-app one isn't" gap.
  */
-const API = process.env.SEMANTIC_CANVAS_URL ?? "http://localhost:5174";
+const API = process.env.SEMANTIC_CANVAS_URL ?? `http://127.0.0.1:${process.env.PORT ?? 5174}`;
+export interface ToolContext { source?: string; principal?: string }
+const context = new AsyncLocalStorage<ToolContext>();
+export function runToolInContext<T>(ctx: ToolContext, run: () => Promise<T>): Promise<T> { return context.run(ctx, run); }
 
 export async function api(path: string, opts: {
   method?: string; body?: unknown; source?: string; principal?: string;
 } = {}) {
+  opts = { ...opts, ...context.getStore() };
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers["content-type"] = "application/json";
   if (opts.source) headers["x-sc-source"] = opts.source;
@@ -37,14 +43,7 @@ export async function api(path: string, opts: {
 export const asText = (value: unknown): string =>
   typeof value === "string" ? value : JSON.stringify(value, null, 2);
 
-const filterSpec = z.object({
-  id: z.string(), field: z.string(),
-  source: z.enum(["dimension", "metric"]), mode: z.enum(["discrete", "range"]),
-  values: z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
-  min: z.union([z.number(), z.string()]).nullable().optional(),
-  max: z.union([z.number(), z.string()]).nullable().optional(),
-  exclude: z.boolean().optional(),
-});
+const filterSpec = filterSchema;
 
 export interface ToolSpec<I = any> {
   name: string;
@@ -73,11 +72,12 @@ export const TOOLS: ToolSpec[] = [
     description: "Cardinality and sample values for fields on one base table. Check this before choosing a breakdown dimension for curation -- a field with 30,000 distinct values makes a bad bar chart even though the model allows it.",
     inputSchema: {
       base: z.string().describe("The base table these fields belong to"),
+      principal: z.string().optional(),
       fields: z.array(z.string()).min(1).describe('Column names, or "table.column" for a joined field'),
       source: z.string().optional(),
     },
-    handler: async ({ base, fields, source }) => api(
-      `/api/profile?base=${encodeURIComponent(base)}&fields=${encodeURIComponent(fields.join(","))}`, { source }),
+    handler: async ({ base, fields, source, principal }) => api(
+      `/api/profile?base=${encodeURIComponent(base)}&fields=${encodeURIComponent(fields.join(","))}`, { source, principal }),
   },
   {
     name: "query_metric",
@@ -103,8 +103,8 @@ export const TOOLS: ToolSpec[] = [
   {
     name: "get_dashboard",
     description: "Load one saved dashboard's full spec (tiles) and canvas.",
-    inputSchema: { id: z.string() },
-    handler: async ({ id }) => api(`/api/dashboards/${encodeURIComponent(id)}`),
+    inputSchema: { id: z.string(), source: z.string().optional() },
+    handler: async ({ id, source }) => api(`/api/dashboards/${encodeURIComponent(id)}`, { source }),
   },
   {
     name: "save_dashboard",
@@ -112,8 +112,9 @@ export const TOOLS: ToolSpec[] = [
     inputSchema: {
       id: z.string().describe("A stable id; reuse it to overwrite the same dashboard"),
       name: z.string(),
-      spec: z.any().describe("DashboardSpec: { title, tiles: TileSpec[] }"),
-      canvas: z.any().optional(),
+      spec: dashboardSchema,
+      canvas: canvasSchema.optional(),
+      revision: z.number().int().nonnegative().default(0).describe("0 creates a new dashboard; updates require the revision returned by get_dashboard"),
       source: z.string().optional(),
     },
     handler: async ({ source, ...body }) => api("/api/dashboards", { method: "POST", body, source }),
@@ -128,11 +129,11 @@ export const TOOLS: ToolSpec[] = [
     name: "arrange_dashboard",
     description: "Repack a saved dashboard's tiles into a clean layout -- auto-picks the best-fitting named layout (see list_layouts) unless you force one, and grows the canvas if needed. Call this after save_dashboard rather than hand-computing tile positions.",
     inputSchema: {
-      id: z.string(),
+      id: z.string(), source: z.string().optional(), revision: z.number().int().positive().optional(),
       layout: z.enum(["grid", "exec-summary"]).optional().describe("Force a specific layout; omit to auto-pick the best fit"),
     },
-    handler: async ({ id, layout }) =>
-      api(`/api/dashboards/${encodeURIComponent(id)}/arrange`, { method: "POST", body: { layout } }),
+    handler: async ({ id, layout, source, revision }) =>
+      api(`/api/dashboards/${encodeURIComponent(id)}/arrange`, { method: "POST", body: { layout, revision }, source }),
   },
   {
     name: "ask_user",

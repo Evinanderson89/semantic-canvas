@@ -64,21 +64,21 @@ describe("period-over-period", () => {
     expect(sql).toContain(`AS "revenue__prev"`);
     expect(sql).toContain(`AS "revenue__delta"`);
     expect(sql).toContain(`AS "revenue__pct"`);
-    expect(sql).toContain("LAG(");
+    expect(sql).toContain("LEFT JOIN __base prev");
   });
 
-  it("lags a full year on a monthly grain for year-over-year", () => {
-    expect(compileTile(model, conn, t({ compare: "yoy" }))).toContain(`LAG("revenue", 12)`);
+  it("looks up the previous calendar year", () => {
+    expect(compileTile(model, conn, t({ compare: "yoy" }))).toContain("INTERVAL '-1 year'");
   });
 
   it("partitions by the non-time dimensions so regions do not bleed together", () => {
     const sql = compileTile(model, conn,
       t({ dimensions: ["month:sold_on", "dim_users.country"], compare: "prior" }));
-    expect(sql).toContain(`PARTITION BY "country"`);
+    expect(sql).toContain(`cur."country" IS NOT DISTINCT FROM prev."country"`);
   });
 
-  it("does nothing without a time dimension", () => {
-    expect(compileTile(model, conn, t({ dimensions: [], compare: "prior" })))
-      .not.toContain("LAG(");
+  it("rejects comparison without a time dimension", () => {
+    expect(() => compileTile(model, conn, t({ dimensions: [], compare: "prior" })))
+      .toThrow(/requires a time dimension/);
   });
 });

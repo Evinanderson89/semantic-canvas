@@ -742,3 +742,9 @@ button.link-btn:disabled{opacity:.6;cursor:default}
   color:var(--accent);cursor:pointer;font:inherit;font-size:11px}
 .drill-crumbs .crumb:hover:not(:disabled){background:var(--accent-soft)}
 .drill-crumbs .crumb:disabled{color:var(--ink-2);cursor:default;font-weight:600}
+
+/* Document state stays visible while editing or recovering work. */
+.document-notice { padding: 12px 18px; margin: 12px 24px; border: 1px solid var(--accent); border-radius: 8px; color: var(--ink); background: var(--surface); }
+.document-library { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 20px 28px 0; }
+.document-library > div { display: flex; gap: 12px; }
+.save-status { font-size: 12px; white-space: nowrap; color: var(--ink-2); }

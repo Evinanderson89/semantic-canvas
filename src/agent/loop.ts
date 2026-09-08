@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
-import { TOOLS, asText, type ToolSpec } from "./tools.ts";
+import { runToolInContext, type ToolContext, TOOLS, asText, type ToolSpec } from "./tools.ts";
 import type { AiConfig } from "../sources/registry.ts";
 import type { FilterSpec } from "../compiler/spec.ts";
 
@@ -24,15 +24,15 @@ Ground rules:
 - Be concise. The person you're building for is watching this happen.
 
 ${ctx.source ? `Active source: ${ctx.source}.` : ""} ${ctx.principal
-  ? `The current user is acting as principal "${ctx.principal}" -- pass it to query_metric/save_dashboard so row-level security applies as it would for them, unless they explicitly ask to see it as someone else.`
+  ? `The current user is acting as principal "${ctx.principal}". Tools are bound to this source and role by the server; ask the user to switch roles in the UI if needed.`
   : "No principal is set for this session -- query_metric will be denied by row-level security until one is provided; ask_user if you need to know who to act as."}`;
 
-function buildTools(list: ToolSpec[] = TOOLS) {
+function buildTools(ctx: ToolContext, list: ToolSpec[] = TOOLS) {
   return list.map((t) => betaZodTool({
     name: t.name,
     description: t.description,
     inputSchema: z.object(t.inputSchema),
-    run: async (input: any) => asText(await t.handler(input)),
+    run: async (input: any) => asText(await runToolInContext(ctx, () => t.handler(input))),
   }));
 }
 
@@ -44,6 +44,7 @@ export async function chat(
   message: string,
   ctx: { source?: string; principal?: string },
 ): Promise<{ text: string; messages: ChatMessage[] }> {
+  if (cfg.provider !== "anthropic") throw new Error(`Unsupported AI provider: ${cfg.provider}. This alpha supports Anthropic only.`);
   if (!cfg.apiKey) throw new Error("the AI agent isn't configured -- set ANTHROPIC_API_KEY in .env");
   const client = new Anthropic({ apiKey: cfg.apiKey });
   const messages: ChatMessage[] = [...history, { role: "user", content: message }];
@@ -52,7 +53,7 @@ export async function chat(
     model: cfg.model,
     max_tokens: 16000,
     system: SYSTEM(ctx),
-    tools: buildTools(),
+    tools: buildTools(ctx),
     messages,
   });
 
@@ -111,14 +112,15 @@ function describeTile(tile: ExplainTile, task: string): string {
   ].filter(Boolean).join("\n");
 }
 
-async function oneShot(cfg: AiConfig, system: string, tools: ToolSpec[], userText: string): Promise<string> {
+async function oneShot(cfg: AiConfig, system: string, tools: ToolSpec[], userText: string, ctx: ToolContext): Promise<string> {
+  if (cfg.provider !== "anthropic") throw new Error(`Unsupported AI provider: ${cfg.provider}. This alpha supports Anthropic only.`);
   if (!cfg.apiKey) throw new Error("the AI agent isn't configured -- set ANTHROPIC_API_KEY in .env");
   const client = new Anthropic({ apiKey: cfg.apiKey });
   const finalMessage = await client.beta.messages.toolRunner({
     model: cfg.model,
     max_tokens: 1024,
     system,
-    tools: buildTools(tools),
+    tools: buildTools(ctx, tools),
     messages: [{ role: "user", content: userText }],
   });
   return finalMessage.content
@@ -132,7 +134,7 @@ export async function explainTile(
   cfg: AiConfig, ctx: { source?: string; principal?: string }, tile: ExplainTile,
 ): Promise<string> {
   const task = "Explain what this means, and if there's a notable change, what's likely driving it.";
-  return oneShot(cfg, EXPLAIN_SYSTEM(ctx), EXPLAIN_TOOLS, describeTile(tile, task));
+  return oneShot(cfg, EXPLAIN_SYSTEM(ctx), EXPLAIN_TOOLS, describeTile(tile, task), ctx);
 }
 
 /**
@@ -156,7 +158,7 @@ export async function suggestImprovements(
   cfg: AiConfig, ctx: { source?: string; principal?: string }, tile: ExplainTile,
 ): Promise<string> {
   const task = "Suggest concrete ways this tile's presentation could be improved, or say it already reads well.";
-  return oneShot(cfg, BEAUTIFY_SYSTEM(ctx), EXPLAIN_TOOLS, describeTile(tile, task));
+  return oneShot(cfg, BEAUTIFY_SYSTEM(ctx), EXPLAIN_TOOLS, describeTile(tile, task), ctx);
 }
 
 /**
@@ -228,6 +230,7 @@ export async function suggestDashboardStory(
   cfg: AiConfig, ctx: { source?: string; principal?: string },
   tiles: DashboardTileSummary[], catalog: MetricCatalogEntry[],
 ): Promise<DashboardStorySuggestion> {
+  if (cfg.provider !== "anthropic") throw new Error(`Unsupported AI provider: ${cfg.provider}. This alpha supports Anthropic only.`);
   if (!cfg.apiKey) throw new Error("the AI agent isn't configured -- set ANTHROPIC_API_KEY in .env");
   if (!tiles.length) throw new Error("no tiles to look at");
   const client = new Anthropic({ apiKey: cfg.apiKey });

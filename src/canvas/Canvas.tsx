@@ -119,6 +119,7 @@ export function Canvas({
       if (nudge[e.key]) {
         e.preventDefault();
         const [dx, dy] = nudge[e.key];
+        onCommit(tiles);
         onChange(tiles.map((t) => selected.includes(t.id)
           ? { ...t, layout: { ...t.layout, x: Math.max(0, t.layout.x + dx), y: Math.max(0, t.layout.y + dy) } } : t));
       }
@@ -126,7 +127,7 @@ export function Canvas({
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [selected, tiles, canvas, onChange, onSelect]);
+  }, [selected, tiles, canvas, onChange, onCommit, onSelect]);
 
   return (
     <div className="canvas-scroll" ref={scrollRef}>

@@ -1,5 +1,5 @@
 import type { Connector } from "../connectors/types.ts";
-import { findJoin, type Model } from "../semantic/model.ts";
+import { findJoin, fieldReachable, isTemporal, joinPairs, type Model } from "../semantic/model.ts";
 import type { FilterSpec, TileSpec, ValidationIssue } from "./spec.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -39,6 +39,26 @@ export function validateTile(model: Model, tile: TileSpec): ValidationIssue[] {
     if (table && table !== base && !findJoin(model, base, table))
       issues.push({ tile: id, problem: `no join from ${base} to ${table}` });
   }
+  const aliases = (tile.dimensions ?? []).map((d) => { const x = parseDimension(d); return x.column + (x.grain ? `_${x.grain}` : ""); });
+  if (new Set(aliases).size !== aliases.length || aliases.some((a) => tile.metrics.includes(a)))
+    issues.push({ tile: id, problem: "dimension and metric output names must be unique" });
+  for (const dim of tile.dimensions ?? []) {
+    const d = parseDimension(dim);
+    const col = model.tables[d.table ?? base]?.columns.find((c) => c.name === d.column);
+    if (d.grain && col && !isTemporal(col)) issues.push({ tile: id, problem: `time grain requires a date column: ${dim}` });
+  }
+  for (const f of tile.where ?? []) {
+    if (f.source === "dimension" && (f.field.includes(":") || !fieldReachable(model, base, f.field)))
+      issues.push({ tile: id, problem: `unknown or unreachable filter field "${f.field}"` });
+    if (f.source === "metric" && (!tile.metrics.includes(f.field) || model.metrics[f.field]?.baseTable !== base))
+      issues.push({ tile: id, problem: `metric filter "${f.field}" must name a selected metric on this table` });
+  }
+  if (tile.compare && tile.compare !== "none" && !(tile.dimensions ?? []).some((d) => d.includes(":")))
+    issues.push({ tile: id, problem: "period comparison requires a time dimension" });
+  if ((tile.where ?? []).some((f) => f.source === "metric") && new Set((tile.metrics ?? []).map((n) => model.metrics[n]?.filter ?? null)).size > 1)
+    issues.push({ tile: id, problem: "aggregate filters across metrics with different always-on filters are not yet supported" });
+  if ((tile.dimensions ?? []).filter((d) => d.includes(":")).length > 1 && tile.compare && tile.compare !== "none")
+    issues.push({ tile: id, problem: "period comparison requires exactly one time dimension" });
   return issues;
 }
 
@@ -51,6 +71,8 @@ export function parseDimension(dim: string) {
 }
 
 export function compileTile(model: Model, conn: Connector, tile: TileSpec): string {
+  const issues = validateTile(model, tile);
+  if (issues.length) throw new Error(issues.map((i) => i.problem).join("; "));
   const metrics = tile.metrics.map((n) => model.metrics[n]);
   if (metrics.some((m) => !m)) throw new Error("compileTile called with an unvalidated tile");
   const base = metrics[0].baseTable;
@@ -87,13 +109,7 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec): stri
     else where.push(`(${p.sql})`);
   }
 
-  let from = `${conn.relation(base)} AS ${base}`;
-  for (const t of needed) {
-    assertIdent(t);
-    const j = findJoin(model, base, t)!;
-    from += `\n  LEFT JOIN ${conn.relation(t)} AS ${t}` +
-            ` ON ${base}.${q(j.leftOn)} = ${t}.${q(j.rightOn)}`;
-  }
+  const from = compileFrom(model, conn, base, needed);
 
   // ---- always-on metric filters --------------------------------------------
   //
@@ -136,72 +152,22 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec): stri
         clause("  HAVING", h);
       return `${name} AS (\n  ${body}\n)`;
     });
-    // With no dimensions each CTE is one row, so there is nothing to join on.
+    // Null dimension values represent the same cohort in every metric group.
+    const key = (col: string, owners: string[]) => owners.length === 1 ? `${owners[0]}.${col}` : `COALESCE(${owners.map((n) => `${n}.${col}`).join(", ")})`;
     const join = groupCols.length
-      ? names.slice(1).map((n) => `\nFULL OUTER JOIN ${n} USING (${groupCols.join(", ")})`).join("")
+      ? names.slice(1).map((n, i) => `\nFULL OUTER JOIN ${n} ON ${groupCols.map((c) => `${key(c, names.slice(0, i + 1))} IS NOT DISTINCT FROM ${n}.${c}`).join(" AND ")}`).join("")
       : names.slice(1).map((n) => `\nCROSS JOIN ${n}`).join("");
+    const metricCols = metrics.map((m) => {
+      const owner = [...groups.values()].findIndex((ms) => ms.includes(m));
+      return `${names[owner]}.${q(m.name)} AS ${q(m.name)}`;
+    });
     sql = `WITH ${ctes.join(",\n")}\n` +
-          `SELECT ${[...groupCols, ...metrics.map((m) => q(m.name))].join(", ")}\n` +
-          `FROM ${names[0]}${join}`;
+      `SELECT ${[...groupCols.map((c) => `${key(c, names)} AS ${c}`), ...metricCols].join(", ")}\nFROM ${names[0]}${join}`;
   }
 
-  // ---- drop a coarsened bucket that isn't a full period ----------------------
-  //
-  // A metric's own date range rarely lines up with a week/month/quarter/year
-  // boundary. date_trunc('week', Sep-1) still buckets it with the Monday
-  // before -- Aug-26 -- but only ONE real day (Sep-1) actually falls in that
-  // bucket, so its total reads as a collapse next to a full week right next
-  // to it: exactly the "chart drops to zero at both ends" this fixes. Applied
-  // BEFORE the period-over-period LAG below, not after -- comparing against
-  // an already-partial neighbor would report a real-looking but meaningless
-  // swing for whichever row sits next to the trimmed one.
-  //
-  // Not needed for "day": each row already IS one full, indivisible unit at
-  // that grain (the columns this app buckets are DATE-typed, not timestamps
-  // with a partial first/last calendar day), so there's no coarser period for
-  // a day bucket to be partial within.
-  const coarseTimeDim = (tile.dimensions ?? []).find((d) => {
-    const { grain } = parseDimension(d);
-    return grain && grain !== "day";
-  });
-  // Set below when a partial edge was actually trimmed away, so the final
-  // wrap (after period-over-period) can re-attach it as real columns rather
-  // than this being silent all the way out to the caller.
-  let partialBounds: { ref: string; grain: string; unit: "day" | "month" | "year"; n: number } | null = null;
-  if (coarseTimeDim) {
-    const { grain, table, column } = parseDimension(coarseTimeDim);
-    const owner = table ?? base;
-    const ref = `${owner}.${q(column)}`;
-    const alias = q(`${column}_${grain}`);
-    // DuckDB (and Snowflake's DATEADD) have no "quarter" interval unit --
-    // expressed as 3 months instead, which is exactly equivalent for this
-    // purpose since a coarsened bucket's start is always the 1st of a month.
-    const PERIOD: Record<string, [unit: "day" | "month" | "year", n: number]> = {
-      week: ["day", 7], month: ["month", 1], quarter: ["month", 3], year: ["year", 1],
-    };
-    const [unit, n] = PERIOD[grain!];
-    const qualifiedAlias = `__periods.${alias}`;
-    // One full period after the bucket's start, minus a day, is that
-    // bucket's own last day -- date_trunc only ever rounds DOWN to a
-    // period's start, so this is the only way to get its end.
-    const bucketEnd = conn.dateAdd("day", conn.dateAdd(unit, qualifiedAlias, n), -1);
-    const periodCols = [...groupCols, ...metrics.map((m) => q(m.name))];
-    // `where` here is the tile's own dimensional/cross-filter scope, the
-    // one thing every metric on the tile shares -- correct for the common
-    // case (one metric, or several with the same always-on filter). A
-    // KNOWN, narrower gap: if two metrics on the SAME tile have DIFFERENT
-    // always-on filters (the `groups.size > 1` case above) that happen to
-    // cover different date ranges, bounds is computed against their
-    // UNION, not each metric's own narrower range -- a metric whose own
-    // filter ends earlier than its sibling's could still show a partial
-    // edge this doesn't catch. Not fixed here: it would mean a separate
-    // bounds query per filter group, and no reported case has hit it yet.
-    sql = `WITH __bounds AS (\n  SELECT MIN(${ref}) AS lo, MAX(${ref}) AS hi\n  FROM ${from}` +
-          clause("  WHERE", where) + `\n),\n__periods AS (\n${sql}\n)\n` +
-          `SELECT ${periodCols.map((c) => `__periods.${c}`).join(", ")}\nFROM __periods CROSS JOIN __bounds\n` +
-          `WHERE ${qualifiedAlias} >= __bounds.lo AND ${bucketEnd} <= __bounds.hi`;
-    partialBounds = { ref, grain: grain!, unit, n };
-  }
+  // Observed MIN/MAX dates do not establish data completeness: a monthly
+  // snapshot can have only the first day, and event data can be sparse.
+  // Keep all observed periods. Completeness is unknown until declared upstream.
 
   // ---- period-over-period --------------------------------------------------
   const cmp = tile.compare && tile.compare !== "none" ? tile.compare : null;
@@ -209,50 +175,26 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec): stri
   if (cmp && timeDim && groupCols.length) {
     const grain = timeDim.split(":")[0];
     const timeAlias = q(`${parseDimension(timeDim).column}_${grain}`);
-    // LAG by one period, or by a year's worth of them. This assumes a dense
-    // series, which a date_trunc'd aggregate over a contiguous range is.
-    const offset = cmp === "prior" ? 1
-      : ({ day: 365, week: 52, month: 12, quarter: 4, year: 1 } as Record<string, number>)[grain] ?? 1;
+    const period: Record<string, ["day" | "month" | "year", number]> = {
+      day: ["day", 1], week: ["day", 7], month: ["month", 1], quarter: ["month", 3], year: ["year", 1],
+    };
+    const [unit, n] = cmp === "yoy" ? ["year" as const, 1] : period[grain];
+    // Calendar lookup leaves a missing previous period NULL instead of
+    // comparing March to January when February is absent. Other dimensions
+    // join null-safely, so separate cohorts never bleed into each other.
+    const previousDate = conn.dateAdd(unit, `cur.${timeAlias}`, -n);
     const partition = groupCols.filter((c) => c !== timeAlias);
-    const over = `OVER (${partition.length ? `PARTITION BY ${partition.join(", ")} ` : ""}` +
-                 `ORDER BY ${timeAlias})`;
+    const on = [`prev.${timeAlias} = ${previousDate}`,
+      ...partition.map((c) => `cur.${c} IS NOT DISTINCT FROM prev.${c}`)];
     const cols = metrics.flatMap((m) => {
-      const cur = q(m.name), prev = q(`${m.name}__prev`);
-      return [
-        `LAG(${cur}, ${offset}) ${over} AS ${prev}`,
-        `${cur} - LAG(${cur}, ${offset}) ${over} AS ${q(`${m.name}__delta`)}`,
-        `(${cur} - LAG(${cur}, ${offset}) ${over}) / ` +
-          `NULLIF(ABS(LAG(${cur}, ${offset}) ${over}), 0) AS ${q(`${m.name}__pct`)}`,
-      ];
+      const cur = `cur.${q(m.name)}`, prev = `prev.${q(m.name)}`;
+      return [`${prev} AS ${q(`${m.name}__prev`)}`,
+        `${cur} - ${prev} AS ${q(`${m.name}__delta`)}`,
+        `(${cur} - ${prev}) / NULLIF(ABS(${prev}), 0) AS ${q(`${m.name}__pct`)}`];
     });
     sql = `WITH __base AS (\n${sql}\n)\n` +
-          `SELECT ${[...groupCols, ...metrics.map((m) => q(m.name)), ...cols].join(",\n       ")}\n` +
-          `FROM __base`;
-  }
-
-  // ---- report a trimmed edge, rather than trimming it silently --------------
-  //
-  // A second, independent MIN/MAX over the same rows -- deliberately not
-  // reusing the __bounds CTE above, which is scoped to a query that may by
-  // now have zero surviving rows (every period was partial: a data set
-  // that doesn't span one full period yet). `LEFT JOIN ... ON TRUE` from
-  // THIS bounds query is what guarantees at least one output row exists to
-  // carry the two flags even then -- a plain join would multiply zero rows
-  // by one and lose them, the exact failure mode a same-query flag would
-  // have had. The caller (server.ts) strips "__partial_start"/
-  // "__partial_end" before a chart ever sees them and decides what, if
-  // anything, to show about a trimmed edge -- this only ever reports
-  // whether trimming happened, never re-decides whether TO trim.
-  if (partialBounds) {
-    const { ref, grain, unit, n } = partialBounds;
-    const boundsTrunc = (v: string) => conn.dateTrunc(grain, v);
-    const hiBucketEnd = conn.dateAdd("day", conn.dateAdd(unit, boundsTrunc("__report_bounds.hi"), n), -1);
-    const startFlag = `(${boundsTrunc("__report_bounds.lo")} <> __report_bounds.lo) AS ${q("__partial_start")}`;
-    const endFlag = `(${hiBucketEnd} <> __report_bounds.hi) AS ${q("__partial_end")}`;
-    sql = `WITH __report_bounds AS (\n  SELECT MIN(${ref}) AS lo, MAX(${ref}) AS hi\n  FROM ${from}` +
-          clause("  WHERE", where) + `\n),\n__report AS (\n${sql}\n)\n` +
-          `SELECT __report.*, ${startFlag}, ${endFlag}\n` +
-          `FROM __report_bounds LEFT JOIN __report ON TRUE`;
+      `SELECT ${[...groupCols, ...metrics.map((m) => q(m.name))].map((c) => `cur.${c} AS ${c}`).concat(cols).join(",\n       ")}\n` +
+      `FROM __base cur LEFT JOIN __base prev ON ${on.join(" AND ")}`;
   }
 
   if (groupCols.length) sql += `\nORDER BY ${groupCols[0]} NULLS LAST`;
@@ -315,14 +257,14 @@ export function buildPredicate(
   let ref: string;
   if (f.source === "metric") {
     const m = model.metrics[f.field];
-    if (!m) return null;
+    if (!m || m.baseTable !== base) throw new Error(`unknown or incompatible filter metric: ${f.field}`);
     // Filtering an aggregate is a HAVING, so the metric's own always-on filter
     // is already applied by the surrounding query -- do not re-apply it here.
     ref = m.expression;
   } else {
     const { table, column } = parseDimension(f.field);
     const owner = table ?? base;
-    if (!model.tables[owner]?.columns.some((c) => c.name === column)) return null;
+    if (!fieldReachable(model, base, f.field)) throw new Error(`unknown or unreachable filter field: ${f.field}`);
     assertIdent(owner);
     ref = `${owner}.${q(column)}`;
   }
@@ -351,4 +293,20 @@ export function buildPredicate(
 
 export function assertIdent(name: string) {
   if (!IDENT.test(name)) throw new Error(`unsafe identifier from model: ${name}`);
+}
+
+/** Resolve a complete relationship, shared by aggregation and field discovery. */
+export function compileFrom(model: Model, conn: Connector, base: string, needed: Iterable<string> = []): string {
+  assertIdent(base);
+  if (!model.tables[base]) throw new Error(`unknown table: ${base}`);
+  let from = `${conn.relation(base, model.tables[base].relation)} AS ${base}`;
+  for (const target of new Set(needed)) {
+    if (target === base) continue;
+    assertIdent(target);
+    const j = findJoin(model, base, target);
+    if (!j) throw new Error(`no unambiguous join from ${base} to ${target}`);
+    const on = joinPairs(j).map((p) => `${base}.${conn.quote(p.left)} = ${target}.${conn.quote(p.right)}`).join(" AND ");
+    from += `\n  ${j.type === "inner" ? "INNER" : "LEFT"} JOIN ${conn.relation(target, model.tables[target].relation)} AS ${target} ON ${on}`;
+  }
+  return from;
 }

@@ -36,10 +36,6 @@ tables:
         data_type: VARCHAR
         description: Order status
         synonyms: [state]
-      - name: computed_flag
-        expr: "CASE WHEN status = 'paid' THEN 1 ELSE 0 END"
-        data_type: NUMBER
-        description: A computed dimension that should be skipped
     time_dimensions:
       - name: ordered_at
         expr: ordered_at
@@ -110,13 +106,13 @@ describe("snowflake semantic model adapter", () => {
     expect(model?.tables["FCT_ORDERS"]).toBeDefined();
     expect(model?.tables["DIM_USERS"]).toBeDefined();
     expect(model?.tables["orders"]).toBeUndefined();
+    expect(model?.tables.FCT_ORDERS.relation).toEqual({ database: "ANALYTICS", schema: "MARTS", table: "FCT_ORDERS" });
   });
 
-  it("skips a dimension whose expr is not a bare column reference", async () => {
-    const model = await snowflakeSemanticAdapter.load(file);
-    const cols = model!.tables["FCT_ORDERS"].columns.map((c) => c.name);
-    expect(cols).toEqual(expect.arrayContaining(["order_id", "status", "ordered_at", "amount"]));
-    expect(cols).not.toContain("computed_flag");
+  it("rejects computed fields explicitly rather than silently omitting them", async () => {
+    const computedFile = join(dir, "computed.yaml");
+    writeFileSync(computedFile, YAML_FIXTURE.replace("expr: status", "expr: UPPER(status)"));
+    await expect(snowflakeSemanticAdapter.load(computedFile)).rejects.toThrow(/computed field orders.status/);
   });
 
   it("derives grain from the primary key", async () => {
@@ -150,4 +146,14 @@ describe("snowflake semantic model adapter", () => {
     const sql = compileTile(model!, stubConn, tile as any);
     expect(sql).toContain("SUM(FCT_ORDERS.amount)");
   });
+});
+
+it("preserves every column and the join type of a composite relationship", async () => {
+  const compositeFile = join(dir, "composite.yaml");
+  writeFileSync(compositeFile, YAML_FIXTURE.replace("right_table: users", "right_table: users\n    join_type: inner").replace("        right_column: user_id", "        right_column: user_id\n      - left_column: tenant_id\n        right_column: tenant_id"));
+  const model = (await snowflakeSemanticAdapter.load(compositeFile))!;
+  expect(model.joins).toHaveLength(1);
+  const sql = compileTile(model, stubConn, { id: "joined", metrics: ["revenue"], dimensions: ["DIM_USERS.country"], layout: { x: 0, y: 0, w: 100, h: 100 } });
+  expect(sql).toContain("INNER JOIN");
+  expect(sql).toContain('FCT_ORDERS."tenant_id" = DIM_USERS."tenant_id"');
 });

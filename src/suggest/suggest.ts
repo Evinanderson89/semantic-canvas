@@ -1,5 +1,5 @@
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
-import { isTemporal, metricsByTable, prettifyModelName, type Model, type Table } from "../semantic/model.ts";
+import { timeColumnOf, metricsByTable, prettifyModelName, type Model, type Table } from "../semantic/model.ts";
 import type { Brief } from "./match.ts";
 
 /**
@@ -35,16 +35,6 @@ function unitOf(m: { name: string; label: string; expression: string }): UnitCla
   return "count";
 }
 
-function timeColumn(t: Table): string | null {
-  const part = t.partitionKeys.find((k) => {
-    const c = t.columns.find((x) => x.name === k);
-    return c && isTemporal(c);
-  });
-  if (part) return part;
-  const anyDate = t.columns.find(isTemporal);
-  return anyDate?.name ?? null;
-}
-
 export function suggestDashboard(
   model: Model,
   opts: { table?: string | null; grain?: string; width?: number } & Brief = {},
@@ -76,14 +66,14 @@ export function suggestDashboard(
   // 1. Headline KPIs. Given over time rather than as a bare total, so each card
   //    can show movement against the prior period and its own sparkline -- a
   //    number with no trend beside it is the least useful tile on a dashboard.
-  const t0 = model.tables[topTable];
-  const tcol0 = t0 ? timeColumn(t0) : null;
+
   // The brief decides how much dashboard this is. An exec gets three numbers
   // and a trend; an analyst gets the cuts and the table underneath.
   const cap = opts.audience === "analyst" ? 6 : opts.audience === "operator" ? 4 : 3;
   const picked = (opts.metrics ?? []).map((n) => model.metrics[n]).filter(Boolean);
   const headline = (picked.length ? picked : topMetrics).slice(0, cap);
   headline.forEach((m, i) => {
+    const tcol0 = timeColumnOf(model, m.baseTable);
     tiles.push({
       id: id(), title: m.label, metrics: [m.name],
       dimensions: tcol0 ? [`${grain}:${tcol0}`] : [],
@@ -96,7 +86,7 @@ export function suggestDashboard(
   // 2. Trends over time -- one tile PER UNIT CLASS, so nothing shares an axis
   //    with a number of a different kind.
   const t = model.tables[topTable];
-  const tcol = t ? timeColumn(t) : null;
+  const tcol = timeColumnOf(model, topTable);
   if (tcol) {
     const groups = new Map<UnitClass, typeof topMetrics>();
     for (const m of topMetrics) {
@@ -154,15 +144,16 @@ export function suggestDashboard(
   // 4. One tile from the next table, so the dashboard is not single-subject.
   const [second, secondMetrics] = ranked[1] ?? [null, []];
   if (second && secondMetrics.length) {
-    const t2 = model.tables[second];
-    const tc2 = t2 ? timeColumn(t2) : null;
+    const tc2 = timeColumnOf(model, second);
     tiles.push({
-      id: id(), title: `${secondMetrics[0].label} over time`,
+      id: id(), title: `${secondMetrics[0].label}${tc2 ? " over time" : ""}`,
       metrics: secondMetrics.slice(0, 2).map((m) => m.name),
       dimensions: tc2 ? [`${grain}:${tc2}`] : [],
       layout: { x: PAD, y, w: span(1, 1), h: 280, z: 1 },
     });
   }
+
+  if (second && secondMetrics.length) y += 280 + GAP;
 
   // The analyst cut gets the rows behind the numbers.
   if (opts.includeTable && topMetrics.length) {

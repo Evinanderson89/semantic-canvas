@@ -22,9 +22,14 @@ import { downloadPng, slugForFilename } from "./export.ts";
 import { metricsByTable, prettifyModelName, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
+import { readResponse } from "./http.ts";
+import { documentSnapshot, fingerprint, withGrain, type DocumentSnapshot, type Draft } from "./document.ts";
+import { MAX_DOCUMENT_BYTES } from "../compiler/schema.ts";
+
 const GRAINS = ["day", "week", "month", "quarter", "year"];
 
 export function App() {
+  const [bootError, setBootError] = useState("");
   const [model, setModel] = useState<Model | null>(null);
   const [dash, setDash] = useState<DashboardSpec | null>(null);
   const [table, setTable] = useState<string | null>(null);
@@ -58,7 +63,9 @@ export function App() {
   React.useEffect(() => {
     const orig = window.fetch;
     window.fetch = (input: any, init: any = {}) => {
-      const headers = new Headers(init.headers ?? {});
+      const url = new URL(typeof input === "string" ? input : input.url ?? input.toString(), location.href);
+      if (url.origin !== location.origin || !url.pathname.startsWith("/api/")) return orig(input, init);
+      const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : {}));
       if (asWhoRef.current) headers.set("x-sc-principal", asWhoRef.current);
       if (sourceRef.current) headers.set("x-sc-source", sourceRef.current);
       return orig(input, { ...init, headers });
@@ -74,7 +81,12 @@ export function App() {
 
   const refreshSources = useCallback(() =>
     fetch("/api/sources").then((r) => r.json())
-      .then((d) => { setSources(d.sources ?? []); setAutoSourceId(d.active ?? null); })
+      .then((d) => { setSources(d.sources ?? []); setAutoSourceId(d.active ?? null);
+        if (!sourceRef.current) sourceRef.current = d.active ?? "";
+        if (localStorage.getItem("sc:principal") === null && d.defaultPrincipal) {
+          asWhoRef.current = d.defaultPrincipal; setAsWho(d.defaultPrincipal);
+          localStorage.setItem("sc:principal", d.defaultPrincipal);
+        } })
       .catch(() => {}),
   []);
   React.useEffect(() => { refreshSources(); }, [refreshSources]);
@@ -82,14 +94,40 @@ export function App() {
   const [dashId, setDashId] = useState<string | null>(null);
   const [saved, setSaved] = useState<{ id: string; name: string; updated_at: string }[]>([]);
   const [openList, setOpenList] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [savedFingerprint, setSavedFingerprint] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [refreshToken, setRefreshToken] = useState<string>(crypto.randomUUID());
+  const dirty = !!dash && fingerprint(dash, canvas) !== savedFingerprint;
+  const documentEpoch = React.useRef(0);
+  const draftKey = React.useRef<string>(crypto.randomUUID());
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const currentDocument = React.useRef({ dash, canvas, dashId, revision, dirty, source: activeSourceId });
+  currentDocument.current = { dash, canvas, dashId, revision, dirty, source: activeSourceId };
+  const readDrafts = useCallback(() => {
+    try { setDrafts(JSON.parse(localStorage.getItem("sc:drafts") ?? "[]")); } catch { setDrafts([]); }
+  }, []);
+  useEffect(readDrafts, [readDrafts]);
+  const stashDraft = useCallback(() => {
+    const d = currentDocument.current;
+    if (!d.dash || !d.dirty) return;
+    try {
+      const all: Draft[] = JSON.parse(localStorage.getItem("sc:drafts") ?? "[]");
+      const next: Draft = { ...documentSnapshot(d.dash, d.canvas), key: draftKey.current,
+        id: d.dashId, revision: d.revision, source: d.source, updated: new Date().toISOString() };
+      localStorage.setItem("sc:drafts", JSON.stringify([next, ...all.filter((x) => x.key !== next.key)]));
+      readDrafts();
+    } catch { setNotice("Browser recovery storage is full or unavailable. Save this dashboard before leaving."); }
+  }, [readDrafts]);
+  useEffect(() => { const timer = setTimeout(stashDraft, 500); return () => clearTimeout(timer); }, [dash, canvas, dirty, revision, stashDraft]);
+  useEffect(() => {
+    const leaving = (e: BeforeUnloadEvent) => { if (currentDocument.current.dirty) { stashDraft(); e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", leaving);
+    return () => window.removeEventListener("beforeunload", leaving);
+  }, [stashDraft]);
 
-  // Per-tile drill-down stacks. Ephemeral view state, keyed by tile id, not
-  // part of the saved spec -- the same reasoning as crossFilters vs. a
-  // tile's own `where`. Never explicitly cleared on dashboard switch: a
-  // stale entry for a tile id from a previous dashboard is simply never
-  // looked up again once that tile isn't on screen, so it's inert rather
-  // than a leak worth the bookkeeping to null out.
+  // Exploration state is reset on document and role changes.
   const [drills, setDrills] = useState<Record<string, import("./drill.ts").DrillEntry[]>>({});
 
   // Same status the AgentChat toggle polls for -- whether "Explain this" on
@@ -108,16 +146,15 @@ export function App() {
 
   // Undo history. Every edit pushes; the canvas is a design surface and Cmd+Z is
   // the first thing anyone tries after moving something by accident.
-  const past = React.useRef<DashboardSpec[]>([]);
-  const future = React.useRef<DashboardSpec[]>([]);
+  const past = React.useRef<DocumentSnapshot[]>([]);
+  const future = React.useRef<DocumentSnapshot[]>([]);
   const applying = React.useRef(false);
 
   const commit = React.useCallback((next: DashboardSpec) => {
-    if (!applying.current && dash) { past.current.push(dash); future.current = []; }
+    if (!applying.current && dash) { past.current.push(documentSnapshot(dash, canvas)); future.current = []; }
     if (past.current.length > 80) past.current.shift();
-    setDirty(true);
     setDash(next);
-  }, [dash]);
+  }, [dash, canvas]);
 
   React.useEffect(() => {
     const key = (e: KeyboardEvent) => {
@@ -129,16 +166,37 @@ export function App() {
       applying.current = true;
       if (e.shiftKey) {
         const n = future.current.pop();
-        if (n && dash) { past.current.push(dash); setDash(n); }
+        if (n && dash) { past.current.push(documentSnapshot(dash, canvas)); setDash(n.spec); setCanvas(n.canvas); }
       } else {
         const p = past.current.pop();
-        if (p && dash) { future.current.push(dash); setDash(p); }
+        if (p && dash) { future.current.push(documentSnapshot(dash, canvas)); setDash(p.spec); setCanvas(p.canvas); }
       }
       queueMicrotask(() => { applying.current = false; });
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [dash]);
+  }, [dash, canvas]);
+
+  const changeCanvas = (next: CanvasSpec) => {
+    if (dash) { past.current.push(documentSnapshot(dash, canvas)); future.current = []; }
+    setCanvas(next);
+  };
+  const beginDocument = useCallback((next: DashboardSpec | null, options: {
+    id?: string | null; revision?: number; canvas?: CanvasSpec; saved?: boolean; draftKey?: string;
+  } = {}) => {
+    stashDraft();
+    documentEpoch.current++;
+    draftKey.current = options.draftKey ?? crypto.randomUUID();
+    past.current = []; future.current = [];
+    const surface = { ...DEFAULT_CANVAS, ...options.canvas };
+    if (next?.tiles.length && !options.canvas) surface.height = Math.max(surface.height, ...next.tiles.map((t) => t.layout.y + t.layout.h + 24));
+    setDash(next); setCanvas(surface); setDashId(options.id ?? null); setRevision(options.revision ?? 0);
+    setSavedFingerprint(next && options.saved ? fingerprint(next, surface) : null);
+    setGrain(next?.tiles.flatMap((t) => t.dimensions).find((d) => d.includes(":"))?.split(":")[0] ?? "month");
+    setSelected([]); setDrills({}); setNotice(""); setSaving(false); setTable(null);
+    setPicking(false); setRefreshed(null); setRefreshToken(crypto.randomUUID());
+  }, [stashDraft]);
+  const refreshData = () => { setRefreshToken(crypto.randomUUID()); setRefreshed(new Date()); };
 
   const refreshSaved = React.useCallback(() =>
     fetch("/api/dashboards").then((r) => r.json())
@@ -149,11 +207,13 @@ export function App() {
     sourceRef.current = id;
     setSourceId(id);
     try { localStorage.setItem("sc:source", id); } catch {}
-    past.current = []; future.current = [];
-    setDash(null); setTable(null); setView("home");
-    fetch("/api/model").then((r) => r.json()).then(setModel);
+    beginDocument(null); setView("home"); setModel(null);
+    const epoch = documentEpoch.current;
+    fetch("/api/model").then(readResponse).then((m) => {
+      if (documentEpoch.current === epoch) { setModel(m); setBootError(""); }
+    }).catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
     refreshSaved();
-  }, [refreshSaved]);
+  }, [refreshSaved, beginDocument]);
 
   const [exportingPng, setExportingPng] = useState(false);
   const exportDashboardPng = async () => {
@@ -171,23 +231,38 @@ export function App() {
     }
   };
 
-  const save = async () => {
-    if (!dash) return;
-    const id = dashId ?? `d${Math.random().toString(36).slice(2, 9)}`;
-    await fetch("/api/dashboards", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id, name: dash.title, spec: dash, canvas }),
-    });
-    setDashId(id); setDirty(false); refreshSaved();
+  const save = async (asCopy = false) => {
+    if (!dash || saving) return;
+    const epoch = documentEpoch.current, key = draftKey.current;
+    const id = asCopy ? crypto.randomUUID() : dashId ?? crypto.randomUUID();
+    const snapshot = documentSnapshot(dash, canvas);
+    const body = JSON.stringify({ id, name: dash.title, ...snapshot, revision: asCopy ? 0 : revision, schemaVersion: 1 });
+    setSaving(true); setNotice("");
+    try {
+      if (new Blob([body]).size > MAX_DOCUMENT_BYTES) throw new Error("Dashboard exceeds the 8 MB save limit. Remove or resize an image and try again.");
+      const result = await fetch("/api/dashboards", {
+        method: "POST", headers: { "content-type": "application/json" }, body,
+      }).then(readResponse);
+      if (documentEpoch.current !== epoch) return;
+      setDashId(id); setRevision(result.revision); setSavedFingerprint(JSON.stringify(snapshot));
+      try {
+        const all: Draft[] = JSON.parse(localStorage.getItem("sc:drafts") ?? "[]");
+        localStorage.setItem("sc:drafts", JSON.stringify(all.filter((d) => d.key !== key)));
+        readDrafts();
+      } catch { /* the server copy is saved even if recovery storage is unavailable */ }
+      refreshSaved();
+    } catch (e: any) { if (documentEpoch.current === epoch) setNotice(`Save failed: ${e.message}`); }
+    finally { if (documentEpoch.current === epoch) setSaving(false); }
   };
 
   const openSaved = async (id: string) => {
-    const d = await fetch(`/api/dashboards/${id}`).then((r) => r.json());
-    if (!d?.spec) return;
-    past.current = []; future.current = [];
-    setDash(d.spec); setDashId(id); setDirty(false); setOpenList(false);
-    if (d.canvas) setCanvas((c) => ({ ...c, ...d.canvas }));
-    setRefreshed(new Date());
+    const epoch = documentEpoch.current;
+    try {
+      const d = await fetch(`/api/dashboards/${encodeURIComponent(id)}`).then(readResponse);
+      if (documentEpoch.current !== epoch) return;
+      beginDocument(d.spec, { id, revision: d.revision, canvas: d.canvas, saved: true });
+      setOpenList(false); pendingFit.current = true;
+    } catch (e: any) { setNotice(`Could not open dashboard: ${e.message}`); }
   };
   const mainRef = React.useRef<HTMLElement>(null);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -328,38 +403,45 @@ export function App() {
     el.scrollTo({ left: Math.max(0, scrollLeft), top: Math.max(0, scrollTop), behavior: "auto" });
   }, [dash, zoom]);
 
-  useEffect(() => { fetch("/api/model").then((r) => r.json()).then(setModel); }, []);
+  useEffect(() => { fetch("/api/model").then(readResponse).then((m) => { setModel(m); setBootError(""); }).catch((e) => setBootError(e.message)); }, []);
 
   const build = useCallback((brief: Brief) => {
     setInterview(false);
+    beginDocument(null);
+    const epoch = documentEpoch.current;
     return fetch("/api/suggest", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...brief, width: canvas.width }),
-    }).then((r) => r.json()).then((d) => {
+    }).then(readResponse).then((d) => {
+      if (documentEpoch.current !== epoch) return;
       pendingFit.current = true;
-      setDash(d); setRefreshed(new Date()); setTable(brief.table ?? null);
+      setDash(d); setCanvas((c) => ({ ...c, height: Math.max(c.height, ...d.tiles.map((t: TileSpec) => t.layout.y + t.layout.h + 24)) })); setRefreshed(new Date()); setTable(brief.table ?? null);
       if (brief.grain) setGrain(brief.grain);
-    });
-  }, [canvas.width]);
+    }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
+  }, [canvas.width, beginDocument]);
 
   const load = useCallback((t: string | null, g: string) => {
+    beginDocument(null);
+    const epoch = documentEpoch.current;
     const q = new URLSearchParams({ grain: g, width: String(canvas.width),
                                     ...(t ? { table: t } : {}) });
-    return fetch(`/api/suggest?${q}`).then((r) => r.json()).then((d) => {
+    return fetch(`/api/suggest?${q}`).then(readResponse).then((d) => {
+      if (documentEpoch.current !== epoch) return;
+      setTable(t);
       // Show the whole authored canvas rather than clipping it at the viewport.
       pendingFit.current = true;
-      setDash(d); setRefreshed(new Date());
-    });
-  }, [canvas.width]);
+      setDash(d); setCanvas((c) => ({ ...c, height: Math.max(c.height, ...d.tiles.map((t: TileSpec) => t.layout.y + t.layout.h + 24)) })); setRefreshed(new Date());
+    }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
+  }, [canvas.width, beginDocument]);
 
-  if (!model) return <div className="boot">Loading semantic layer…</div>;
+  if (!model) return <div className="boot">{bootError ? <><p role="alert">{bootError}</p><button onClick={() => switchSource("")}>Open the default source</button></> : "Loading semantic layer…"}</div>;
 
   const byTable = metricsByTable(model);
   const tabs = Object.entries(byTable).sort((a, b) => b[1].length - a[1].length).map(([n]) => n);
 
   const pick = (t: string | null) => {
     setTable(t);
-    if (t === null) { setDash(null); return; }
+    if (t === null) { beginDocument(null); return; }
     load(t, grain);
   };
 
@@ -415,18 +497,28 @@ export function App() {
       )}
       <Sidebar model={model} active={table} view={dash ? "" : view}
                onPick={(t) => { setView("home"); pick(t); }}
-               onView={(v) => { setView(v); setDash(null); setTable(null); }}
+               onView={(v) => { setView(v); beginDocument(null); }}
                collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}
                principals={principals} principal={asWho}
                onPrincipal={(id) => {
                  asWhoRef.current = id;
                  setAsWho(id);
                  try { localStorage.setItem("sc:principal", id); } catch {}
-                 if (dash) load(table, grain);
+                 setDrills({}); refreshData();
                }}
                sources={sources} activeSource={activeSource} />
 
       <main className="main" ref={mainRef}>
+        {notice && <div className="document-notice" role="alert">{notice}</div>}
+        {!dash && <div className="document-library"><span className="hint">Local alpha · Roles are simulations on this computer</span>
+          <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
+          {drafts.filter((d) => d.source === activeSourceId).map((d) => <div key={d.key}>
+            <button className="link" onClick={() => beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key })}>Recover draft: {d.spec.title}</button>
+            <button className="link" aria-label={`Discard draft ${d.spec.title}`} onClick={() => {
+              localStorage.setItem("sc:drafts", JSON.stringify(drafts.filter((x) => x.key !== d.key))); readDrafts();
+            }}>Discard</button>
+          </div>)}
+        </div>}
         {!dash && view === "connections" ? (
           <Connections sources={sources} activeId={activeSourceId} onSelect={switchSource}
                        onRefresh={refreshSources} principals={principals} policies={policies} />
@@ -439,22 +531,22 @@ export function App() {
           <DataModel model={model} />
         ) : !dash ? (
           <Entry model={model} onSuggest={() => setInterview(true)}
-                 onScratch={() => { setDash({ title: "Untitled dashboard", tiles: [] });
-                                    setRefreshed(new Date()); }}
+                 onScratch={() => beginDocument({ title: "Untitled dashboard", tiles: [] })}
                  onDemo={demoDashboardAvailable(model) ? () => {
                    pendingFit.current = true;
-                   setDash(demoDashboard()); setRefreshed(new Date());
+                   beginDocument(demoDashboard());
                  } : null} />
         ) : (
           <>
             <div className="topbar">
-              <button className="link" onClick={() => { setDash(null); setTable(null); }}>← Back</button>
+              <button className="link" onClick={() => beginDocument(null)}>← Back</button>
               <span className="spacer" />
+              <span className="save-status" role="status">{saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
               <span className="refreshed">
-                {refreshed && `Last refreshed ${refreshed.toLocaleString(undefined,
+                {refreshed && `Refresh requested ${refreshed.toLocaleString(undefined,
                   { dateStyle: "medium", timeStyle: "short" })}`}
               </span>
-              <button className="icon" title="Refresh" onClick={() => load(table, grain)}>
+              <button className="icon" title="Refresh" onClick={refreshData}>
                 <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M16 10a6 6 0 1 1-1.8-4.2M16 3v3.5h-3.5" /></svg>
               </button>
@@ -463,12 +555,13 @@ export function App() {
                 <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M3 6a2 2 0 0 1 2-2h3l2 2h5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
               </button>
-              <button className={"icon" + (dirty ? " primary" : "")} onClick={save}
-                      title={dirty ? "Unsaved changes — click to save" : "Saved"}
+              <button className={"icon" + (dirty ? " primary" : "")} onClick={() => save()} disabled={saving}
+                      title={saving ? "Saving…" : dirty ? "Unsaved changes — click to save" : "Saved"}
                       aria-label="Save dashboard">
                 <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M4 4h9l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" /><path d="M7 4v4h6V4M7 17v-5h6v5" /></svg>
               </button>
+              <button className="link" disabled={saving} onClick={() => save(true)}>Save a copy</button>
               <button className="icon" title="Copy dashboard spec"
                       onClick={() => navigator.clipboard?.writeText(JSON.stringify(dash, null, 2))}>
                 <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -499,7 +592,7 @@ export function App() {
             <div className="controls">
               <label>
                 <span>Period</span>
-                <select value={grain} onChange={(e) => { setGrain(e.target.value); load(table, e.target.value); }}>
+                <select value={grain} onChange={(e) => { setGrain(e.target.value); setDrills({}); commit(withGrain(dash, e.target.value)); }}>
                   {GRAINS.map((g) => (
                     <option key={g} value={g}>{g[0].toUpperCase() + g.slice(1)}ly
                       {g === "day" ? "" : ""}</option>
@@ -513,7 +606,7 @@ export function App() {
             </div>
 
             {!canvas.locked && (
-              <EditBar canvas={canvas} onCanvas={setCanvas} zoom={zoom} onZoom={setZoom} onFit={fit}
+              <EditBar canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit}
                        selected={selected} tiles={dash.tiles}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
                        beautify={<DashboardBeautify dash={dash} canvas={canvas} model={model}
@@ -522,7 +615,7 @@ export function App() {
             {canvas.locked && (
               <div className="editbar slim">
                 <span className="spacer" />
-                <button className="lock on" onClick={() => setCanvas({ ...canvas, locked: false })}>
+                <button className="lock on" onClick={() => changeCanvas({ ...canvas, locked: false })}>
                   🔒 Locked — click to edit
                 </button>
               </div>
@@ -547,14 +640,14 @@ export function App() {
 
             <Canvas canvas={canvas} tiles={dash.tiles} zoom={zoom}
                     selected={selected} onSelect={setSelected}
-                    onChange={(t) => { setDirty(true); setDash({ ...dash, tiles: t }); }}
+                    onChange={(t) => { setDash({ ...dash, tiles: t }); }}
                     scrollRef={scrollRef}
-                    onCommit={(before) => { past.current.push({ ...dash, tiles: before });
+                    onCommit={(before) => { past.current.push(documentSnapshot({ ...dash, tiles: before }, canvas));
                                             future.current = [];
                                             if (past.current.length > 80) past.current.shift(); }}
                     renderTile={(t) => (
                       <TileBoundary label={t.title ?? t.metrics.join(", ")}>
-                      <Tile model={model} spec={t} locked={canvas.locked}
+                      <Tile key={`${activeSourceId}:${asWho}:${refreshToken}`} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} model={model} spec={t} locked={canvas.locked}
                             crossFilters={dash.crossFilters}
                             onCrossFilter={(f) => setDash((d) => !d ? d : ({
                               ...d,
@@ -621,7 +714,7 @@ export function App() {
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
-      <AgentChat />
+      <AgentChat key={`${activeSourceId}:${asWho}`} />
       {dash && !canvas.locked && (
         <InsertMenu model={model} onInsert={addTile} onInsertMany={addMany}
                     onOpenPicker={() => setPicking(true)} />

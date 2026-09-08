@@ -35,7 +35,8 @@ const KPI_HEIGHT = 156;
 const CHART_MIN_HEIGHT = 300;
 
 function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCrossFilter,
-                     drill, onDrill, onDrillUp, aiAvailable }: {
+                     drill, onDrill, onDrillUp, aiAvailable, queryContext }: {
+  queryContext?: string;
   model: Model; spec: TileSpec; onRemove: (id: string) => void;
   onUpdate?: (t: TileSpec) => void; locked?: boolean;
   crossFilters?: FilterSpec[];
@@ -92,7 +93,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
 
   const queryKey = JSON.stringify({
     m: spec.metrics, d: dimensions, w: where, l: spec.limit,
-    c: spec.compare,
+    c: spec.compare, queryContext,
   });
 
   useEffect(() => {
@@ -107,11 +108,12 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       where, limit: spec.limit, compare: spec.compare,
     };
     fetch("/api/query", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json", "x-sc-refresh": queryContext ?? "" },
       body: JSON.stringify(query), signal: ac.signal,
     })
       .then(async (r) => ({ ok: r.ok, body: await r.json() }))
       .then(({ ok, body }) => {
+        if (ac.signal.aborted) return;
         setState(ok ? { status: "ok", ...body }
           : { status: "error", message: body.issues
               ? body.issues.map((i: any) => i.problem).join("; ") : body.error });
@@ -328,6 +330,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
           <h4>{title}</h4>
           {state.status === "ok" &&
             <span className="ms mono">{state.ms}ms</span>}
+          {state.status === "ok" && state.coverage === "unknown" && <span className="ms mono" title="The source has not declared period completeness. All observed buckets are shown, including possibly incomplete periods.">Coverage unverified</span>}
           {state.status === "ok" && (state.partial?.start || state.partial?.end) && (
             <span className="ms mono partial-note"
                   title={`This ${grain ?? "period"}'s data doesn't cover the whole ${grain ?? "period"} yet, ` +
@@ -450,9 +453,11 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         )}
         {state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
           kind === "kpi"
-            ? <Kpi label={title}
+            ? <Kpi label={title} grain={grain}
+                   previous={spec.compare && spec.compare !== "none" ? state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)] ?? null : undefined}
+                   comparisonLabel={spec.compare === "yoy" ? "same period last year" : "prior period"}
                    series={(state.rows ?? []).map((r: any[]) =>
-                     ({ x: r[0], y: Number(r[r.length - 1]) }))}
+                     ({ x: r[0], y: r[state.columns.indexOf(spec.metrics[0])] == null ? NaN : Number(r[state.columns.indexOf(spec.metrics[0])]) }))}
                    options={spec.spark} format={makeFormatter(fmt)}
                    onOptions={onUpdate && !locked ? (spark) => onUpdate({ ...spec, spark }) : undefined} />
           : kind === "stat"

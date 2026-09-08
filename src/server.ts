@@ -14,10 +14,12 @@ import { existsSync, statSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import YAML from "yaml";
 import { describe as describeSource, connectOne, expand, loadSources, type AiConfig, type Source } from "./sources/registry.ts";
-import { deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard } from "./store/store.ts";
-import { loadRls, scopeFor, type RlsConfig } from "./security/rls.ts";
-import { applyBestLayout } from "./canvas/layouts.ts";
-import { DEFAULT_CANVAS } from "./canvas/presets.ts";
+import { deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources } from "./store/store.ts";
+import { loadRls, type RlsConfig } from "./security/rls.ts";
+import { applyBestLayout, applyLayout, LAYOUTS } from "./canvas/layouts.ts";
+import { requireScope, scopedField } from "./security/queryScope.ts";
+import { saveSchema, querySchema, MAX_DOCUMENT_BYTES } from "./compiler/schema.ts";
+import { z } from "zod";
 import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardStory,
          type ChatMessage, type DashboardTileSummary } from "./agent/loop.ts";
 import Anthropic from "@anthropic-ai/sdk";
@@ -35,6 +37,7 @@ let ai: AiConfig | null = null;
 function pick(req: any): Source {
   const want = String(req.header?.("x-sc-source") ?? req.query?.source ?? "");
   const found = sources.find((s) => s.id === want && s.status === "ready");
+  if (want && !found) throw Object.assign(new Error(`Source "${want}" is unavailable`), { status: 404 });
   const ready = found ?? sources.find((s) => s.status === "ready");
   if (!ready) throw new Error("no data source is available");
   return ready;
@@ -60,6 +63,7 @@ async function boot() {
     throw new Error(`no usable source in ${SOURCES_PATH}`);
 
   const storeFile = await openStore();
+  await migrateLegacySources(sources.filter((s) => s.model).map((s) => ({ source: s.id, model: s.model!.name })));
   console.log(`store  ${storeFile}`);
   console.log(`rls    ${rls.policies.length} policies, ` +
               `${Object.keys(rls.principals).length} principals`);
@@ -69,7 +73,19 @@ async function boot() {
 }
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+// This alpha exposes local administration and role simulation, not team authentication.
+// Bind only to loopback; reject remote origins and DNS-rebinding Host headers.
+app.use((req, res, next) => {
+  const local = (url: string) => { try { return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname); } catch { return false; } };
+  if (!local(`http://${req.headers.host}`) || (req.headers.origin && !local(req.headers.origin)))
+    return res.status(403).json({ error: "This alpha accepts local requests only" });
+  next();
+});
+app.use(express.json({ limit: MAX_DOCUMENT_BYTES }));
+app.use((error: any, _req: any, res: any, next: any) => {
+  if (!error) return next();
+  res.status(error.status ?? 400).json({ error: error.status === 413 ? "Dashboard exceeds the 8 MB save limit" : "Invalid JSON request" });
+});
 
 /**
  * Express 4 does not catch a rejected promise from an async handler -- it
@@ -82,7 +98,7 @@ app.use(express.json({ limit: "1mb" }));
  */
 const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => {
   try { await fn(req, res); }
-  catch (e: any) { res.status(500).json({ error: String(e?.message ?? e) }); }
+  catch (e: any) { res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
 };
 
 app.get("/api/sources", safe((_req, res) => res.json({
@@ -380,7 +396,7 @@ app.delete("/api/sources/:id", safe(async (req, res) => {
   const { block } = existing;
   block.lines.splice(block.startLine, block.endLine - block.startLine);
   try { await writeFile(SOURCES_PATH, block.lines.join("\n")); }
-  catch (e: any) { return res.status(500).json({ error: String(e?.message ?? e) }); }
+  catch (e: any) { return res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
 
   res.json(await hotReload());
 }));
@@ -397,7 +413,7 @@ app.get("/api/schema", safe(async (req, res) => {
       source: `${src.label} (from the semantic model)`,
     });
   try { res.json({ tables: await c.schema(), source: c.label }); }
-  catch (e: any) { res.status(500).json({ error: String(e?.message ?? e) }); }
+  catch (e: any) { res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
 }));
 
 app.get("/api/stats", safe((req, res) => res.json((connOf(req) as any).stats?.() ?? {})));
@@ -423,46 +439,38 @@ const ISO2 = new Set(("AD AE AF AG AL AM AO AR AT AU AZ BA BD BE BG BR BW BY CA 
   "RU SA SE SG SI SK SN TH TN TR TW TZ UA UG US UY VE VN ZA ZM ZW").split(" "));
 const GEO_NAME = /(country|nation|region|state|province|city|market|territory|geo|iso)/i;
 
+const dashboardScope = (req: any) => ({ source: pick(req).id, model: modelOf(req).name });
 app.get("/api/dashboards", safe(async (req, res) =>
-  res.json({ dashboards: await listDashboards(modelOf(req).name) })));
+  res.json({ dashboards: await listDashboards(dashboardScope(req)) })));
 
 app.post("/api/dashboards", safe(async (req, res) => {
-  const { id, name, spec, canvas } = req.body ?? {};
-  if (!id || !spec) return res.status(400).json({ error: "id and spec are required" });
-  // A real default, not {} -- a dashboard saved with no canvas (e.g. an
-  // agent via MCP that didn't bother) still needs preset/snap/grid/locked
-  // set to something sane for whenever a human opens it in the browser.
-  res.json(await saveDashboard({
-    id, name: name || "Untitled", model: modelOf(req).name, spec,
-    canvas: canvas ?? DEFAULT_CANVAS,
-  }));
+  const document = saveSchema.parse(req.body);
+  const model = modelOf(req);
+  const issues = document.spec.tiles.flatMap((t) => validateTile(model, t));
+  if (issues.length) return res.status(400).json({ issues });
+  res.json(await saveDashboard(document, dashboardScope(req)));
 }));
-
 app.get("/api/dashboards/:id", safe(async (req, res) => {
-  const d = await loadDashboard(req.params.id);
-  return d ? res.json(d) : res.status(404).json({ error: "not found" });
+  const d = await loadDashboard(req.params.id, dashboardScope(req));
+  return d ? res.json(d) : res.status(404).json({ error: "Dashboard not found in this source" });
 }));
-
-app.delete("/api/dashboards/:id", safe(async (req, res) =>
-  res.json(await deleteDashboard(req.params.id))));
-
-/**
- * Picks the best-fitting named layout (layouts.ts) for a saved dashboard's
- * current tile set and re-packs into it, growing the canvas if needed --
- * the same function the "Smart arrange" button calls, exposed so an agent
- * (via the MCP server in src/mcp/) can invoke it without a human clicking.
- */
+app.delete("/api/dashboards/:id", safe(async (req, res) => {
+  const revision = z.number().int().positive().parse(req.body?.revision);
+  res.json(await deleteDashboard(req.params.id, dashboardScope(req), revision));
+}));
 app.post("/api/dashboards/:id/arrange", safe(async (req, res) => {
-  const d = await loadDashboard(req.params.id);
-  if (!d) return res.status(404).json({ error: "not found" });
-  const canvas = d.canvas ?? { width: 1440, height: 900 };
-  const { name: layout, tiles } = applyBestLayout(d.spec?.tiles ?? [], canvas.width ?? 1440);
-  const bottom = tiles.length
-    ? Math.max(...tiles.map((t: any) => t.layout.y + t.layout.h)) + 24 : (canvas.height ?? 900);
-  const newCanvas = { ...canvas, height: Math.max(canvas.height ?? 900, Math.round(bottom)) };
-  const spec = { ...d.spec, tiles };
-  await saveDashboard({ id: req.params.id, name: d.name, model: modelOf(req).name, spec, canvas: newCanvas });
-  res.json({ layout, spec, canvas: newCanvas });
+  const d = await loadDashboard(req.params.id, dashboardScope(req));
+  if (!d) return res.status(404).json({ error: "Dashboard not found in this source" });
+  const requested = req.body?.layout;
+  if (requested && !LAYOUTS.some((l) => l.name === requested)) return res.status(400).json({ error: "Unknown layout" });
+  const arranged = requested ? { name: requested, tiles: applyLayout(requested, d.spec.tiles, d.canvas.width) }
+    : applyBestLayout(d.spec.tiles, d.canvas.width);
+  const bottom = Math.max(d.canvas.height, ...arranged.tiles.map((t) => t.layout.y + t.layout.h + 24));
+  const canvas = { ...d.canvas, height: Math.round(bottom) };
+  const spec = { ...d.spec, tiles: arranged.tiles };
+  const saved = await saveDashboard({ id: req.params.id, name: d.name, spec, canvas,
+    revision: req.body?.revision ?? d.revision }, dashboardScope(req));
+  res.json({ ...saved, layout: arranged.name, spec, canvas });
 }));
 
 /**
@@ -530,7 +538,7 @@ app.get("/api/agent/questions/:id", safe(async (req, res) => {
 const agentConversations = new Map<string, ChatMessage[]>();
 
 app.get("/api/agent/status", safe((_req, res) => res.json({
-  configured: Boolean(ai?.apiKey), provider: ai?.provider ?? "anthropic", model: ai?.model ?? "claude-opus-5",
+  configured: Boolean(ai?.apiKey && ai.provider === "anthropic"), provider: ai?.provider ?? "anthropic", model: ai?.model ?? "claude-opus-5",
 })));
 
 /**
@@ -571,11 +579,12 @@ app.post("/api/agent/chat", safe(async (req, res) => {
   const message = String(req.body?.message ?? "").trim();
   if (!conversationId) return res.status(400).json({ error: "conversationId is required" });
   if (!message) return res.status(400).json({ error: "message is required" });
-  const history = agentConversations.get(conversationId) ?? [];
-  const principal = req.header("x-sc-principal") || defaultPrincipal || undefined;
-  const source = req.header("x-sc-source") || undefined;
+  const principal = principalOf(req)?.id ?? "";
+  const source = pick(req).id;
+  const historyKey = JSON.stringify([source, principal, conversationId]);
+  const history = agentConversations.get(historyKey) ?? [];
   const { text, messages } = await agentChat(ai, history, message, { source, principal });
-  agentConversations.set(conversationId, messages);
+  agentConversations.set(historyKey, messages);
   res.json({ text });
 }));
 
@@ -588,8 +597,8 @@ app.post("/api/agent/explain", safe(async (req, res) => {
   const body = req.body ?? {};
   const metrics = Array.isArray(body.metrics) ? body.metrics : [];
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
-  const principal = req.header("x-sc-principal") || defaultPrincipal || undefined;
-  const source = req.header("x-sc-source") || undefined;
+  const principal = principalOf(req)?.id ?? "";
+  const source = pick(req).id;
   const text = await explainTile(ai, { source, principal }, {
     title: String(body.title ?? metrics.join(", ")),
     metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
@@ -609,8 +618,8 @@ app.post("/api/agent/beautify", safe(async (req, res) => {
   const body = req.body ?? {};
   const metrics = Array.isArray(body.metrics) ? body.metrics : [];
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
-  const principal = req.header("x-sc-principal") || defaultPrincipal || undefined;
-  const source = req.header("x-sc-source") || undefined;
+  const principal = principalOf(req)?.id ?? "";
+  const source = pick(req).id;
   const text = await suggestImprovements(ai, { source, principal }, {
     title: String(body.title ?? metrics.join(", ")),
     metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
@@ -636,8 +645,8 @@ app.post("/api/agent/dashboard-story", safe(async (req, res) => {
     dimensions: Array.isArray(t.dimensions) ? t.dimensions : [],
   })).filter((t: DashboardTileSummary) => t.id) : [];
   if (!tiles.length) return res.status(400).json({ error: "tiles is required" });
-  const principal = req.header("x-sc-principal") || defaultPrincipal || undefined;
-  const source = req.header("x-sc-source") || undefined;
+  const principal = principalOf(req)?.id ?? "";
+  const source = pick(req).id;
   // The full governed catalog, built server-side from the connected model
   // rather than trusted from the client -- what "additions" is allowed to
   // propose is exactly what this model actually has, the same governance
@@ -657,15 +666,15 @@ app.get("/api/profile", safe(async (req, res) => {
     const [t, c] = field.includes(".") ? field.split(".", 2) : [base, field];
     const col = modelOf(req).tables[t]?.columns.find((x) => x.name === c);
     if (!col) continue;
-    const q = connOf(req).quote.bind(connOf(req));
+    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req));
     let cardinality: number | null = null;
     let sample: string[] = [];
     try {
       const r = await connOf(req).execute(
-        `SELECT count(DISTINCT ${q(c)}) FROM ${connOf(req).relation(t)}`, 1);
+        `SELECT count(DISTINCT value) FROM ${relation}`, 1);
       cardinality = Number(r.rows[0]?.[0] ?? 0);
       const sv = await connOf(req).execute(
-        `SELECT DISTINCT ${q(c)} FROM ${connOf(req).relation(t)} WHERE ${q(c)} IS NOT NULL LIMIT 40`, 40);
+        `SELECT DISTINCT value FROM ${relation} WHERE value IS NOT NULL LIMIT 40`, 40);
       sample = sv.rows.map((row) => String(row[0]));
     } catch { /* profiling is advisory; a failure just means fewer hints */ }
 
@@ -695,13 +704,13 @@ app.get("/api/values", safe(async (req, res) => {
   if (!table || !table.columns.some((x) => x.name === c))
     return res.status(400).json({ error: `unknown field ${field}` });
   try {
-    const q = connOf(req).quote.bind(connOf(req));
-    const sql = `SELECT ${q(c)} AS value, count(*) AS n FROM ${connOf(req).relation(t)} ` +
+    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req));
+    const sql = `SELECT value, count(*) AS n FROM ${relation} ` +
                 `GROUP BY 1 ORDER BY n DESC LIMIT 500`;
     const r = await connOf(req).execute(sql, 500);
     res.json({ values: r.rows.map((row) => ({ value: row[0], n: row[1] })), ms: r.ms });
   } catch (e: any) {
-    res.status(500).json({ error: String(e?.message ?? e) });
+    res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) });
   }
 }));
 
@@ -714,12 +723,12 @@ app.get("/api/extent", safe(async (req, res) => {
   if (!table || !table.columns.some((x) => x.name === c))
     return res.status(400).json({ error: `unknown field ${field}` });
   try {
-    const q = connOf(req).quote.bind(connOf(req));
+    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req));
     const r = await connOf(req).execute(
-      `SELECT min(${q(c)}), max(${q(c)}) FROM ${connOf(req).relation(t)}`, 1);
+      `SELECT min(value), max(value) FROM ${relation}`, 1);
     res.json({ min: r.rows[0]?.[0] ?? null, max: r.rows[0]?.[1] ?? null });
   } catch (e: any) {
-    res.status(500).json({ error: String(e?.message ?? e) });
+    res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) });
   }
 }));
 
@@ -734,12 +743,14 @@ function principalOf(req: any) {
 
 app.get("/api/principals", safe((_req, res) =>
   res.json({
+    mode: "local",
     principals: Object.values(rls.principals).map((p) => ({ id: p.id, name: p.name })),
     policies: rls.policies.map((p) => ({ id: p.id, field: `${p.table}.${p.column}`, claim: p.claim })),
   })));
 
 app.post("/api/query", safe(async (req, res) => {
-  const tile = req.body;
+  const query = querySchema.parse(req.body);
+  const tile = { ...query, id: query.id ?? "query", layout: { x: 0, y: 0, w: 1, h: 1 } };
   const issues = validateTile(modelOf(req), tile);
   if (issues.length) return res.status(400).json({ issues });
   try {
@@ -747,11 +758,10 @@ app.post("/api/query", safe(async (req, res) => {
     const who = principalOf(req);
     // RLS is applied here, server-side, on top of whatever the client sent. A
     // client that strips its filters still gets a scoped query.
-    const scope = rls.policies.length ? scopeFor(modelOf(req), base, rls, who)
-                                      : { filters: [], unenforceable: [] };
+    const scope = requireScope(modelOf(req), base, rls, who);
     const scoped = { ...tile, where: [...(tile.where ?? []), ...scope.filters] };
     const sql = compileTile(modelOf(req), connOf(req), scoped);
-    const out = await connOf(req).execute(sql, tile.limit ?? 5000, who?.id ?? 'anon');
+    const out = await connOf(req).execute(sql, tile.limit ?? 5000, `${who?.id ?? "anon"}:${req.header("x-sc-refresh") ?? ""}`);
     // A coarsened time dimension's first/last bucket, if it doesn't span a
     // full period, comes back flagged rather than silently dropped -- split
     // out here, right at the query's only consumer, so no caller of
@@ -759,13 +769,14 @@ app.post("/api/query", safe(async (req, res) => {
     const { columns, rows, partial } = splitPartialPeriods(out);
     res.json({ ...out, columns, rows,
       partial,
+      coverage: tile.dimensions.some((d) => d.includes(":")) ? "unknown" : undefined,
       principal: who?.id ?? null,
       rlsApplied: scope.filters.map((f) => f.id),
       rlsUnenforceable: scope.unenforceable.map((p) => p.id) });
   } catch (e: any) {
-    res.status(500).json({ error: String(e?.message ?? e) });
+    res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) });
   }
 }));
 
-boot().then(() => app.listen(PORT, () => console.log(`api on http://localhost:${PORT}`)))
+boot().then(() => app.listen(PORT, "127.0.0.1", () => console.log(`local alpha API on http://127.0.0.1:${PORT}`)))
   .catch((e) => { console.error(e); process.exit(1); });

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
+import { kpiSummary } from "./kpiSummary.ts";
 import { DEFAULT_SPARK, type SparkOptions } from "../compiler/spec.ts";
 
 type Point = { x: unknown; y: number };
@@ -11,8 +12,8 @@ type Point = { x: unknown; y: number };
  * wants a zero baseline, a retention ratio wants a tight domain or it reads as
  * a flat line.
  */
-export function Kpi({ label, series, options, onOptions, format }: {
-  label: string; series: Point[];
+export function Kpi({ label, series, options, onOptions, format, grain, previous, comparisonLabel }: {
+  label: string; series: Point[]; grain?: string | null; previous?: number | null; comparisonLabel?: string;
   options?: Partial<SparkOptions>;
   onOptions?: (o: Partial<SparkOptions>) => void;
   format?: (n: number) => string;
@@ -23,10 +24,7 @@ export function Kpi({ label, series, options, onOptions, format }: {
   const [open, setOpen] = useState(false);
 
   const clean = series.filter((p) => Number.isFinite(p.y));
-  const latest = clean.at(-1)?.y ?? null;
-  const basis = o.compare === "first" ? clean[0]?.y : clean.at(-2)?.y;
-  const delta = latest != null && basis != null && basis !== 0
-    ? (latest - basis) / Math.abs(basis) : null;
+  const { latest, delta } = kpiSummary(series, o.compare, grain, previous);
   const up = delta != null && delta >= 0;
 
   const stroke = o.color === "accent" ? "var(--accent)"
@@ -111,7 +109,7 @@ export function Kpi({ label, series, options, onOptions, format }: {
         {delta == null ? <span className="flat">no comparison</span> : (
           <>
             <span className={up ? "pos" : "neg"}>{up ? "+" : "−"}{d3.format(".1%")(Math.abs(delta))}</span>
-            <span className="vs">vs {o.compare === "first" ? "first period" : "prior period"}</span>
+            <span className="vs">vs {o.compare === "first" ? "first period" : (comparisonLabel ?? "prior period")}</span>
           </>
         )}
       </div>

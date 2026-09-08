@@ -20,6 +20,7 @@ export interface Table {
   columns: Column[];
   partitionKeys: string[];
   primaryKey?: string | null;
+  relation?: { database?: string; schema?: string; table: string };
 }
 
 export interface Metric {
@@ -39,6 +40,7 @@ export interface Join {
   right: string;
   rightOn: string;
   type: "left" | "inner";
+  columns?: { left: string; right: string }[];
 }
 
 export interface Model {
@@ -69,7 +71,8 @@ export function metricsByTable(model: Model): Record<string, Metric[]> {
 }
 
 export function findJoin(model: Model, left: string, right: string): Join | null {
-  return model.joins.find((j) => j.left === left && j.right === right) ?? null;
+  const matches = model.joins.filter((j) => j.left === left && j.right === right);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 /**
@@ -157,5 +160,7 @@ export function fieldReachable(model: Model, baseTable: string, field: string): 
   const table = model.tables[t];
   if (!table || !table.columns.some((x) => x.name === c)) return false;
   if (t === baseTable) return true;
-  return model.joins.some((j) => j.left === baseTable && j.right === t);
+  return findJoin(model, baseTable, t) !== null;
 }
+
+export const joinPairs = (join: Join) => join.columns ?? [{ left: join.leftOn, right: join.rightOn }];
