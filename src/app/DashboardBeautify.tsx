@@ -3,7 +3,7 @@ import { readResponse } from "./http.ts";
 import { validateTile } from "../compiler/compile.ts";
 import type { DrillEntry } from "./drill.ts";
 import { useState, useRef, useEffect, useMemo } from "react";
-import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
+import type { DashboardSpec, TileSpec, FilterSpec } from "../compiler/spec.ts";
 import type { CanvasSpec } from "../canvas/presets.ts";
 import type { Model } from "../semantic/model.ts";
 import { applyLayout, sectionsOf } from "../canvas/layouts.ts";
@@ -41,9 +41,10 @@ interface Story {
  * reading guide without changing queries. Optional AI adds editorial judgment;
  * all changes remain explicit user actions and participate in document undo.
  */
-export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, queryContext, drills }: {
+export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, queryContext, drills, filtersByTile = {} }: {
   dash: DashboardSpec; canvas: CanvasSpec; model: Model; aiAvailable: boolean;
   onDash: (d: DashboardSpec) => void;
+  filtersByTile?: Record<string, FilterSpec[]>;
   queryContext: string; drills: Record<string, DrillEntry[]>;
 }) {
   const [open, setOpen] = useState(false);
@@ -59,7 +60,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, qu
   const rescanAfterEdit = useRef(false);
 
   const [scan, setScan] = useState<{ reviewed: number; limited: number; failed: string[] } | null>(null);
-  const context = JSON.stringify([dash, canvas, queryContext, drills]);
+  const context = JSON.stringify([dash, canvas, queryContext, drills, filtersByTile]);
   const current = useRef(context); current.current = context;
   const request = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -77,7 +78,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, qu
     let reviewed = 0, limited = 0;
     for (const t of dash.tiles) {
       if ((t.kind ?? "metric") !== "metric" || !t.metrics.length) continue;
-      const query = visibleQuery(model, t, dash.crossFilters, drills[t.id]);
+      const query = visibleQuery(model, t, [...(dash.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])], drills[t.id]);
       const timeDimIdx = query.dimensions.findIndex(d => d.includes(":"));
       const isSingleCategorical = query.dimensions.length === 1 && t.metrics.length === 1 && timeDimIdx === -1;
       const title = t.title ?? t.metrics.map(m => model.metrics[m]?.label ?? m).join(", ");

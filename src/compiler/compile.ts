@@ -297,7 +297,7 @@ export function buildPredicate(
 
   const bounds: string[] = [];
   if (f.min != null) bounds.push(`${ref} >= ${lit(f.min)}`);
-  if (f.max != null) bounds.push(`${ref} <= ${lit(f.max)}`);
+  if (f.max != null) bounds.push(`${ref} ${f.maxExclusive ? "<" : "<="} ${lit(f.max)}`);
   if (!bounds.length) return null;
   const sql = bounds.join(" AND ");
   return { sql: f.exclude ? `NOT (${sql})` : sql, having: f.source === "metric" };

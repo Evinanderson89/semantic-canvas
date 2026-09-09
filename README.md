@@ -19,12 +19,17 @@ Open [Semantic Canvas](http://127.0.0.1:5173). The API runs at `127.0.0.1:5174`.
 
 - Start from scratch or generate a dashboard from the semantic catalog.
 - Move, resize, align and layer tiles. Preview Smart Arrange before applying a layout; sections and pinned positions are preserved.
-- Add KPIs, charts, tables, headings, notes, dividers and images.
+- Add KPIs, charts, tables, headings, notes, dividers, images and connected filter controls.
+- Organize a dashboard into tabs. Scope filters to one tab or carry them across tabs with explicit chart connections.
+- Recreate a sketch, photo, dashboard image or PDF using catalogue metrics, with a matching review before creation (requires a vision-capable AI provider).
+- Copy charts into another tab or saved dashboard, with destination filter connections and revision protection.
 - Explore with filters and time drill-downs, then refresh data without replacing the design.
 - Save, reopen, save a copy, undo canvas changes and recover unsaved drafts from Home.
 - Review charts against their current filters and drill state. Partial reviews identify unavailable or limited results.
 - Ask the optional AI assistant to improve the active unsaved document. Review its proposed edits, apply them together, and undo them in one step.
 - Export charts as CSV or export a dashboard as PNG.
+
+See [references, tabs and connected filters](docs/reference-tabs-filters.md) for a walkthrough, file limits and current boundaries.
 
 ## What this alpha guarantees—and where it stops
 

@@ -42,8 +42,9 @@ export function suggestStoryStructure(dash: DashboardSpec, model: Model, width: 
   const kpis = ordered.filter(isKpi).sort((a, b) => priority(b) - priority(a));
   const trends = ordered.filter(t => !isKpi(t) && temporal(t)).sort((a, b) => priority(b) - priority(a));
   const detail = ordered.filter(t => !isKpi(t) && !temporal(t));
-  const authored = dash.tiles.filter(t => (t.kind ?? "metric") !== "metric");
+  const authored = dash.tiles.filter(t => (t.kind ?? "metric") !== "metric" && t.kind !== "filter");
   const groups = [
+    { title: "Explore this view", purpose: "Set the context with connected filters.", tiles: dash.tiles.filter(t => t.kind === "filter") },
     { title: "At a glance", purpose: "Start with the headline metrics.", tiles: kpis },
     { title: "How it's changing", purpose: "Give one trend the room to lead.", tiles: trends.slice(0, 1) },
     { title: "Supporting context", purpose: "Read related trends in their own units.", tiles: trends.slice(1) },

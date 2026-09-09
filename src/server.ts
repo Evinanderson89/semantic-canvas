@@ -1,3 +1,6 @@
+import { analyzeReference, validateReferenceUpload } from "./reference/analyze.ts";
+import { validateDashboard } from "./app/filters.ts";
+import { tabsOf, tabView } from "./app/tabs.ts";
 import { finishResult, resultLimit } from "./compiler/result.ts";
 import express from "express";
 // Load .env before anything reads process.env, so a source that needs
@@ -449,7 +452,7 @@ app.get("/api/dashboards", safe(async (req, res) =>
 app.post("/api/dashboards", safe(async (req, res) => {
   const document = saveSchema.parse(req.body);
   const model = modelOf(req);
-  const issues = document.spec.tiles.flatMap((t) => validateTile(model, t));
+  const issues = validateDashboard(model, document.spec);
   if (issues.length) return res.status(400).json({ issues });
   res.json(await saveDashboard(document, dashboardScope(req)));
 }));
@@ -466,8 +469,11 @@ app.post("/api/dashboards/:id/arrange", safe(async (req, res) => {
   if (!d) return res.status(404).json({ error: "Dashboard not found in this source" });
   const requested = req.body?.layout;
   if (requested && !LAYOUTS.some((l) => l.name === requested)) return res.status(400).json({ error: "Unknown layout" });
-  const arranged = requested ? { name: requested, tiles: applyLayout(requested, d.spec.tiles, d.canvas.width) }
-    : applyBestLayout(d.spec.tiles, d.canvas.width);
+  const pages = tabsOf(d.spec).map(tab => {
+    const tiles = tabView(d.spec, tab.id).tiles;
+    return requested ? { name: requested, tiles: applyLayout(requested, tiles, d.canvas.width) } : applyBestLayout(tiles, d.canvas.width);
+  });
+  const arranged = { name: requested ?? "per-tab", tiles: pages.flatMap(p => p.tiles) };
   const bottom = Math.max(d.canvas.height, ...arranged.tiles.map((t) => t.layout.y + t.layout.h + 24));
   const canvas = { ...d.canvas, height: Math.round(bottom) };
   const spec = { ...d.spec, tiles: arranged.tiles };
@@ -539,6 +545,15 @@ app.get("/api/agent/questions/:id", safe(async (req, res) => {
  * client-generated id, same as the agent-questions map above.
  */
 const agentConversations = new Map<string, ChatMessage[]>();
+
+app.post("/api/reference/analyze", safe(async (req, res) => {
+  try { await validateReferenceUpload(req.body); } catch (e: any) { return res.status(400).json({ error: e.message }); }
+  if (!ai?.apiKey) return res.status(503).json({ error: "Connect an AI provider in Connections to read a dashboard reference." });
+  const controller = new AbortController();
+  const stop = () => controller.abort(); res.on("close", stop);
+  try { const blueprint = await analyzeReference(req.body, modelOf(req), ai, controller.signal); if (!res.destroyed) res.json({ blueprint }); }
+  finally { res.off("close", stop); }
+}));
 
 app.get("/api/agent/status", safe((_req, res) => res.json({
   configured: Boolean(ai?.apiKey && ai.provider === "anthropic"), provider: ai?.provider ?? "anthropic", model: ai?.model ?? "claude-opus-5",

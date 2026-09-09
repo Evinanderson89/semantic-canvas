@@ -12,11 +12,12 @@ type Draft = Omit<TileSpec, "id" | "layout">;
  * because adding things is the most frequent action while composing, and it
  * should be reachable without moving your eye off the work.
  */
-export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker }: {
+export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker, onFilter }: {
   model: Model;
   onInsert: (d: Draft, size?: { w: number; h: number }) => void;
   onInsertMany: (d: Draft[], layout: "row") => void;
   onOpenPicker: () => void;
+  onFilter: () => void;
 }) {
   const [open, setOpen] = useState<null | "views" | "elements">(null);
   const byTable = metricsByTable(model);
@@ -79,6 +80,7 @@ export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker }: {
                 onClick={() => setOpen(open === "views" ? null : "views")}>
           Views
         </button>
+        <button className="ins" onClick={() => { setOpen(null); onFilter(); }}>Filter</button>
         <button className={"ins" + (open === "elements" ? " on" : "")}
                 onClick={() => setOpen(open === "elements" ? null : "elements")}>
           Text

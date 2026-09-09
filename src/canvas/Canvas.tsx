@@ -113,6 +113,7 @@ export function Canvas({
     if (canvas.locked) return;
     const key = (e: KeyboardEvent) => {
       if (!selected.length || !(e.target as HTMLElement)?.closest(".canvas-surface")) return;
+      if (document.querySelector("dialog[open]")) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable || (e.target as HTMLElement)?.closest("[role=dialog]")) return;
       const step = e.shiftKey ? 10 : canvas.snap ? canvas.grid : 1;

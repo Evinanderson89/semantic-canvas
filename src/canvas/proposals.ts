@@ -29,6 +29,7 @@ export function applyProposal(spec: DashboardSpec, canvas: CanvasSpec, raw: unkn
     if (action.type === "rename") { next.title = action.title; continue; }
     if (action.type === "arrange") { next.tiles = applyLayout(action.layout, next.tiles, canvas.width); continue; }
     if (action.type === "add") {
+      if (action.tile.kind === "filter") throw new Error("Add connected filters with the filter designer");
       if (next.tiles.some(t => t.id === action.tile.id)) throw new Error("A proposed tile ID already exists");
       next.tiles.push(action.tile); continue;
     }

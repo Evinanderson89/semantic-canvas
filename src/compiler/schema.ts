@@ -11,7 +11,7 @@ export const filterSchema = z.object({
   id: name, field: name, source: z.enum(["dimension", "metric"]),
   mode: z.enum(["discrete", "range"]), values: z.array(value).max(1000).optional(),
   min: z.union([finite, z.string().max(256), z.null()]).optional(),
-  max: z.union([finite, z.string().max(256), z.null()]).optional(), exclude: z.boolean().optional(),
+  max: z.union([finite, z.string().max(256), z.null()]).optional(), exclude: z.boolean().optional(), maxExclusive: z.boolean().optional(),
 }).strict();
 const formatSchema = z.object({
   number: z.enum(["auto", "currency", "percent", "compact", "plain"]),
@@ -32,7 +32,8 @@ export const querySchema = z.object({
 }).strict();
 export const tileSchema = querySchema.extend({
   id: name, metrics: z.array(name).max(50), section: name.optional(), pinned: z.boolean().optional(),
-  kind: z.enum(["metric", "heading", "text", "divider", "image"]).optional(),
+  tabId: name.optional(), filterId: name.optional(),
+  kind: z.enum(["metric", "heading", "text", "divider", "image", "filter"]).optional(),
   title: z.string().max(1000).optional(), text: z.string().max(100000).optional(),
   imageData: z.string().max(6 * 1024 * 1024).regex(/^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/).optional(),
   chart: z.enum(["line", "area", "areaStacked", "bar", "barGrouped", "barStacked", "barH", "barHorizontal", "scatter", "heatmap", "map", "donut", "waterfall", "funnel", "smallMultiples", "combo", "stat", "kpi", "table"]).optional(),
@@ -43,9 +44,20 @@ export const tileSchema = querySchema.extend({
   layout: z.object({ x: finite.min(0).max(100000), y: finite.min(0).max(100000),
     w: finite.positive().max(100000), h: finite.positive().max(100000), z: finite.int().optional() }).strict(),
 }).refine((t) => t.kind && t.kind !== "metric" || t.metrics.length > 0, "Metric tiles need a metric");
+export const filterValueSchema = z.object({ values: z.array(value).max(1000).optional(),
+  min: z.union([finite, z.string().max(256), z.null()]).optional(), max: z.union([finite, z.string().max(256), z.null()]).optional(),
+}).strict();
+export const dashboardFilterSchema = z.object({
+  id: name, label: z.string().min(1).max(100), field: name, control: z.enum(["select", "date", "number"]),
+  scope: z.enum(["tab", "report"]), tabId: name.optional(),
+  bindings: z.array(z.object({ tileId: name, field: name }).strict()).max(500),
+  defaultValue: filterValueSchema.optional(),
+}).strict();
 export const dashboardSchema = z.object({
   title: z.string().min(1).max(1000), description: z.string().max(100000).optional(),
   tiles: z.array(tileSchema).max(500), crossFilters: z.array(filterSchema).max(100).optional(),
+  tabs: z.array(z.object({ id: name, title: z.string().min(1).max(100) }).strict()).min(1).max(20).optional(),
+  filters: z.array(dashboardFilterSchema).max(64).optional(),
 }).strict().refine((d) => new Set(d.tiles.map((t) => t.id)).size === d.tiles.length, "Tile IDs must be unique");
 export const canvasSchema = z.object({
   preset: name, width: finite.min(100).max(100000), height: finite.min(100).max(100000),
