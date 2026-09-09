@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -81,4 +82,25 @@ export const deleteDashboard = (id: string, scope: DashboardScope, revision: num
   const r = await conn().runAndReadAll("DELETE FROM dashboards WHERE id = ? AND source_id = ? AND revision = ? RETURNING id", [id, scope.source, revision]);
   if (!r.getRows().length) throw new StoreConflict("Dashboard changed or was not found; reopen it before deleting");
   return { ok: true };
+});
+
+const librarySchema = z.object({ format: z.literal("semantic-canvas-library"), version: z.literal(1), createdAt: z.string(), dashboards: z.array(z.object({
+  id: z.string().min(1), name: z.string(), source: z.string().nullable(), model: z.string(), spec: dashboardSchema, canvas: canvasSchema,
+  revision: z.number().int().min(1), schemaVersion: z.literal(1), updatedAt: z.string().datetime(),
+})) }).strict();
+/** Serialized with saves: a consistent logical snapshot, without query results or credentials. */
+export const exportLibrary = () => serialized(async () => {
+  const rows = (await conn().runAndReadAll("SELECT id, name, source_id, model, spec, canvas, revision, schema_version, updated_at::VARCHAR FROM dashboards ORDER BY id")).getRows();
+  return { format: "semantic-canvas-library", version: 1, createdAt: new Date().toISOString(), dashboards: rows.map(r => ({ id: String(r[0]), name: String(r[1]), source: r[2] == null ? null : String(r[2]), model: String(r[3]), spec: JSON.parse(String(r[4])), canvas: JSON.parse(String(r[5])), revision: Number(r[6]), schemaVersion: Number(r[7]), updatedAt: new Date(String(r[8]) + "Z").toISOString() })) };
+});
+/** Restore is offline and only into an empty store. Never silently replaces company work. */
+export const restoreLibrary = (input: unknown) => serialized(async () => {
+  const backup = librarySchema.parse(input);
+  if (new Set(backup.dashboards.map(d => d.id)).size !== backup.dashboards.length) throw new Error("Backup contains duplicate dashboard IDs");
+  if (Number((await conn().runAndReadAll("SELECT count(*) FROM dashboards")).getRows()[0][0])) throw new Error("Restore requires an empty dashboard database");
+  await conn().run("BEGIN TRANSACTION");
+  try {
+    for (const d of backup.dashboards) await conn().run("INSERT INTO dashboards (id, name, source_id, model, spec, canvas, revision, schema_version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [d.id, d.name, d.source, d.model, JSON.stringify(d.spec), JSON.stringify(d.canvas), d.revision, d.schemaVersion, d.updatedAt]);
+    await conn().run("COMMIT"); return { restored: backup.dashboards.length };
+  } catch (error) { await conn().run("ROLLBACK"); throw error; }
 });

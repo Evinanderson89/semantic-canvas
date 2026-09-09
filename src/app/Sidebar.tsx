@@ -1,3 +1,4 @@
+import { useSession, signOut } from "./Session.tsx";
 import { useEffect, useState } from "react";
 import type { Model } from "../semantic/model.ts";
 import { metricsByTable } from "../semantic/model.ts";
@@ -42,6 +43,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
   activeSource?: { label: string; status: "ready" | "error"; error?: string } | null;
   demo?: { active: boolean; onOpen: () => void };
 }) {
+  const session = useSession();
   const [theme, setTheme] = useState(() => {
     try { return localStorage.getItem("sc:theme") === "dark" ? "dark" : "light"; } catch { return "light"; }
   });
@@ -106,7 +108,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
       </nav>
 
       <div className="who">
-        <div className="workspace-caption"><span title="Roles are simulations on this computer, not authentication">Local alpha · Role preview</span>
+        <div className="workspace-caption"><span title={session.mode === "team" ? "Access is managed by your company" : "Roles are simulations on this computer, not authentication"}>{session.mode === "team" ? `Company workspace · ${session.user?.role}` : "Local alpha · Role preview"}</span>
           <button className="theme-toggle" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} appearance`}
             title={`Switch to ${theme === "light" ? "dark" : "light"} appearance`} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
             {theme === "light" ? "◐" : "◑"}
@@ -114,7 +116,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
         </div>
         <div className="who-row">
           <span className="avatar">{(principal || "SC").slice(0, 2).toUpperCase()}</span>
-          {principals.length > 0 ? (
+          {session.mode === "team" ? <span className="name">{session.user?.name}</span> : principals.length > 0 ? (
             <select className="who-sel" value={principal} aria-label="Acting as"
                     title="No principal denies all row-level-secured data"
                     onChange={(e) => onPrincipal(e.target.value)}>
@@ -123,6 +125,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
             </select>
           ) : <span className="name">Local</span>}
         </div>
+        {session.mode === "team" && <button className="link" onClick={signOut}>Sign out</button>}
         <button className="who-source" onClick={() => onView("connections")}
                 title={activeSource
                   ? `${activeSource.label}${activeSource.status === "error" ? ` — ${activeSource.error}` : ""}`

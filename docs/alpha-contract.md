@@ -1,6 +1,6 @@
 # Trustworthy local alpha contract
 
-This release strengthens document recovery and query governance, adds section-aware canvas composition, and makes assistant edits reviewable. Native semantic-engine execution and shared team deployment remain later phases.
+This release strengthens document recovery and query governance, adds section-aware canvas composition, and makes assistant edits reviewable. Native semantic-engine execution remains a later phase. An opt-in company workspace now adds authentication and operations; its separate [self-hosting contract](self-hosting.md) documents the boundaries.
 
 ## Document lifecycle
 
@@ -19,7 +19,7 @@ Smart Arrange previews section-aware layouts before applying tiles and canvas di
 - Delete requires the current revision. Arrange respects the requested named layout and checks the loaded revision before writing.
 - Query bodies contain metrics, dimensions, structured filters, comparison and a bounded limit; arbitrary query properties and raw SQL filters are rejected. Saved tile geometry must be finite and positive, with unique IDs.
 - Chart queries and discovery endpoints deny unenforceable policies with 403. The configured RLS file must exist and be structurally valid; explicit `policies: []` disables policies for an intentionally unrestricted local installation.
-- The API binds to loopback and checks Host/Origin headers. These checks limit accidental local exposure; they are not a session/authentication system or support for deployment behind a public proxy.
+- Local mode binds to loopback and checks Host/Origin headers; its role selector is a simulation. Company mode requires HTTPS/OIDC, explicit access rules and server-side sessions. The browser cannot select a different row principal. See the self-hosting guide for deployment and session limits.
 
 ## Query semantics
 
@@ -49,4 +49,4 @@ Stop the old server and copy its dashboard directory before upgrading. Do not sh
 
 Tests cover the sample warehouse, exact synthetic DuckDB answers, source isolation, concurrent revisions, old store schema migration, malformed policy/config input, rejected adapter semantics, agent tool context and tool-schema serialization. Additional fixtures verify latest-window comparisons, native-grain restrictions, atomic proposals, pinned sections, retired pool drainage and the Snowflake SDK's TOML parser interface. Browser regressions exercise save/new/open, refresh and role changes, failed save retry, recovery failure, backup import, keyboard editing, layout preview/undo, partial design reviews and mocked assistant proposal flows.
 
-Live Snowflake, paid model responses and compatibility with arbitrary vendor manifests need integration testing with real credentials and fixtures. Replaced connection pools now reject queued/new work, drain active leases and close retired connections; partial initialization failures and warehouse timeout behavior still need further hardening. Team authentication, asset storage, source deletion ownership, general query cancellation/budgets, responsive published dashboards and AI narrative evaluation remain outside this release.
+Live Snowflake, paid model responses and compatibility with arbitrary vendor manifests need integration testing with real credentials and fixtures. Replaced connection pools now reject queued/new work, drain active leases and close retired connections; partial initialization failures and warehouse timeout behavior still need further hardening. Distributed sessions, document-level permissions, general asset storage, source deletion ownership, query cancellation/budgets, responsive published dashboards and AI narrative evaluation remain outside this release.

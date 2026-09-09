@@ -35,3 +35,13 @@ The Snowflake SDK uses `toml.parse` for its optional local connection file. The 
 ## Release gates
 
 Before claiming native semantic compatibility, compare a representative fixture corpus against the provider's authoritative execution engine. Before supporting shared deployment, implement real identity, authorization, tenant isolation and operational controls. Before calling narrative assistance reliable, evaluate factual claims against governed results, missing periods and incomplete/limited windows.
+
+## Company workspace and operations
+
+`src/security/auth.ts` separates local simulation from opt-in OIDC company mode. Verified ID-token subject/group bindings produce an opaque session, application role, RLS principal and source allowlist. API middleware authenticates and authorizes before source selection. The embedded agent forwards the caller’s session over a loopback-only HTTP client; its model cannot supply authentication context. External MCP cannot authenticate to company mode.
+
+`SessionBoundary` gates the UI until session lookup completes. Viewers get exploration controls with the canvas locked; administrator-only setup lives in Connections. UI restrictions complement server permissions. Team drafts live in per-account tab storage, while local drafts preserve their existing browser key.
+
+The production server serves the built UI and API from one origin. Docker persists the store, editable source configuration, credentials and uploaded models under `/data`; team access/RLS rules are private operator-mounted files. Operator mutations are serialized and source configuration replacement is atomic. Dashboard library snapshots serialize with saves; validated restore is transactional and restricted to an empty store.
+
+`src/operations/telemetry.ts` emits allowlisted JSON records and optionally batches OTLP/HTTP logs and request spans. Requests carry generated IDs, template routes and pseudonymous actor IDs. No payloads, SQL, rows or credentials are recorded. Startup health, admin status counters and backup/recovery recipes are documented in `self-hosting.md`. All sessions and operational counters remain process-local; this is a single-instance design.

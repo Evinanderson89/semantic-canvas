@@ -1,3 +1,8 @@
+import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { CompanyAuth, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
+import { createTelemetry } from "./operations/telemetry.ts";
+import { resolve } from "node:path";
 import { analyzeReference, validateReferenceUpload } from "./reference/analyze.ts";
 import { validateDashboard } from "./app/filters.ts";
 import { tabsOf, tabView } from "./app/tabs.ts";
@@ -8,17 +13,17 @@ import express from "express";
 // A missing .env is fine -- most contributors run the bundled duckdb source,
 // which needs none.
 if (typeof process.loadEnvFile === "function") {
-  try { process.loadEnvFile(); } catch { /* no .env file present */ }
+  try { process.loadEnvFile(process.env.SC_ENV_PATH ?? ".env"); } catch { /* no .env file present */ }
 }
 import { compileTile, splitPartialPeriods, validateTile } from "./compiler/compile.ts";
 import { suggestDashboard } from "./suggest/suggest.ts";
 import type { Connector } from "./connectors/types.ts";
 import type { Model } from "./semantic/model.ts";
 import { existsSync, statSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import YAML from "yaml";
 import { describe as describeSource, connectOne, expand, loadSources, type AiConfig, type Source } from "./sources/registry.ts";
-import { deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources } from "./store/store.ts";
+import { exportLibrary, closeStore, deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources } from "./store/store.ts";
 import { loadRls, type RlsConfig } from "./security/rls.ts";
 import { applyBestLayout, applyLayout, LAYOUTS } from "./canvas/layouts.ts";
 import { requireScope, scopedField } from "./security/queryScope.ts";
@@ -29,9 +34,12 @@ import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardSt
 import Anthropic from "@anthropic-ai/sdk";
 
 const SOURCES_PATH = process.env.SOURCES_PATH ?? "./sources.yaml";
-const ENV_PATH = ".env"; // matches the bare process.loadEnvFile() call above
+const ENV_PATH = process.env.SC_ENV_PATH ?? ".env"; // matches the bare process.loadEnvFile() call above
 const PORT = Number(process.env.PORT || 5174);
 
+const auth = new CompanyAuth(await loadAuthConfig(), (event, data) => telemetry.log(event, data));
+const telemetry = createTelemetry();
+let ready = false;
 let sources: Source[] = [];
 let defaultPrincipal: string | null = null;
 let rls: RlsConfig = { policies: [], principals: {} };
@@ -40,9 +48,10 @@ let ai: AiConfig | null = null;
 /** Resolve the source for a request; falls back to the first ready one. */
 function pick(req: any): Source {
   const want = String(req.header?.("x-sc-source") ?? req.query?.source ?? "");
+  if (want && !canUseSource(identityOf(req), want)) throw Object.assign(new Error("This source is not available to your account"), { status: 403 });
   const found = sources.find((s) => s.id === want && s.status === "ready");
   if (want && !found) throw Object.assign(new Error(`Source "${want}" is unavailable`), { status: 404 });
-  const ready = found ?? sources.find((s) => s.status === "ready");
+  const ready = found ?? sources.find((s) => s.status === "ready" && canUseSource(identityOf(req), s.id));
   if (!ready) throw new Error("no data source is available");
   return ready;
 }
@@ -56,39 +65,52 @@ async function boot() {
   ai = loaded.ai;
   rls = await loadRls(process.env.RLS_PATH ?? "./security/policies.yaml");
 
-  for (const s of sources) {
-    console.log(s.status === "ready"
-      ? `source ${s.id.padEnd(18)} ready   ${s.adapter}/${s.conn!.id}  ` +
-        `${Object.keys(s.model!.tables).length} tables, ` +
-        `${Object.keys(s.model!.metrics).length} metrics  (${s.connectMs}ms)`
-      : `source ${s.id.padEnd(18)} FAILED  ${s.error}`);
+  for (const binding of auth.config.access?.bindings ?? []) {
+    if (!rls.principals[binding.principal]) throw new Error("An access binding references an unknown RLS principal");
   }
-  if (!sources.some((s) => s.status === "ready"))
-    throw new Error(`no usable source in ${SOURCES_PATH}`);
+  await auth.start();
 
-  const storeFile = await openStore();
+  await openStore();
   await migrateLegacySources(sources.filter((s) => s.model).map((s) => ({ source: s.id, model: s.model!.name })));
-  console.log(`store  ${storeFile}`);
-  console.log(`rls    ${rls.policies.length} policies, ` +
-              `${Object.keys(rls.principals).length} principals`);
-  console.log(ai?.apiKey
-    ? `ai     ${ai.provider}/${ai.model} configured`
-    : `ai     not configured (set ANTHROPIC_API_KEY in .env to enable the in-app agent)`);
+  ready = true;
+  telemetry.log("server.ready", { mode: auth.config.mode, readySources: sources.filter(s => s.status === "ready").length, totalSources: sources.length });
 }
 
+async function writeConfig(path: string, content: string) {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, content, { mode: 0o600, flag: "wx" });
+  await rename(temporary, path);
+}
 const app = express();
-// This alpha exposes local administration and role simulation, not team authentication.
-// Bind only to loopback; reject remote origins and DNS-rebinding Host headers.
+app.disable("x-powered-by");
+app.use(telemetry.middleware);
 app.use((req, res, next) => {
-  const local = (url: string) => { try { return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname); } catch { return false; } };
-  if (!local(`http://${req.headers.host}`) || (req.headers.origin && !local(req.headers.origin)))
-    return res.status(403).json({ error: "This alpha accepts local requests only" });
+  res.setHeader("X-Content-Type-Options", "nosniff"); res.setHeader("Referrer-Policy", "no-referrer"); res.setHeader("X-Frame-Options", "DENY");
+  if (process.env.SC_SERVE_UI === "true") res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+  if (req.path.startsWith("/api")) res.setHeader("Cache-Control", "no-store");
+  if (req.path === "/healthz" || req.path === "/readyz") return next();
+  const local = (value: string) => { try { return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(value).hostname); } catch { return false; } };
+  const host = req.headers.host ?? "", origin = req.headers.origin;
+  if (auth.config.mode === "local" ? !local(`http://${host}`) || origin && !local(origin)
+    : host !== new URL(auth.config.publicUrl!).host || origin && origin !== auth.config.publicUrl) return res.status(403).json({ error: "Request origin is not allowed" });
   next();
 });
+app.get("/healthz", (_req, res) => res.json({ status: "ok" }));
+app.get("/readyz", (_req, res) => res.status(ready ? 200 : 503).json({ status: ready ? "ready" : "starting" }));
 app.use(express.json({ limit: MAX_DOCUMENT_BYTES }));
 app.use((error: any, _req: any, res: any, next: any) => {
   if (!error) return next();
   res.status(error.status ?? 400).json({ error: error.status === 413 ? "Dashboard exceeds the 8 MB save limit" : "Invalid JSON request" });
+});
+
+auth.mount(app);
+app.use("/api", auth.guard);
+app.use("/api", (_req, res, next) => {
+  if (auth.config.mode === "team") {
+    const json = res.json.bind(res);
+    res.json = (body: any) => json(res.statusCode >= 500 ? { error: "The request failed. Contact your administrator with this request ID.", requestId: res.locals.requestId } : body);
+  }
+  next();
 });
 
 /**
@@ -100,16 +122,49 @@ app.use((error: any, _req: any, res: any, next: any) => {
  * going down, or (before the fix above) a corrupted sources.yaml -- degrades
  * to one failed request instead of taking the entire server down.
  */
+// Hold the operator queue until the work completes, even if its HTTP client disconnects.
+let configQueue = Promise.resolve();
 const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => {
-  try { await fn(req, res); }
-  catch (e: any) { res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
+  const run = async () => {
+    if (res.destroyed) return;
+    try { await fn(req, res); }
+    catch (e: any) { telemetry.log("request.failed", { requestId: res.locals.requestId, errorType: e?.name ?? "Error" }, "error"); res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
+  };
+  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(sources|agent\/key|setup\/model)(\/|$)/.test(req.path)) {
+    const pending = configQueue.then(run); configQueue = pending.catch(() => {}); await pending;
+  } else await run();
 };
 
-app.get("/api/sources", safe((_req, res) => res.json({
-  sources: sources.map(describeSource),
-  active: sources.find((x) => x.status === "ready")?.id ?? null,
-  defaultPrincipal,
+app.get("/api/sources", safe((req, res) => res.json({
+  sources: sources.filter(s => canUseSource(identityOf(req), s.id)).map(s => ({ ...describeSource(s), ...(auth.config.mode === "team" && identityOf(req)?.role !== "admin" && s.error ? { error: "Connection unavailable. Contact your administrator." } : {}) })),
+  active: sources.find((x) => x.status === "ready" && canUseSource(identityOf(req), x.id))?.id ?? null,
+  defaultPrincipal: auth.config.mode === "local" ? defaultPrincipal : undefined,
 })));
+
+app.get("/api/setup/guide", safe((_req, res) => res.type("text/plain").sendFile(resolve("docs/self-hosting.md"))));
+app.get("/api/setup", safe((_req, res) => res.json({ mode: auth.config.mode,
+  checks: { signIn: auth.config.mode === "team", sources: sources.some(s => s.status === "ready"), catalogue: sources.some(s => Object.keys(s.model?.metrics ?? {}).length > 0), ai: Boolean(ai?.apiKey), monitoring: telemetry.enabled },
+  sources: sources.map(describeSource), sessionSeconds: auth.config.sessionSeconds,
+})));
+app.get("/api/operations/status", safe((_req, res) => res.json({ ready, uptimeSeconds: Math.floor(process.uptime()), monitoring: telemetry.enabled, counters: telemetry.counters,
+  sources: sources.map(s => ({ id: s.id, status: s.status })), storage: "Persistent dashboard database", mode: auth.config.mode,
+})));
+
+app.get("/api/operations/backup", safe(async (_req, res) => {
+  res.setHeader("Content-Disposition", 'attachment; filename="semantic-canvas-library.json"');
+  const backup = await exportLibrary(); telemetry.log("audit.library_exported", { actor: identityOf(_req)?.id, count: backup.dashboards.length }); res.json(backup);
+}));
+
+app.post("/api/setup/model", safe(async (req, res) => {
+  const input = z.object({ content: z.string().max(5 * 1024 * 1024), adapter: z.enum(["duckglue", "snowflake-semantic"]) }).strict().parse(req.body);
+  if (Buffer.byteLength(input.content) > 5 * 1024 * 1024) return res.status(413).json({ error: "Semantic model exceeds 5 MB" });
+  const parsed = YAML.parse(input.content, { maxAliasCount: 50 });
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return res.status(400).json({ error: "Choose a semantic model YAML file" });
+  const dir = resolve(process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas"), "models");
+  await mkdir(dir, { recursive: true });
+  const path = resolve(dir, `${randomUUID()}.yaml`); await writeFile(path, input.content, { mode: 0o600, flag: "wx" });
+  res.json({ path });
+}));
 
 const SLUG = /^[a-z][a-z0-9-]{1,40}$/;
 
@@ -209,11 +264,11 @@ async function upsertEnv(vars: Record<string, string>, label: string) {
     const idx = lines.findIndex((l) => l.startsWith(`${name}=`));
     const rendered = `${name}=${quoteEnvValue(value)}`;
     if (idx !== -1) lines[idx] = rendered; else added.push(rendered);
-    process.env[name] = value;
   }
   let text = lines.join("\n");
-  if (added.length) text = `${text.replace(/\n+$/, "")}\n\n# ${label} (via Connections)\n${added.join("\n")}\n`;
-  await writeFile(ENV_PATH, text);
+  if (added.length) text = `${text.replace(/\n+$/, "")}\n\n# ${label.replace(/[\r\n]/g, " ")} (via Connections)\n${added.join("\n")}\n`;
+  await writeConfig(ENV_PATH, text);
+  Object.assign(process.env, vars);
 }
 
 /** Finds the `  - id: <id>` list item in sources.yaml's raw text and returns
@@ -312,7 +367,14 @@ app.post("/api/sources", safe(async (req, res) => {
       `    model: ${yamlScalar(model)}`, `    connector:`, ...connectorLines, "",
     ].join("\n");
     const current = (await readFile(SOURCES_PATH, "utf8").catch(() => "")) || "";
-    await writeFile(SOURCES_PATH, current.replace(/\n*$/, "") + "\n\n" + yamlBlock + "\n");
+    const document = YAML.parseDocument(current);
+    if (document.errors.length) throw new Error("Fix the source configuration before adding a source");
+    const existing = document.get("sources");
+    const added = YAML.parse("sources:\n" + yamlBlock).sources[0];
+    if (YAML.isSeq(existing)) existing.add(added);
+    else if (existing == null || YAML.isScalar(existing) && existing.value == null) document.set("sources", [added]);
+    else throw new Error("sources must be a list");
+    await writeConfig(SOURCES_PATH, document.toString({ lineWidth: 0 }));
   } catch (e: any) {
     return res.status(500).json({ error: `connected, but failed to save: ${e?.message ?? e}` });
   }
@@ -380,7 +442,7 @@ app.put("/api/sources/:id", safe(async (req, res) => {
     ];
     const { block } = existing;
     block.lines.splice(block.startLine, block.endLine - block.startLine, ...newBlock);
-    await writeFile(SOURCES_PATH, block.lines.join("\n"));
+    await writeConfig(SOURCES_PATH, block.lines.join("\n"));
   } catch (e: any) {
     return res.status(500).json({ error: `connected, but failed to save: ${e?.message ?? e}` });
   }
@@ -401,7 +463,7 @@ app.delete("/api/sources/:id", safe(async (req, res) => {
 
   const { block } = existing;
   block.lines.splice(block.startLine, block.endLine - block.startLine);
-  try { await writeFile(SOURCES_PATH, block.lines.join("\n")); }
+  try { await writeConfig(SOURCES_PATH, block.lines.join("\n")); }
   catch (e: any) { return res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
 
   res.json(await hotReload());
@@ -493,36 +555,38 @@ app.post("/api/dashboards/:id/arrange", safe(async (req, res) => {
  * survive a server restart.
  */
 interface PendingQuestion {
-  id: string; question: string; options?: string[]; answer: string | null; createdAt: number;
+  owner: string; id: string; question: string; options?: string[]; answer: string | null; createdAt: number;
 }
 const agentQuestions = new Map<string, PendingQuestion>();
 const nextQuestionId = () => `q${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 function pruneAnsweredQuestions() {
   const cutoff = Date.now() - 10 * 60 * 1000;
-  for (const [id, q] of agentQuestions) if (q.answer !== null && q.createdAt < cutoff) agentQuestions.delete(id);
+  for (const [id, q] of agentQuestions) if (q.createdAt < cutoff) agentQuestions.delete(id);
 }
 
 app.post("/api/agent/questions", safe(async (req, res) => {
   pruneAnsweredQuestions();
-  const question = String(req.body?.question ?? "").trim();
+  const owner = identityOf(req)?.id ?? "local";
+  if (agentQuestions.size >= 5000 || [...agentQuestions.values()].filter(q => q.owner === owner).length >= 50) return res.status(429).json({ error: "Too many pending questions. Try again later." });
+  const question = String(req.body?.question ?? "").trim().slice(0, 4000);
   if (!question) return res.status(400).json({ error: "question is required" });
-  const options = Array.isArray(req.body?.options) ? req.body.options.map(String) : undefined;
+  const options = Array.isArray(req.body?.options) ? req.body.options.slice(0, 12).map((o: unknown) => String(o).slice(0, 500)) : undefined;
   const id = nextQuestionId();
-  agentQuestions.set(id, { id, question, options, answer: null, createdAt: Date.now() });
+  agentQuestions.set(id, { id, question, options, answer: null, createdAt: Date.now(), owner: identityOf(req)?.id ?? "local" });
   res.json({ id });
 }));
 
 /** The browser polls this for whatever's still waiting on a human. */
-app.get("/api/agent/questions", safe(async (_req, res) => {
+app.get("/api/agent/questions", safe(async (req, res) => {
   res.json({
-    questions: [...agentQuestions.values()].filter((q) => q.answer === null)
+    questions: [...agentQuestions.values()].filter((q) => q.answer === null && q.owner === (identityOf(req)?.id ?? "local"))
       .map((q) => ({ id: q.id, question: q.question, options: q.options })),
   });
 }));
 
 app.post("/api/agent/questions/:id/answer", safe(async (req, res) => {
   const q = agentQuestions.get(req.params.id);
-  if (!q) return res.status(404).json({ error: "no such question (it may have already been answered elsewhere)" });
+  if (!q || q.owner !== (identityOf(req)?.id ?? "local")) return res.status(404).json({ error: "no such question (it may have already been answered elsewhere)" });
   const answer = String(req.body?.answer ?? "").trim();
   if (!answer) return res.status(400).json({ error: "answer is required" });
   q.answer = answer;
@@ -532,7 +596,7 @@ app.post("/api/agent/questions/:id/answer", safe(async (req, res) => {
 /** The MCP server polls this until a human answers (or its own timeout gives up). */
 app.get("/api/agent/questions/:id", safe(async (req, res) => {
   const q = agentQuestions.get(req.params.id);
-  if (!q) return res.status(404).json({ error: "no such question" });
+  if (!q || q.owner !== (identityOf(req)?.id ?? "local")) return res.status(404).json({ error: "no such question" });
   res.json({ id: q.id, question: q.question, options: q.options, answer: q.answer });
 }));
 
@@ -599,12 +663,13 @@ app.post("/api/agent/chat", safe(async (req, res) => {
   if (!message) return res.status(400).json({ error: "message is required" });
   const principal = principalOf(req)?.id ?? "";
   const source = pick(req).id;
-  const historyKey = JSON.stringify([source, principal, conversationId]);
+  const historyKey = JSON.stringify([identityOf(req)?.id ?? "local", source, principal, conversationId]);
   const history = agentConversations.get(historyKey) ?? [];
   const active = req.body.document ? z.object({ spec: dashboardSchema, canvas: canvasSchema, selected: z.array(z.string()).max(500).default([]) }).strict().parse(req.body.document) : undefined;
   const controller = new AbortController();
   res.on("close", () => controller.abort());
-  const { text, messages, proposal } = await agentChat(ai, history.slice(-12), message, { source, principal, signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined);
+  const { text, messages, proposal } = await agentChat(ai, history.slice(-12), message, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined);
+  if (agentConversations.size >= 500) agentConversations.delete(agentConversations.keys().next().value!);
   agentConversations.set(historyKey, messages.slice(-12));
   res.json({ text, proposal });
 }));
@@ -620,7 +685,7 @@ app.post("/api/agent/explain", safe(async (req, res) => {
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
   const principal = principalOf(req)?.id ?? "";
   const source = pick(req).id;
-  const text = await explainTile(ai, { source, principal }, {
+  const text = await explainTile(ai, { source, principal, auth: auth.forwarded(req) }, {
     title: String(body.title ?? metrics.join(", ")),
     metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
     where: body.where, compare: body.compare,
@@ -641,7 +706,7 @@ app.post("/api/agent/beautify", safe(async (req, res) => {
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
   const principal = principalOf(req)?.id ?? "";
   const source = pick(req).id;
-  const text = await suggestImprovements(ai, { source, principal }, {
+  const text = await suggestImprovements(ai, { source, principal, auth: auth.forwarded(req) }, {
     title: String(body.title ?? metrics.join(", ")),
     metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
     where: body.where, compare: body.compare,
@@ -677,7 +742,7 @@ app.post("/api/agent/dashboard-story", safe(async (req, res) => {
   const catalog = Object.values(modelOf(req).metrics).map((m) => ({
     name: m.name, label: m.label, description: m.description, baseTable: m.baseTable,
   }));
-  const result = await suggestDashboardStory(ai, { source, principal }, tiles, catalog);
+  const result = await suggestDashboardStory(ai, { source, principal, auth: auth.forwarded(req) }, tiles, catalog);
   res.json(result);
 }));
 
@@ -760,14 +825,14 @@ app.post("/api/suggest", safe((req, res) =>
 
 /** Who is asking. A header stands in for a session in the PoC. */
 function principalOf(req: any) {
-  const id = String(req.header("x-sc-principal") ?? "");
+  const id = auth.config.mode === "team" ? identityOf(req)?.principal ?? "" : String(req.header("x-sc-principal") ?? "");
   return rls.principals[id] ?? null;
 }
 
-app.get("/api/principals", safe((_req, res) =>
+app.get("/api/principals", safe((req, res) =>
   res.json({
-    mode: "local",
-    principals: Object.values(rls.principals).map((p) => ({ id: p.id, name: p.name })),
+    mode: auth.config.mode,
+    principals: Object.values(rls.principals).filter(p => auth.config.mode === "local" || p.id === identityOf(req)?.principal).map((p) => ({ id: p.id, name: p.name })),
     policies: rls.policies.map((p) => ({ id: p.id, field: `${p.table}.${p.column}`, claim: p.claim })),
   })));
 
@@ -801,5 +866,14 @@ app.post("/api/query", safe(async (req, res) => {
   }
 }));
 
-boot().then(() => app.listen(PORT, "127.0.0.1", () => console.log(`local alpha API on http://127.0.0.1:${PORT}`)))
-  .catch((e) => { console.error(e); process.exit(1); });
+if (process.env.SC_SERVE_UI === "true") {
+  const dist = resolve("dist");
+  app.use(express.static(dist, { index: false, maxAge: "1h" }));
+  app.get("*", (req, res) => req.path.startsWith("/api/") ? res.status(404).json({ error: "Unknown endpoint" }) : res.sendFile(resolve(dist, "index.html")));
+}
+const host = process.env.SC_HOST ?? (auth.config.mode === "team" ? "0.0.0.0" : "127.0.0.1");
+boot().then(() => {
+  const server = app.listen(PORT, host);
+  const stop = () => { ready = false; telemetry.log("server.stopping"); server.close(async () => { await Promise.allSettled(sources.map(s => s.conn?.close())); await closeStore(); await telemetry.close(); process.exit(0); }); setTimeout(() => process.exit(1), 15000).unref(); };
+  process.once("SIGTERM", stop); process.once("SIGINT", stop);
+}).catch(async e => { telemetry.log("server.start_failed", { errorType: e?.name ?? "Error" }, "error"); process.stderr.write(`Semantic Canvas could not start: ${String(e?.message ?? "Invalid configuration")}\n`); await telemetry.close(); process.exit(1); });

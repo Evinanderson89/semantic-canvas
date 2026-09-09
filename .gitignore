@@ -8,3 +8,7 @@ playwright-report/
 .test-data/
 *.tsbuildinfo
 .preview-data/
+.env.team
+deploy/access.yaml
+deploy/policies.yaml
+backups/

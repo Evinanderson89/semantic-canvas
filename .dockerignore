@@ -1,0 +1,14 @@
+.git
+node_modules
+dist
+.env*
+*.local
+.preview-data
+.test-data
+test-results
+playwright-report
+*.tsbuildinfo
+deploy/access.yaml
+deploy/policies.yaml
+**/*.duckdb*
+backups

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — company workspaces and self-hosting
+
+- Added non-root Docker packaging with a persistent workspace, a built UI/API runtime, a loopback-only demo and a separate HTTPS team recipe.
+- Added OpenID Connect company sign-in with PKCE/state/nonce, opaque sessions, CSRF protection and explicit viewer/editor/admin, source and row-principal bindings.
+- Bound embedded agent tools, questions and conversations to the authenticated user; isolated team browser drafts by account and tab.
+- Added workspace setup/status, semantic-model YAML upload, structured application/audit logs and optional OTLP/HTTP logs and request traces.
+- Added consistent dashboard-library downloads, validated offline restore and stopped-volume backup/recovery instructions.
+- Serialized source/credential mutations, made source configuration writes atomic and fixed first-source creation from an empty registry.
+
+This is an early single-instance team release. Real identity-provider verification, document-specific ACLs, provisioning, distributed sessions and durable audit storage remain outside its guarantees. See `docs/self-hosting.md`.
+
 ## Unreleased — analytical composition and trust
 
 - Design Review can preview and apply a story structure to an unsectioned dashboard: editable headings, a neutral reading guide, clearer automatic labels and a focal trend. Existing headings, pinned content and authored titles are preserved. Chart fixes refresh the remaining review automatically.

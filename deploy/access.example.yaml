@@ -1,0 +1,16 @@
+# First matching rule wins. IDs must match the verified ID token from your IdP.
+# Grant '*' sources only to workspace administrators unless you intend broader access.
+groupsClaim: groups
+bindings:
+  - group: semantic-canvas-admins
+    role: admin
+    principal: admin
+    sources: ["*"]
+  - group: semantic-canvas-editors
+    role: editor
+    principal: emea
+    sources: ["sales"]
+  - group: semantic-canvas-viewers
+    role: viewer
+    principal: emea
+    sources: ["sales"]

@@ -2,9 +2,19 @@
 
 An open-source canvas for building dashboards from governed metrics. Connect a supported semantic model, start with a suggested dashboard or an empty canvas, and arrange charts, KPIs, notes, headings and images into a story.
 
-**Local alpha.** The app runs on your computer. The role picker demonstrates row restrictions; it is not user authentication. This release is not a shared or internet-facing BI server.
+**Open-source alpha with opt-in company mode.** Try the local sample immediately, or self-host a company workspace with OpenID Connect sign-in, server-enforced roles and source/row access. Team mode is an early release: validate your identity provider and policies before onboarding real users. Local mode’s role picker remains a simulation.
 
 ## Run it
+
+With Docker:
+
+```sh
+docker compose up --build -d
+```
+
+Open [the local demo](http://localhost:5173). Dashboard storage persists in a named volume. For HTTPS company deployment, SSO, logging and recovery, follow the [self-hosting guide](docs/self-hosting.md).
+
+For local development:
 
 Use a supported Node.js release: 22.12+, 24.x, or 26+.
 
@@ -28,6 +38,9 @@ Open [Semantic Canvas](http://127.0.0.1:5173). The API runs at `127.0.0.1:5174`.
 - Review charts against their current filters and drill state. Partial reviews identify unavailable or limited results.
 - Ask the optional AI assistant to improve the active unsaved document. Review its proposed edits, apply them together, and undo them in one step.
 - Export charts as CSV or export a dashboard as PNG.
+- Review workspace setup in Connections, upload a semantic model, and download a complete dashboard-library backup.
+- In company mode, sign in through your identity provider and assign viewer/editor/admin roles with source and row access.
+- Collect JSON application/audit logs or export logs and request traces through OpenTelemetry.
 
 See [references, tabs and connected filters](docs/reference-tabs-filters.md) for a walkthrough, file limits and current boundaries.
 
@@ -63,7 +76,7 @@ For Snowflake, copy `.env.example` to `.env`, fill in the required settings, the
 
 AI is optional. The embedded agent currently supports **Anthropic only**. Set `ANTHROPIC_API_KEY` in `.env` and configure an available model in the `ai` block of `sources.yaml`. The canvas and rule-based suggestions work without a key.
 
-Embedded tools and conversation histories are bound to the selected source and simulated role. A model cannot switch that scope by changing its tool arguments. AI recommendations still need human judgment; they are not proof of causation or business correctness.
+Embedded tools and conversation histories are bound to the selected source and principal; in company mode, they also carry the authenticated caller’s session and are isolated by user. A model cannot switch that scope by changing its tool arguments. AI recommendations still need human judgment; they are not proof of causation or business correctness.
 
 To connect an external MCP agent, keep the app running and start:
 
@@ -71,13 +84,15 @@ To connect an external MCP agent, keep the app running and start:
 npm run mcp
 ```
 
-The MCP server exposes catalog discovery, scoped queries, dashboard save/open, layout selection and user questions through the same HTTP API. External MCP clients are trusted local clients and may explicitly select simulated roles.
+The MCP server exposes catalog discovery, scoped queries, dashboard save/open, layout selection and user questions through the same HTTP API. External MCP clients are trusted local clients and may explicitly select simulated roles. External MCP authentication for company mode is not implemented; team API access is refused without a session.
 
 To update a saved dashboard, call `get_dashboard` and pass its `revision` into `save_dashboard`; revision `0` creates a new document. Both tools accept a `source`. Set `SEMANTIC_CANVAS_URL` when the API uses a different port.
 
 ## Data and recovery
 
 Saved dashboards live in `~/.semantic-canvas/dashboards.duckdb`. Set `SC_DATA_DIR` to choose another directory. Unsaved recovery drafts are stored in this browser and appear on Home; they do not include query result rows or connection credentials. If browser recovery fails, internal navigation keeps the current document open and offers a downloadable JSON backup. Use **Import backup** on Home to restore it as a new document. Save larger image-heavy documents explicitly; browser storage has a quota.
+
+In Docker, data lives under `/data` in the persistent workspace volume. Company-mode drafts use account-specific tab session storage and are removed from that tab on sign-out. Administrators can download a consistent library snapshot; offline restore validates it and requires an empty store. See [backup and restore](docs/self-hosting.md#back-up-restore-and-upgrade).
 
 Before upgrading an existing installation, stop its server and back up the dashboard directory. The newer DuckDB engine and additive store migration are tested with the old schema. Older application versions may not understand the updated database format or source ownership fields.
 
@@ -99,7 +114,8 @@ Browser tests start their own servers on ports 5273/5274 and use `.test-data/` f
 | --- | --- |
 | `src/semantic` | Model imports and join metadata |
 | `src/compiler` | Runtime document/query schemas, semantic validation and SQL compilation |
-| `src/security` | Policy loading and shared query/discovery scope |
+| `src/security` | Company authentication, authorization, policy loading and query scope |
+| `src/operations`, `deploy` | Structured telemetry and self-hosting recipes |
 | `src/store` | Document migration, source isolation and atomic revision checks |
 | `src/app`, `src/canvas` | Editing, document recovery, chart controls and canvas geometry |
 | `src/suggest`, `src/charts` | Suggestions and rendering |
@@ -107,6 +123,6 @@ Browser tests start their own servers on ports 5273/5274 and use `.test-data/` f
 
 ## Next
 
-Team authentication and authorization, native semantic-layer execution, completeness metadata, evaluated narrative accuracy, responsive viewer layouts and collaboration remain future work. This alpha focuses on preserving authored work and rejecting answers the current implementation cannot produce faithfully.
+Native semantic-layer execution, completeness metadata, evaluated narrative accuracy, responsive viewer layouts and collaboration remain future work. Company mode still needs real-provider validation, finer document permissions, provisioning, distributed sessions and deeper operational instrumentation. This alpha focuses on preserving authored work and rejecting answers the current implementation cannot produce faithfully.
 
 See [architecture and contracts](docs/architecture.md), [contributing](CONTRIBUTING.md), [security](SECURITY.md), and [release notes](CHANGELOG.md). MIT licensed. See [LICENSE](LICENSE).

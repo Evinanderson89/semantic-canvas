@@ -1,3 +1,4 @@
+import { loopbackRequest } from "../security/loopback.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { dashboardSchema, canvasSchema, filterSchema } from "../compiler/schema.ts";
 import { z } from "zod";
@@ -12,7 +13,7 @@ import { LAYOUTS } from "../canvas/layouts.ts";
  * sync, and no "the MCP agent is governed but the in-app one isn't" gap.
  */
 const API = process.env.SEMANTIC_CANVAS_URL ?? `http://127.0.0.1:${process.env.PORT ?? 5174}`;
-export interface ToolContext { source?: string; principal?: string; signal?: AbortSignal }
+export interface ToolContext { source?: string; principal?: string; signal?: AbortSignal; auth?: { cookie: string; csrf: string; host: string; origin: string } }
 const context = new AsyncLocalStorage<ToolContext>();
 export function runToolInContext<T>(ctx: ToolContext, run: () => Promise<T>): Promise<T> { return context.run(ctx, run); }
 
@@ -24,9 +25,12 @@ export async function api(path: string, opts: {
   if (opts.body !== undefined) headers["content-type"] = "application/json";
   if (opts.source) headers["x-sc-source"] = opts.source;
   if (opts.principal) headers["x-sc-principal"] = opts.principal;
+  const session = context.getStore()?.auth;
+  if (session) { headers.cookie = session.cookie; headers["x-sc-csrf"] = session.csrf; headers.host = session.host; headers.origin = session.origin; }
   let res: Response;
   try {
-    res = await fetch(`${API}${path}`, {
+    const target = session ? `http://127.0.0.1:${process.env.PORT ?? 5174}` : API;
+    res = await (session ? loopbackRequest : fetch)(`${target}${path}`, {
       method: opts.method ?? (opts.body !== undefined ? "POST" : "GET"),
       headers, signal: context.getStore()?.signal, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });

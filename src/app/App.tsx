@@ -1,3 +1,4 @@
+import { useSession } from "./Session.tsx";
 import { applyProposal } from "../canvas/proposals.ts";
 import { canvasSchema, dashboardSchema } from "../compiler/schema.ts";
 import { validateTile } from "../compiler/compile.ts";
@@ -41,6 +42,10 @@ import { FilterControl, FilterDesigner } from "./FilterControls.tsx";
 const GRAINS = ["day", "week", "month", "quarter", "year"];
 
 export function App() {
+  const session = useSession();
+  const storage = session.mode === "team" ? sessionStorage : localStorage;
+  const draftStorageKey = session.user ? `sc:team:${session.user.id}:drafts` : "sc:drafts";
+  const sourceStorageKey = session.user ? `sc:team:${session.user.id}:source` : "sc:source";
   const [bootError, setBootError] = useState("");
   const [model, setModel] = useState<Model | null>(null);
   const [book, setBook] = useState<DashboardSpec | null>(null);
@@ -63,7 +68,7 @@ export function App() {
   const [picking, setPicking] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [refreshed, setRefreshed] = useState<Date | null>(null);
-  const [canvas, setCanvas] = useState<CanvasSpec>(DEFAULT_CANVAS);
+  const [canvas, setCanvas] = useState<CanvasSpec>({ ...DEFAULT_CANVAS, locked: !session.canEdit });
   const [zoom, setZoom] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [interview, setInterview] = useState(false);
@@ -76,7 +81,7 @@ export function App() {
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [autoSourceId, setAutoSourceId] = useState<string | null>(null);
   const [sourceId, setSourceId] = useState<string>(() => {
-    try { return localStorage.getItem("sc:source") ?? ""; } catch { return ""; }
+    try { return storage.getItem(sourceStorageKey) ?? ""; } catch { return ""; }
   });
   const activeSourceId = sourceId || autoSourceId || "";
   const activeSource = sources.find((s) => s.id === activeSourceId) ?? null;
@@ -125,28 +130,29 @@ export function App() {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [refreshToken, setRefreshToken] = useState<string>(crypto.randomUUID());
-  const dirty = !!book && fingerprint(book, canvas) !== savedFingerprint;
+  const dirty = session.canEdit && !!book && fingerprint(book, canvas) !== savedFingerprint;
   const documentEpoch = React.useRef(0);
   const draftKey = React.useRef<string>(crypto.randomUUID());
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const currentDocument = React.useRef({ dash: book, canvas, dashId, revision, dirty, source: activeSourceId });
   currentDocument.current = { dash: book, canvas, dashId, revision, dirty, source: activeSourceId };
   const readDrafts = useCallback(() => {
-    try { setDrafts(parseDrafts(localStorage.getItem("sc:drafts"))); } catch { setDrafts([]); }
+    try { setDrafts(parseDrafts(storage.getItem(draftStorageKey))); } catch { setDrafts([]); }
   }, []);
   useEffect(readDrafts, [readDrafts]);
   const stashDraft = useCallback(() => {
     const d = currentDocument.current;
-    if (!d.dash || !d.dirty) return true;
+    if (!session.canEdit || !d.dash || !d.dirty) return true;
     try {
-      const all: Draft[] = parseDrafts(localStorage.getItem("sc:drafts"));
+      const all: Draft[] = parseDrafts(storage.getItem(draftStorageKey));
       const next: Draft = { ...documentSnapshot(d.dash, d.canvas), key: draftKey.current,
         id: d.dashId, revision: d.revision, source: d.source, updated: new Date().toISOString() };
-      localStorage.setItem("sc:drafts", JSON.stringify([next, ...all.filter((x) => x.key !== next.key)]));
+      storage.setItem(draftStorageKey, JSON.stringify([next, ...all.filter((x) => x.key !== next.key)]));
       readDrafts();
       return true;
     } catch { setNotice("Recovery backup failed. Your dashboard is still open. Save it or download a backup before leaving."); return false; }
   }, [readDrafts]);
+  useEffect(() => { window.addEventListener("sc:session-ending", stashDraft); return () => window.removeEventListener("sc:session-ending", stashDraft); }, [stashDraft]);
   useEffect(() => { const timer = setTimeout(stashDraft, 500); return () => clearTimeout(timer); }, [book, canvas, dirty, revision, stashDraft]);
   useEffect(() => {
     const leaving = (e: BeforeUnloadEvent) => { if (currentDocument.current.dirty) { stashDraft(); e.preventDefault(); e.returnValue = ""; } };
@@ -227,7 +233,7 @@ export function App() {
     documentEpoch.current++;
     draftKey.current = options.draftKey ?? crypto.randomUUID();
     past.current = []; future.current = [];
-    const surface = { ...DEFAULT_CANVAS, ...options.canvas };
+    const surface = { ...DEFAULT_CANVAS, ...options.canvas, ...(!session.canEdit ? { locked: true } : {}) };
     if (next?.tiles.length && !options.canvas) surface.height = Math.max(surface.height, ...next.tiles.map((t) => t.layout.y + t.layout.h + 24));
     setBook(next); setActiveTabId(next ? tabsOf(next)[0].id : "main"); setFilterValues({});
     setCanvas(surface); setDashId(options.id ?? null); setRevision(options.revision ?? 0);
@@ -248,7 +254,7 @@ export function App() {
     if (!beginDocument(null)) return;
     sourceRef.current = id;
     setSourceId(id);
-    try { localStorage.setItem("sc:source", id); } catch {}
+    try { storage.setItem(sourceStorageKey, id); } catch {}
     setView("home"); setModel(null);
     const epoch = documentEpoch.current;
     fetch("/api/model").then(readResponse).then((m) => {
@@ -288,8 +294,8 @@ export function App() {
       if (documentEpoch.current !== epoch) return;
       setDashId(id); setRevision(result.revision); setSavedFingerprint(JSON.stringify(snapshot));
       try {
-        const all: Draft[] = parseDrafts(localStorage.getItem("sc:drafts"));
-        localStorage.setItem("sc:drafts", JSON.stringify(all.filter((d) => d.key !== key)));
+        const all: Draft[] = parseDrafts(storage.getItem(draftStorageKey));
+        storage.setItem(draftStorageKey, JSON.stringify(all.filter((d) => d.key !== key)));
         readDrafts();
       } catch { /* the server copy is saved even if recovery storage is unavailable */ }
       refreshSaved();
@@ -485,7 +491,7 @@ export function App() {
     }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
   }, [freshCanvas, beginDocument]);
 
-  if (!model) return <div className="boot">{bootError ? <><p role="alert">{bootError}</p><button onClick={() => switchSource("")}>Open the default source</button></> : "Loading semantic layer…"}</div>;
+  if (!model) return bootError ? <div className="setup-empty"><Connections sources={sources} activeId={activeSourceId} onSelect={switchSource} onRefresh={() => { refreshSources(); switchSource(""); }} principals={principals} policies={policies} /><p role="alert">{session.canAdmin ? "Connect a source to open your metric catalogue." : "No accessible source is ready. Contact your workspace administrator."}</p></div> : <div className="boot">Loading semantic layer…</div>;
 
   const pick = (t: string | null) => {
     if (t === null) { beginDocument(null); return; }
@@ -592,15 +598,15 @@ export function App() {
         ) : !dash && view === "model" ? (
           <DataModel model={model} />
         ) : !dash ? (
-          <><Entry model={model} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)}
-                 onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} />
-        <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>Saved dashboards and drafts on this computer</span></div>
+          <>{session.canEdit ? <Entry model={model} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)}
+                 onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} /> : <div className="explore"><span className="eyebrow">Company workspace</span><h1>Your metrics, in focus.</h1><p className="lede">Open a shared dashboard below, or explore a topic from the sidebar. Filters and drill-downs follow your company’s data permissions.</p></div>}
+        <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>{session.mode === "team" ? "Shared dashboards and your drafts in this tab" : "Saved dashboards and drafts on this computer"}</span></div>
           <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
-          <button className="link" onClick={() => backupInput.current?.click()}>Import backup</button>
+          {session.canEdit && <button className="link" onClick={() => backupInput.current?.click()}>Import backup</button>}
           {drafts.filter((d) => d.source === activeSourceId).map((d) => <div key={d.key}>
             <button className="link" onClick={() => beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key })}>Recover draft: {d.spec.title}</button>
             <button className="link" aria-label={`Discard draft ${d.spec.title}`} onClick={() => {
-              localStorage.setItem("sc:drafts", JSON.stringify(drafts.filter((x) => x.key !== d.key))); readDrafts();
+              storage.setItem(draftStorageKey, JSON.stringify(drafts.filter((x) => x.key !== d.key))); readDrafts();
             }}>Discard</button>
           </div>)}
         </div>
@@ -610,20 +616,20 @@ export function App() {
             <div className="topbar">
               <button className="link back-link" onClick={() => beginDocument(null)}>← <span>Workspace</span></button>
               <span className="spacer" />
-              <span className={"save-status" + (dirty ? " dirty" : "")} role="status">{saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
+              <span className={"save-status" + (dirty ? " dirty" : "")} role="status">{!session.canEdit ? "Viewer access" : saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
               <button className="icon quiet" title="Refresh" aria-label="Refresh" onClick={refreshData}>
                 <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M16 10a6 6 0 1 1-1.8-4.2M16 3v3.5h-3.5" /></svg>
               </button>
-              <button className="save-button" onClick={() => save()} disabled={saving} aria-label="Save dashboard">
+              <button className="save-button" onClick={() => save()} disabled={saving || !session.canEdit} aria-label="Save dashboard">
                 {saving ? "Saving…" : "Save"}
               </button>
               <Popover label="Dashboard actions" trigger={<span aria-hidden="true">•••</span>} align="end" className="document-menu">
                 {(close) => <>
                   <button onClick={() => { close(); refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
-                  <button disabled={saving} onClick={() => { close(); save(true); }}>Save a copy</button>
-                  <button onClick={() => { close(); setDistributing(true); }}>Copy charts to…</button>
-                  <button onClick={() => { close(); setReferenceImport(true); }}>Recreate from reference</button>
+                  <button disabled={saving || !session.canEdit} onClick={() => { close(); save(true); }}>Save a copy</button>
+                  <button disabled={!session.canEdit} onClick={() => { close(); setDistributing(true); }}>Copy charts to…</button>
+                  <button disabled={!session.canEdit} onClick={() => { close(); setReferenceImport(true); }}>Recreate from reference</button>
                   <button disabled={exportingPng} onClick={() => { close(); exportDashboardPng(); }}>
                     {exportingPng ? "Exporting…" : "Export dashboard as PNG"}
                   </button>
@@ -666,7 +672,7 @@ export function App() {
                        beautify={<DashboardBeautify dash={dash} canvas={canvas} model={model}
                                                      aiAvailable={aiAvailable} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues)]))} />} />
             )}
-            {canvas.locked && (
+            {canvas.locked && session.canEdit && (
               <div className="editbar slim">
                 <span className="spacer" />
                 <button className="lock on" onClick={() => changeCanvas({ ...canvas, locked: false })}>
@@ -793,9 +799,9 @@ export function App() {
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
-      <AgentChat key={`${activeSourceId}:${asWho}:${activeTabId}`} document={dash ? { spec: dash, canvas, selected } : null}
+      <AgentChat key={`${activeSourceId}:${asWho}:${activeTabId}`} document={dash && session.canEdit ? { spec: dash, canvas, selected } : null}
         onApply={(proposal, expected) => {
-          if (!dash || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Request a fresh proposal before applying it."); return false; }
+          if (!session.canEdit || !dash || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Request a fresh proposal before applying it."); return false; }
           try { const next = applyProposal(dash, canvas, proposal, model); compose(next.spec, next.canvas); setNotice("Changes applied. Undo restores the previous version."); return true; }
           catch (e: any) { setNotice(`Could not apply proposal: ${e.message}`); return false; }
         }} />

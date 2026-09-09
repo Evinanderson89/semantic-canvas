@@ -1036,3 +1036,24 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 @media(max-width:900px){.dashboard-heading{padding-top:4px;padding-bottom:10px}.dashboard-meta{margin-top:5px}.dashboard-heading .eyebrow{margin-bottom:4px}.dashboard-tabs [role=tab]{padding-top:10px;padding-bottom:10px}.tab-strip{flex-shrink:0;padding-left:22px}.reference-path{padding:18px}}
 .shared-filter-shelf{padding-top:10px;padding-bottom:10px;flex-shrink:0}.filter-control.compact{flex-direction:row;align-items:center;min-height:0;height:auto;min-width:390px;max-width:520px;padding:10px 12px;gap:14px}.filter-control.compact .filter-control-head{flex-direction:column;align-items:flex-start;gap:3px;min-width:70px;max-width:120px}.filter-control.compact>.studio-trigger{min-width:110px;max-width:200px}.filter-control.compact .filter-caption{max-width:140px;min-width:110px;margin:0;line-height:1.5}.filter-control.compact .filter-range{min-width:250px}.filter-control.compact:has(.filter-range){max-width:650px}
 .studio-dialog button.primary{background:var(--accent);border:1px solid var(--accent);color:var(--panel);font:inherit;font-size:12px;font-weight:600;cursor:pointer}.studio-dialog button.primary:disabled{background:var(--surface);border-color:var(--line-2);color:var(--ink-3);opacity:1;cursor:not-allowed}
+
+/* Company workspace setup stays alongside connections, away from the canvas. */
+.workspace-welcome { max-width: 660px; margin: 16vh auto; padding: 36px; }
+.workspace-welcome h1 { font-size: clamp(32px, 4vw, 50px); line-height: 1.08; letter-spacing: -.04em; white-space: pre-line; }
+.workspace-welcome p { color: var(--ink-3); margin: 24px 0 32px; line-height: 1.6; }
+.workspace-welcome .save-button { display: inline-block; text-decoration: none; }
+.workspace-setup { border: 1px solid var(--line); border-radius: 16px; padding: 24px; margin: 24px 0 32px; background: var(--panel); }
+.setup-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.setup-heading h2 { margin: 10px 0; font-size: 23px; letter-spacing: -.025em; }
+.setup-heading p, .setup-steps p, .setup-note { color: var(--ink-3); line-height: 1.5; font-size: 13px; margin: 6px 0; }
+.setup-steps { list-style: none; padding: 0; margin: 22px 0; }
+.setup-steps li { display: grid; grid-template-columns: 24px 1fr auto; gap: 12px; padding: 16px 0; border-top: 1px solid var(--line); }
+.setup-steps li > span:last-child { font-size: 12px; color: var(--ink-3); }
+.setup-check.complete { color: var(--accent); }
+.workspace-health { display: flex; flex-wrap: wrap; gap: 14px; padding: 16px 0; font-size: 13px; }
+.workspace-health span { color: var(--ink-3); }
+.setup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 18px; margin: 12px 0; font-size: 13px; }
+.setup-actions a { color: inherit; }
+.setup-empty { max-width: 1050px; margin: auto; }
+
+.setup-heading > .link { flex-shrink: 0; white-space: nowrap; }

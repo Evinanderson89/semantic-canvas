@@ -27,3 +27,7 @@ jobs:
       - run: npm run build
 
       - run: npm run e2e
+
+      - run: docker build -t semantic-canvas:company-preview .
+
+      - run: node scripts/docker-smoke.mjs
