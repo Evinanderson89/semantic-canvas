@@ -16,6 +16,8 @@ A document consists of a dashboard specification and authored canvas dimensions.
 
 Manual edits and complete layout changes record document snapshots. A layout transaction changes tiles and canvas together. Save/recovery fingerprints include both. A failed recovery write prevents replacing the current document.
 
+Design Review can propose a story structure for an unsectioned, unpinned dashboard. `src/suggest/storyStructure.ts` groups existing tiles into headline metrics, a focal trend, supporting trends and breakdowns, then previews headings and a neutral reading guide. It preserves query fields, filters, authored titles and existing notes, and validates the resulting document. Existing headings or pinned tiles suppress this proposal rather than rewriting authored structure. The guide describes a reading order, not observed business findings. Applying the complete proposal is one document undo step.
+
 ## AI action boundary
 
 The browser sends the current unsaved document and selection when opening a canvas conversation. The server supplies the authoritative model and binds tools to the selected source and simulated role. Active-canvas chat has read tools and `propose_canvas_changes`, not direct saved-document writes.

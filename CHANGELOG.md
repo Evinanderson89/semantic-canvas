@@ -2,6 +2,8 @@
 
 ## Unreleased — analytical composition and trust
 
+- Design Review can preview and apply a story structure to an unsectioned dashboard: editable headings, a neutral reading guide, clearer automatic labels and a focal trend. Existing headings, pinned content and authored titles are preserved. Chart fixes refresh the remaining review automatically.
+- The Messy dashboard topic now includes monthly revenue, retention and acquisition-cost KPIs alongside real chart issues, demonstrating the complete chart-to-story workflow.
 - Generated dashboards now have a focal trend and explicit sections, with separately plotted supporting measures. Metric authors can prioritize headline metrics.
 - Smart Arrange previews layouts, wraps compact KPI rows, preserves section membership and pinned positions, and applies tile/canvas geometry as one undo step.
 - Text cursor keys no longer move tiles. Canvas tiles support keyboard selection, arrow movement, Shift for larger steps and Alt-arrow resizing.

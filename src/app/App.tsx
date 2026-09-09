@@ -389,6 +389,7 @@ export function App() {
     if (!pendingFit.current) return;
     pendingFit.current = false;
     fit();
+    scrollRef.current?.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [dash, fit]);
 
   // Same race, different trigger: adding a tile below existing content
@@ -608,7 +609,7 @@ export function App() {
                   <span>{prettifyModelName(model.name)}</span>
                   {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
                 </div>
-                {demoActive && <p className="demo-hint">Use <b>Design review</b> to improve the charts, then <b>Smart arrange</b> to bring it together.</p>}
+                {demoActive && <p className="demo-hint">Use <b>Design review</b> to refine the charts and shape the story. <b>Smart arrange</b> keeps it together.</p>}
               </div>
               <label className="period-control">
                 <span>Period</span>
