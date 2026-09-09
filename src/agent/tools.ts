@@ -12,7 +12,7 @@ import { LAYOUTS } from "../canvas/layouts.ts";
  * sync, and no "the MCP agent is governed but the in-app one isn't" gap.
  */
 const API = process.env.SEMANTIC_CANVAS_URL ?? `http://127.0.0.1:${process.env.PORT ?? 5174}`;
-export interface ToolContext { source?: string; principal?: string }
+export interface ToolContext { source?: string; principal?: string; signal?: AbortSignal }
 const context = new AsyncLocalStorage<ToolContext>();
 export function runToolInContext<T>(ctx: ToolContext, run: () => Promise<T>): Promise<T> { return context.run(ctx, run); }
 
@@ -28,7 +28,7 @@ export async function api(path: string, opts: {
   try {
     res = await fetch(`${API}${path}`, {
       method: opts.method ?? (opts.body !== undefined ? "POST" : "GET"),
-      headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      headers, signal: context.getStore()?.signal, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
   } catch (e: any) {
     throw new Error(`semantic-canvas isn't reachable at ${API} -- is "npm run server" running? (${e?.message ?? e})`);

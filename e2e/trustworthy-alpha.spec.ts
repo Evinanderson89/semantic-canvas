@@ -61,7 +61,7 @@ test("a failed save keeps edits and an actionable error; retry succeeds", async 
     else await route.continue();
   });
   await page.getByRole("button", { name: "Save dashboard", exact: true }).click();
-  await expect(page.getByRole("alert")).toHaveText("Save failed: Disk full");
+  await expect(page.getByRole("alert")).toContainText("Save failed: Disk full");
   await expect(page.locator(".save-status")).toHaveText("Unsaved changes");
   await expect(page.locator(".tile")).toHaveCount(1);
   await page.unroute("**/api/dashboards");

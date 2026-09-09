@@ -5,10 +5,11 @@ import type { TileSpec } from "../compiler/spec.ts";
 import { boundsOf } from "../canvas/geometry.ts";
 import { applyBestLayout } from "../canvas/layouts.ts";
 
-export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, beautify }: {
+export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify }: {
   canvas: CanvasSpec; onCanvas: (c: CanvasSpec) => void;
   zoom: number; onZoom: (z: number) => void; onFit: () => void;
   selected: string[]; tiles: TileSpec[]; onTiles: (t: TileSpec[]) => void;
+  onCompose: (t: TileSpec[], c: CanvasSpec) => void;
   /** Dashboard-level Beautify's own trigger button + popover (see
    *  DashboardBeautify.tsx) -- rendered as a slot rather than built here so
    *  its state/logic stays in one place, but still lands inside this same
@@ -58,13 +59,9 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
    *  Summary if there's a real headline + support-chart mix, Grid otherwise)
    *  and packs into it. Grows the canvas if that needs more vertical room
    *  than it has -- never shrinks a preset/custom height that already fits. */
-  const smartArrange = () => {
-    if (!tiles.length) return;
-    const { tiles: packed } = applyBestLayout(tiles, canvas.width);
-    onTiles(packed);
-    const bottom = Math.max(...packed.map((t) => t.layout.y + t.layout.h)) + 24;
-    if (bottom > canvas.height) onCanvas({ ...canvas, height: Math.round(bottom) });
-  };
+  const proposal = applyBestLayout(tiles, canvas.width);
+  const bottom = Math.max(100, ...proposal.tiles.map(t => t.layout.y + t.layout.h)) + 24;
+  const applyComposition = () => onCompose(proposal.tiles, { ...canvas, height: Math.max(canvas.height, Math.round(bottom)) });
 
   return (
     <div className="editbar">
@@ -108,20 +105,26 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
         <button className="tgl" onClick={onFit} title="Zoom so the whole canvas fits">Fit</button>
       </div>
       <span className="sep" />
-      <button className="tgl" onClick={smartArrange} disabled={tiles.length < 2}
-              title="Repack every tile into clean rows, in reading order -- fixes overlap, gaps and drift after a bunch of manual moves. Only ever moves and resizes tiles; never changes a metric, dimension, or chart kind.">
-        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6">
-          <rect x="3" y="3" width="6" height="6" rx="1" /><rect x="11" y="3" width="6" height="6" rx="1" />
-          <rect x="3" y="11" width="14" height="6" rx="1" />
-        </svg>
-        Smart arrange
-      </button>
+      <Popover label="Smart arrange" trigger="Smart arrange" className="arrange-popover">
+        {(close) => <div className="arrange-preview">
+          <div className="eyebrow">COMPOSITION PREVIEW</div>
+          <h3>A clearer reading order</h3>
+          <p>Readable rows, with headings and notes kept in their sections. Pinned sections stay in place.</p>
+          <svg viewBox={`0 0 ${canvas.width} ${bottom}`} role="img" aria-label="Proposed dashboard layout">
+            {proposal.tiles.map(t => <rect key={t.id} x={t.layout.x} y={t.layout.y} width={t.layout.w} height={t.layout.h} rx={8}
+              fill={t.pinned ? "var(--ink-3)" : t.kind === "heading" ? "var(--accent)" : "var(--surface-3, #dce5de)"} />)}
+          </svg>
+          <div className="story-actions"><button className="primary" disabled={!tiles.length} onClick={() => { applyComposition(); close(); }}>Apply layout</button><button onClick={close}>Keep current</button></div>
+          <small>One undo restores the entire previous layout.</small>
+        </div>}
+      </Popover>
 
       {beautify}
       <span className="spacer" />
       <button className="lock" onClick={() => onCanvas({ ...canvas, locked: true })} title="View without editing controls">Preview</button>
       {sel.length > 0 && <div className="selection-tools">
       <span className="selinfo">{sel.length} selected</span>
+      <button className="tgl" onClick={() => patch(t => ({ ...t, pinned: !sel.every(t => t.pinned) }))}>{sel.every(t => t.pinned) ? "Unpin" : "Pin position"}</button>
       {many && <div className="group">
         {([["left","Align left","M3 3v14M6 6h11v3H6zM6 12h7v3H6z"],
            ["hcenter","Align centre","M10 3v14M5 6h10v3H5zM7 12h6v3H7z"],

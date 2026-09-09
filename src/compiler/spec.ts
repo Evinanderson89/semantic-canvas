@@ -36,6 +36,10 @@ export type TileKind = "metric" | "heading" | "text" | "divider" | "image";
 
 export interface TileSpec {
   id: string;
+  /** Heading tile that owns this content. */
+  section?: string;
+  /** Automatic composition preserves this tile and its section. */
+  pinned?: boolean;
   kind?: TileKind;
   title?: string;
   /** Body copy for heading/text tiles. */

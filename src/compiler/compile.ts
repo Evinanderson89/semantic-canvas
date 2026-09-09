@@ -1,5 +1,5 @@
 import type { Connector } from "../connectors/types.ts";
-import { findJoin, fieldReachable, isTemporal, joinPairs, type Model } from "../semantic/model.ts";
+import { findJoin, fieldReachable, isTemporal, metricGrainIssue, joinPairs, type Model } from "../semantic/model.ts";
 import type { FilterSpec, TileSpec, ValidationIssue } from "./spec.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -22,6 +22,8 @@ export function validateTile(model: Model, tile: TileSpec): ValidationIssue[] {
     const m = model.metrics[name];
     if (!m) { issues.push({ tile: id, problem: `unknown metric "${name}"` }); continue; }
     bases.add(m.baseTable);
+    const grainIssue = metricGrainIssue(m, tile.dimensions ?? []);
+    if (grainIssue) issues.push({ tile: id, problem: grainIssue });
   }
   if (bases.size > 1)
     issues.push({ tile: id, problem: `metrics span ${[...bases].join(" and ")}; one tile is one base table` });
@@ -70,7 +72,7 @@ export function parseDimension(dim: string) {
   return { grain, table: null as string | null, column: rest };
 }
 
-export function compileTile(model: Model, conn: Connector, tile: TileSpec): string {
+export function compileTile(model: Model, conn: Connector, tile: TileSpec, options: { probe?: boolean } = {}): string {
   const issues = validateTile(model, tile);
   if (issues.length) throw new Error(issues.map((i) => i.problem).join("; "));
   const metrics = tile.metrics.map((n) => model.metrics[n]);
@@ -197,8 +199,18 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec): stri
       `FROM __base cur LEFT JOIN __base prev ON ${on.join(" AND ")}`;
   }
 
-  if (groupCols.length) sql += `\nORDER BY ${groupCols[0]} NULLS LAST`;
-  sql += `\nLIMIT ${Math.min(tile.limit ?? 500, 5000)}`;
+  const limit = Math.min(tile.limit ?? 500, 5000) + (options.probe ? 1 : 0);
+  if (timeDim) {
+    const d = parseDimension(timeDim);
+    const time = q(`${d.column}_${d.grain}`);
+    const others = groupCols.filter((c) => c !== time);
+    const order = (direction: string) => [`${time} ${direction} NULLS LAST`, ...others.map((c) => `${c} NULLS LAST`)].join(", ");
+    // Limit the newest periods first, then restore chronological chart order.
+    sql = `SELECT * FROM (\n${sql}\nORDER BY ${order("DESC")}\nLIMIT ${limit}\n) AS __window\nORDER BY ${order("ASC")}`;
+  } else {
+    if (groupCols.length) sql += `\nORDER BY ${groupCols.map((c) => `${c} NULLS LAST`).join(", ")}`;
+    sql += `\nLIMIT ${limit}`;
+  }
   return sql;
 }
 

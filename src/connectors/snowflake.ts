@@ -1,3 +1,4 @@
+import { leasePool } from "./leases.ts";
 import snowflake from "snowflake-sdk";
 import type { Connector, QueryResult } from "./types.ts";
 
@@ -64,11 +65,8 @@ export async function snowflakeConnector(
 
   const pool: any[] = await Promise.all(
     Array.from({ length: size }, () => connect(makeConn())));
-  const free = [...pool];
-  const waiting: ((c: any) => void)[] = [];
-  const acquire = (): Promise<any> =>
-    free.length ? Promise.resolve(free.pop()) : new Promise((r) => waiting.push(r));
-  const release = (c: any) => { const n = waiting.shift(); n ? n(c) : free.push(c); };
+  const leases = leasePool(pool, c => new Promise<void>((resolve, reject) => c.destroy((error: Error | null) => error ? reject(error) : resolve())));
+  const { acquire, release } = leases;
 
   const exec = (c: any, sqlText: string) => new Promise<any[]>((res, rej) =>
     c.execute({ sqlText, complete: (err: any, _s: any, rows: any[]) =>
@@ -121,10 +119,8 @@ export async function snowflakeConnector(
       } finally { release(conn); }
     },
 
-    stats: () => ({ poolSize: size, free: free.length, waiting: waiting.length }),
-    async close() {
-      await Promise.all(pool.map((c) => new Promise<void>((r) => c.destroy(() => r()))));
-    },
+    stats: leases.stats,
+    close: leases.close,
   };
 }
 

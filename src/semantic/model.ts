@@ -23,12 +23,19 @@ export interface Table {
   relation?: { database?: string; schema?: string; table: string };
 }
 
+export type TimeGrain = "day" | "week" | "month" | "quarter" | "year";
+
 export interface Metric {
   name: string;
   label: string;
   description?: string;
   baseTable: string;
   expression: string;
+  /** Declared native reporting grains. Omitted means the expression owns rollup semantics. */
+  importance?: number;
+  direction?: "higher" | "lower" | "neutral";
+  timeGrains?: TimeGrain[];
+  timeDimension?: string;
   /** Always-on filter, e.g. status = 'active'. */
   filter?: string | null;
   synonyms: string[];
@@ -164,3 +171,14 @@ export function fieldReachable(model: Model, baseTable: string, field: string): 
 }
 
 export const joinPairs = (join: Join) => join.columns ?? [{ left: join.leftOn, right: join.rightOn }];
+
+/** Restricted metrics require their declared time dimension at a supported grain. */
+export function metricGrainIssue(metric: Metric, dimensions: string[]): string | null {
+  if (!metric.timeGrains) return null;
+  const dimension = dimensions.find((d) => {
+    const field = d.split(":")[1];
+    return field && (field.includes(".") ? field : `${metric.baseTable}.${field}`) === metric.timeDimension;
+  });
+  return dimension && metric.timeGrains.includes(dimension.split(":")[0] as TimeGrain) ? null
+    : `${metric.label} requires ${metric.timeGrains.join(" or ")} reporting on ${metric.timeDimension}. Other grains would change the metric's meaning.`;
+}

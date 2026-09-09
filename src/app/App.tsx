@@ -1,3 +1,6 @@
+import { applyProposal } from "../canvas/proposals.ts";
+import { canvasSchema, dashboardSchema } from "../compiler/schema.ts";
+import { validateTile } from "../compiler/compile.ts";
 import React, { useCallback, useEffect, useState } from "react";
 import { Tile } from "./Tile.tsx";
 import { TileBoundary } from "./TileBoundary.tsx";
@@ -24,7 +27,7 @@ import { prettifyModelName, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
 import { readResponse } from "./http.ts";
-import { documentSnapshot, fingerprint, withGrain, type DocumentSnapshot, type Draft } from "./document.ts";
+import { documentSnapshot, fingerprint, withGrain, parseDrafts, documentGrain, type DocumentSnapshot, type Draft } from "./document.ts";
 import { MAX_DOCUMENT_BYTES } from "../compiler/schema.ts";
 
 const GRAINS = ["day", "week", "month", "quarter", "year"];
@@ -107,19 +110,20 @@ export function App() {
   const currentDocument = React.useRef({ dash, canvas, dashId, revision, dirty, source: activeSourceId });
   currentDocument.current = { dash, canvas, dashId, revision, dirty, source: activeSourceId };
   const readDrafts = useCallback(() => {
-    try { setDrafts(JSON.parse(localStorage.getItem("sc:drafts") ?? "[]")); } catch { setDrafts([]); }
+    try { setDrafts(parseDrafts(localStorage.getItem("sc:drafts"))); } catch { setDrafts([]); }
   }, []);
   useEffect(readDrafts, [readDrafts]);
   const stashDraft = useCallback(() => {
     const d = currentDocument.current;
-    if (!d.dash || !d.dirty) return;
+    if (!d.dash || !d.dirty) return true;
     try {
-      const all: Draft[] = JSON.parse(localStorage.getItem("sc:drafts") ?? "[]");
+      const all: Draft[] = parseDrafts(localStorage.getItem("sc:drafts"));
       const next: Draft = { ...documentSnapshot(d.dash, d.canvas), key: draftKey.current,
         id: d.dashId, revision: d.revision, source: d.source, updated: new Date().toISOString() };
       localStorage.setItem("sc:drafts", JSON.stringify([next, ...all.filter((x) => x.key !== next.key)]));
       readDrafts();
-    } catch { setNotice("Browser recovery storage is full or unavailable. Save this dashboard before leaving."); }
+      return true;
+    } catch { setNotice("Recovery backup failed. Your dashboard is still open. Save it or download a backup before leaving."); return false; }
   }, [readDrafts]);
   useEffect(() => { const timer = setTimeout(stashDraft, 500); return () => clearTimeout(timer); }, [dash, canvas, dirty, revision, stashDraft]);
   useEffect(() => {
@@ -178,6 +182,10 @@ export function App() {
     return () => window.removeEventListener("keydown", key);
   }, [dash, canvas]);
 
+  const compose = (spec: DashboardSpec, surface: CanvasSpec) => {
+    if (dash) { past.current.push(documentSnapshot(dash, canvas)); future.current = []; }
+    setDash(spec); setCanvas(surface);
+  };
   const changeCanvas = (next: CanvasSpec) => {
     if (dash) { past.current.push(documentSnapshot(dash, canvas)); future.current = []; }
     setCanvas(next);
@@ -185,7 +193,7 @@ export function App() {
   const beginDocument = useCallback((next: DashboardSpec | null, options: {
     id?: string | null; revision?: number; canvas?: CanvasSpec; saved?: boolean; draftKey?: string;
   } = {}) => {
-    stashDraft();
+    if (!stashDraft()) return false;
     documentEpoch.current++;
     draftKey.current = options.draftKey ?? crypto.randomUUID();
     past.current = []; future.current = [];
@@ -193,9 +201,10 @@ export function App() {
     if (next?.tiles.length && !options.canvas) surface.height = Math.max(surface.height, ...next.tiles.map((t) => t.layout.y + t.layout.h + 24));
     setDash(next); setCanvas(surface); setDashId(options.id ?? null); setRevision(options.revision ?? 0);
     setSavedFingerprint(next && options.saved ? fingerprint(next, surface) : null);
-    setGrain(next?.tiles.flatMap((t) => t.dimensions).find((d) => d.includes(":"))?.split(":")[0] ?? "month");
+    setGrain(documentGrain(next));
     setSelected([]); setDrills({}); setNotice(""); setSaving(false); setTable(null);
     setPicking(false); setRefreshed(null); setRefreshToken(crypto.randomUUID());
+    return true;
   }, [stashDraft]);
   const refreshData = () => { setRefreshToken(crypto.randomUUID()); setRefreshed(new Date()); };
 
@@ -205,10 +214,11 @@ export function App() {
   React.useEffect(() => { refreshSaved(); }, [refreshSaved]);
 
   const switchSource = useCallback((id: string) => {
+    if (!beginDocument(null)) return;
     sourceRef.current = id;
     setSourceId(id);
     try { localStorage.setItem("sc:source", id); } catch {}
-    beginDocument(null); setView("home"); setModel(null);
+    setView("home"); setModel(null);
     const epoch = documentEpoch.current;
     fetch("/api/model").then(readResponse).then((m) => {
       if (documentEpoch.current === epoch) { setModel(m); setBootError(""); }
@@ -247,7 +257,7 @@ export function App() {
       if (documentEpoch.current !== epoch) return;
       setDashId(id); setRevision(result.revision); setSavedFingerprint(JSON.stringify(snapshot));
       try {
-        const all: Draft[] = JSON.parse(localStorage.getItem("sc:drafts") ?? "[]");
+        const all: Draft[] = parseDrafts(localStorage.getItem("sc:drafts"));
         localStorage.setItem("sc:drafts", JSON.stringify(all.filter((d) => d.key !== key)));
         readDrafts();
       } catch { /* the server copy is saved even if recovery storage is unavailable */ }
@@ -265,6 +275,7 @@ export function App() {
       setOpenList(false); pendingFit.current = true;
     } catch (e: any) { setNotice(`Could not open dashboard: ${e.message}`); }
   };
+  const backupInput = React.useRef<HTMLInputElement>(null);
   const mainRef = React.useRef<HTMLElement>(null);
   // New compositions start at a readable size for this workspace. Saved
   // documents keep their authored dimensions when opened or resized.
@@ -414,7 +425,7 @@ export function App() {
   const build = useCallback((brief: Brief) => {
     setInterview(false);
     const surface = freshCanvas();
-    beginDocument(null, { canvas: surface });
+    if (!beginDocument(null, { canvas: surface })) return;
     const epoch = documentEpoch.current;
     return fetch("/api/suggest", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -423,19 +434,19 @@ export function App() {
       if (documentEpoch.current !== epoch) return;
       pendingFit.current = true;
       setDash(d); setCanvas((c) => ({ ...c, height: Math.max(c.height, ...d.tiles.map((t: TileSpec) => t.layout.y + t.layout.h + 24)) })); setRefreshed(new Date()); setTable(brief.table ?? null);
-      if (brief.grain) setGrain(brief.grain);
+      setGrain(documentGrain(d));
     }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
   }, [freshCanvas, beginDocument]);
 
   const load = useCallback((t: string | null, g: string) => {
     const surface = freshCanvas();
-    beginDocument(null, { canvas: surface });
+    if (!beginDocument(null, { canvas: surface })) return;
     const epoch = documentEpoch.current;
     const q = new URLSearchParams({ grain: g, width: String(surface.width),
                                     ...(t ? { table: t } : {}) });
     return fetch(`/api/suggest?${q}`).then(readResponse).then((d) => {
       if (documentEpoch.current !== epoch) return;
-      setTable(t);
+      setTable(t); setGrain(documentGrain(d));
       // Show the whole authored canvas rather than clipping it at the viewport.
       pendingFit.current = true;
       setDash(d); setCanvas((c) => ({ ...c, height: Math.max(c.height, ...d.tiles.map((t: TileSpec) => t.layout.y + t.layout.h + 24)) })); setRefreshed(new Date());
@@ -445,9 +456,8 @@ export function App() {
   if (!model) return <div className="boot">{bootError ? <><p role="alert">{bootError}</p><button onClick={() => switchSource("")}>Open the default source</button></> : "Loading semantic layer…"}</div>;
 
   const pick = (t: string | null) => {
-    setTable(t);
     if (t === null) { beginDocument(null); return; }
-    load(t, grain);
+    load(t, GRAINS.includes(grain) ? grain : "month");
   };
 
   const nextId = () => `t${Math.random().toString(36).slice(2, 8)}`;
@@ -502,7 +512,7 @@ export function App() {
       )}
       <Sidebar model={model} active={table} view={dash ? "" : view}
                onPick={(t) => { setView("home"); pick(t); }}
-               onView={(v) => { setView(v); beginDocument(null); }}
+               onView={(v) => { if (beginDocument(null)) setView(v); }}
                collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}
                principals={principals} principal={asWho}
                onPrincipal={(id) => {
@@ -514,10 +524,27 @@ export function App() {
                sources={sources} activeSource={activeSource} />
 
       <main className="main" ref={mainRef}>
-        {notice && <div className="document-notice" role="alert">{notice}</div>}
+        <input ref={backupInput} type="file" accept="application/json,.json" hidden aria-label="Import dashboard backup" onChange={async e => {
+          const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; const epoch = documentEpoch.current;
+          try {
+            if (file.size > MAX_DOCUMENT_BYTES) throw new Error("Backup exceeds the 8 MB document limit");
+            const data = JSON.parse(await file.text()); if (documentEpoch.current !== epoch) return;
+            if (data.schemaVersion !== 1) throw new Error("Unsupported backup version");
+            if (data.source && data.source !== activeSourceId) throw new Error(`Select the backup's source (${data.source}) before importing it`);
+            const spec = dashboardSchema.parse(data.spec), surface = canvasSchema.parse(data.canvas);
+            const issues = spec.tiles.flatMap(t => validateTile(model, t)); if (issues.length) throw new Error(issues[0].problem);
+            if (beginDocument(spec, { canvas: surface })) { setView("home"); setNotice("Backup restored as a new dashboard. Save to keep a server copy."); }
+          } catch (error: any) { setNotice(`Could not import backup: ${error.message}`); }
+        }} />
+        {notice && <div className="document-notice" role="alert"><span>{notice}</span>{dash && <button className="link" onClick={() => {
+          const url = URL.createObjectURL(new Blob([JSON.stringify({ schemaVersion: 1, source: activeSourceId, ...documentSnapshot(dash, canvas) }, null, 2)], { type: "application/json" }));
+          const a = document.createElement("a"); a.href = url; a.download = `${slugForFilename(dash.title)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }}>Download backup</button>}{dash && notice.startsWith("Recovery backup failed") && <button className="link" onClick={() => {
+          if (window.confirm("Leave this dashboard without saving? Download a backup first if you want to keep these changes.")) { currentDocument.current.dirty = false; beginDocument(null); setView("home"); }
+        }}>Discard and leave</button>}</div>}
         {!dash && view === "connections" ? (
           <Connections sources={sources} activeId={activeSourceId} onSelect={switchSource}
-                       onRefresh={refreshSources} principals={principals} policies={policies} />
+                       onRefresh={() => { refreshSources(); fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message)); }} principals={principals} policies={policies} />
         ) : !dash && view === "registry" ? (
           <MetricRegistry model={model} onUse={(m) => {
             const t = model.metrics[m].baseTable;
@@ -534,6 +561,7 @@ export function App() {
                  } : null} />
         <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>Saved dashboards and drafts on this computer</span></div>
           <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
+          <button className="link" onClick={() => backupInput.current?.click()}>Import backup</button>
           {drafts.filter((d) => d.source === activeSourceId).map((d) => <div key={d.key}>
             <button className="link" onClick={() => beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key })}>Recover draft: {d.spec.title}</button>
             <button className="link" aria-label={`Discard draft ${d.spec.title}`} onClick={() => {
@@ -579,7 +607,8 @@ export function App() {
               </div>
               <label className="period-control">
                 <span>Period</span>
-                <select aria-label="Period" value={grain} onChange={(e) => { setGrain(e.target.value); setDrills({}); commit(withGrain(dash, e.target.value)); }}>
+                <select aria-label="Period" value={documentGrain(dash)} onChange={(e) => { const next = withGrain(dash, e.target.value); const issues = next.tiles.flatMap(t => validateTile(model, t)); if (issues.length) { setNotice(issues[0].problem); return; } setNotice(""); setGrain(e.target.value); setDrills({}); commit(next); }}>
+                  {documentGrain(dash) === "mixed" && <option value="mixed" disabled>Mixed periods</option>}
                   {GRAINS.map((g) => <option key={g} value={g}>{g === "day" ? "Daily" : g[0].toUpperCase() + g.slice(1) + "ly"}</option>)}
                 </select>
               </label>
@@ -588,9 +617,10 @@ export function App() {
             {!canvas.locked && (
               <EditBar canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit}
                        selected={selected} tiles={dash.tiles}
+                       onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
                        beautify={<DashboardBeautify dash={dash} canvas={canvas} model={model}
-                                                     aiAvailable={aiAvailable} onDash={commit} />} />
+                                                     aiAvailable={aiAvailable} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} />} />
             )}
             {canvas.locked && (
               <div className="editbar slim">
@@ -646,7 +676,7 @@ export function App() {
                             onDrill={(entry) => setDrills((d) => ({ ...d, [t.id]: [...(d[t.id] ?? []), entry] }))}
                             onDrillUp={(toIndex) => setDrills((d) => ({
                               ...d, [t.id]: (d[t.id] ?? []).slice(0, toIndex) }))}
-                            onRemove={(id) => commit({ ...dash, tiles: dash.tiles.filter((x) => x.id !== id) })}
+                            onRemove={(id) => commit({ ...dash, tiles: dash.tiles.filter((x) => x.id !== id).map(x => ({ ...x, section: x.section === id ? undefined : x.section })) })}
                             onUpdate={(next) => {
                               const merged = dash.tiles.map((x) => (x.id === next.id ? next : x));
                               // A tile's own edit can change its HEIGHT (Beautify's
@@ -701,7 +731,12 @@ export function App() {
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
-      <AgentChat key={`${activeSourceId}:${asWho}`} />
+      <AgentChat key={`${activeSourceId}:${asWho}`} document={dash ? { spec: dash, canvas, selected } : null}
+        onApply={(proposal, expected) => {
+          if (!dash || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Request a fresh proposal before applying it."); return false; }
+          try { const next = applyProposal(dash, canvas, proposal, model); compose(next.spec, next.canvas); setNotice("Changes applied. Undo restores the previous version."); return true; }
+          catch (e: any) { setNotice(`Could not apply proposal: ${e.message}`); return false; }
+        }} />
       {dash && !canvas.locked && (
         <InsertMenu model={model} onInsert={addTile} onInsertMany={addMany}
                     onOpenPicker={() => setPicking(true)} />

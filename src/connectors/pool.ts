@@ -1,3 +1,4 @@
+import { leasePool } from "./leases.ts";
 import { DuckDBInstance } from "@duckdb/node-api";
 import type { Connector, QueryResult } from "./types.ts";
 
@@ -24,16 +25,10 @@ export async function pooledDuckdb(
 
   const instance = await DuckDBInstance.create(":memory:");
   const conns = await Promise.all(Array.from({ length: size }, () => instance.connect()));
-  const free: any[] = [...conns];
-  const waiting: ((c: any) => void)[] = [];
+  const leases = leasePool(conns, c => c.closeSync());
+  const { acquire, release } = leases;
   let hits = 0, misses = 0;
-
-  const acquire = (): Promise<any> =>
-    free.length ? Promise.resolve(free.pop()) : new Promise((r) => waiting.push(r));
-  const release = (c: any) => {
-    const next = waiting.shift();
-    if (next) next(c); else free.push(c);
-  };
+  let closing: Promise<void> | undefined;
 
   const cache = new Map<string, Entry>();
 
@@ -51,6 +46,7 @@ export async function pooledDuckdb(
       // here only because row-level security is compiled INTO the SQL -- two
       // principals produce different text. If RLS were ever applied outside the
       // query, this cache would serve one user's rows to another.
+      if (closing) throw new Error("This connection was replaced. Refresh to use the current source.");
       const key = `${cacheKey ?? ""}::${limit}::${sql}`;
       const hit = cache.get(key);
       if (hit && Date.now() - hit.at < ttl) { hits++; return { ...hit.value, cached: true } as any; }
@@ -72,10 +68,10 @@ export async function pooledDuckdb(
       } finally { release(conn); }
     },
 
-    stats: () => ({ poolSize: size, free: free.length, waiting: waiting.length,
+    stats: () => ({ ...leases.stats(),
                     cached: cache.size, hits, misses,
                     hitRate: hits + misses ? +(hits / (hits + misses)).toFixed(3) : 0 }),
-    async close() { cache.clear(); },
+    close() { cache.clear(); return closing ??= leases.close().finally(() => { cache.clear(); instance.closeSync(); }); },
   };
 }
 

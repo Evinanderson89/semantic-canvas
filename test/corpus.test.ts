@@ -66,8 +66,10 @@ describe.skipIf(!available)("every metric in the real model compiles and runs", 
   });
 
   it("each metric, on its own", async () => {
-    for (const name of Object.keys(model.metrics))
-      await mustRun(tile({ metrics: [name] }), `metric ${name}`);
+    for (const [name, m] of Object.entries(model.metrics)) {
+      if (m.timeGrains) expect(validateTile(model, tile({ metrics: [name] }))).not.toEqual([]);
+      await mustRun(tile({ metrics: [name], dimensions: m.timeGrains ? [`${m.timeGrains[0]}:${m.timeDimension}`] : [] }), `metric ${name}`);
+    }
   }, 120_000);
 
   it("each metric, broken down by its table's time column", async () => {

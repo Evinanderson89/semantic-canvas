@@ -1,3 +1,5 @@
+import { visibleQuery } from "./query.ts";
+import { validateTile } from "../compiler/compile.ts";
 import { memo, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Chart, DataTable, Stat } from "../charts/Chart.tsx";
@@ -8,7 +10,7 @@ import { pickImage } from "./imagePicker.ts";
 import { inferChart } from "../suggest/chartRules.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
-import { fieldReachable, semanticHints, timeColumnOf } from "../semantic/model.ts";
+import { semanticHints, timeColumnOf } from "../semantic/model.ts";
 import type { FilterSpec } from "../compiler/spec.ts";
 import { drillInto, type DrillEntry, type DrillGrain } from "./drill.ts";
 import { downloadCsv, downloadPng, slugForFilename } from "./export.ts";
@@ -68,32 +70,16 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   // One key covering everything the query depends on. `where` and `limit` were
   // missing before, so changing a filter left the tile showing the previous
   // result with no sign it was stale.
-  const base = spec.metrics.length ? model.metrics[spec.metrics[0]]?.baseTable : null;
-  // Only cross-filters this tile's join graph can actually reach.
-  const applicable = (crossFilters ?? []).filter(
-    (f) => base != null && f.source === "dimension" && fieldReachable(model, base, f.field));
-
-  // The active drill (if any) swaps the time dimension's grain for the next
-  // finer one and scopes the query to the clicked bucket's exact range --
-  // this is what "zoom into March" actually means: a finer grain AND a
-  // narrower window, not just one or the other.
-  const activeDrill = drill && drill.length ? drill[drill.length - 1] : null;
-  const timeDimIndex = (spec.dimensions ?? []).findIndex((d) => d.includes(":"));
-  const dimensions = activeDrill && timeDimIndex !== -1
-    ? spec.dimensions.map((d, i) => i === timeDimIndex ? `${activeDrill.grain}:${d.split(":")[1]}` : d)
-    : spec.dimensions;
+  const base = model.metrics[spec.metrics[0]]?.baseTable ?? null;
+  const activeDrill = drill?.at(-1) ?? null;
+  const timeDimIndex = spec.dimensions.findIndex(d => d.includes(":"));
+  const query = visibleQuery(model, spec, crossFilters, drill);
+  const { dimensions, where } = query;
   const grain = timeDimIndex !== -1 ? dimensions[timeDimIndex].split(":")[0] : null;
-  const where = [
-    ...(spec.where ?? []), ...applicable,
-    ...(activeDrill ? [{
-      id: `drill:${spec.id}`, field: activeDrill.column, source: "dimension" as const,
-      mode: "range" as const, min: activeDrill.min, max: activeDrill.max,
-    }] : []),
-  ];
 
   const queryKey = JSON.stringify({
     m: spec.metrics, d: dimensions, w: where, l: spec.limit,
-    c: spec.compare, queryContext,
+    c: query.compare, queryContext,
   });
 
   useEffect(() => {
@@ -103,10 +89,6 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     // Send the QUERY, not the tile. Layout, format and spark are presentation;
     // including them meant moving a tile changed the body of a data request,
     // which makes caching and de-duping impossible.
-    const query = {
-      id: spec.id, metrics: spec.metrics, dimensions,
-      where, limit: spec.limit, compare: spec.compare,
-    };
     fetch("/api/query", {
       method: "POST", headers: { "content-type": "application/json", "x-sc-refresh": queryContext ?? "" },
       body: JSON.stringify(query), signal: ac.signal,
@@ -200,7 +182,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     fetch("/api/agent/explain", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        title, metrics: spec.metrics, dimensions, where, compare: spec.compare,
+        title, metrics: spec.metrics, dimensions, where, compare: query.compare,
         columns: state.columns, rows: state.rows,
       }),
     }).then((r) => r.json()).then((d) => {
@@ -210,7 +192,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
 
   const exportCsv = () => {
     if (state.status !== "ok") return;
-    downloadCsv(`${slugForFilename(title)}.csv`, state.columns, state.rows);
+    downloadCsv(`${slugForFilename(title)}${state.truncated ? "-limited-window" : ""}.csv`, state.columns, state.rows);
     setExportOpen(false);
   };
   const exportPng = async () => {
@@ -244,7 +226,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       if (activeDrill || timeDimIndex === -1) return null;
       const grain = spec.dimensions[timeDimIndex].split(":")[0];
       const next = coarserGrain(grain);
-      if (!next) return null;
+      if (!next || validateTile(model, { ...spec, dimensions: spec.dimensions.map(d => d.includes(":") ? `${next}:${d.split(":")[1]}` : d) }).length) return null;
       const found = detectNoisy(state.rows ?? [], state.columns ?? [], spec.metrics);
       return found.length ? { measure: found[0].measure, grain, next } : null;
     });
@@ -314,7 +296,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     fetch("/api/agent/beautify", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        title, metrics: spec.metrics, dimensions, where, compare: spec.compare,
+        title, metrics: spec.metrics, dimensions, where, compare: query.compare,
         columns: state.columns, rows: state.rows,
       }),
     }).then((r) => r.json()).then((d) => {
@@ -330,7 +312,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
           <h4 title={title}>{title}</h4>
           {state.status === "ok" &&
             <span className="ms mono">{state.ms}ms</span>}
-          {state.status === "ok" && state.coverage === "unknown" && <span className="ms mono" title="The source has not declared period completeness. All observed buckets are shown, including possibly incomplete periods.">Coverage unverified</span>}
+          {state.status === "ok" && state.coverage === "unknown" && <span className="ms mono" title="The source has not declared period completeness. These dates describe returned rows, not a verified complete reporting period.">Coverage unverified</span>}
           {state.status === "ok" && (state.partial?.start || state.partial?.end) && (
             <span className="ms mono partial-note"
                   title={`This ${grain ?? "period"}'s data doesn't cover the whole ${grain ?? "period"} yet, ` +
@@ -346,6 +328,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                        onExport={state.status === "ok" ? () => setExportOpen((v) => !v) : undefined} />
         </header>
       )}
+      {state.status === "ok" && state.truncated && <div className="result-warning" role="status" title={state.warnings?.join(" ")}>{state.window ? "Latest window" : "Limited results"} · {state.limit} rows · export is limited</div>}
       {beautifyOpen && (
         <div className="explain-pop beautify-pop">
           <div className="explain-head">
@@ -452,19 +435,19 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
           <span style={{ color: "var(--ink-3)" }}>Not enough data yet for a full {grain}.</span>
         )}
         {state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
-          kind === "kpi"
-            ? <Kpi label={title} grain={grain}
-                   previous={spec.compare && spec.compare !== "none" ? state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)] ?? null : undefined}
+          kind === "kpi" && timeDimIndex >= 0
+            ? <Kpi label={title} grain={grain} direction={model.metrics[spec.metrics[0]]?.direction}
+                   previous={query.compare && query.compare !== "none" ? state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)] ?? null : undefined}
                    comparisonLabel={spec.compare === "yoy" ? "same period last year" : "prior period"}
-                   series={(state.rows ?? []).map((r: any[]) =>
-                     ({ x: r[0], y: r[state.columns.indexOf(spec.metrics[0])] == null ? NaN : Number(r[state.columns.indexOf(spec.metrics[0])]) }))}
+                   series={(state.rows ?? []).filter((r: any[]) => r[state.columns.indexOf(dimAlias(dimensions[timeDimIndex]))] != null).map((r: any[]) =>
+                     ({ x: r[state.columns.indexOf(dimAlias(dimensions[timeDimIndex]))], y: r[state.columns.indexOf(spec.metrics[0])] == null ? NaN : Number(r[state.columns.indexOf(spec.metrics[0])]) }))}
                    options={spec.spark} format={makeFormatter(fmt)}
                    onOptions={onUpdate && !locked ? (spark) => onUpdate({ ...spec, spark }) : undefined} />
-          : kind === "stat"
+          : kind === "stat" || kind === "kpi"
             ? <Stat label={title} value={state.rows?.[0]?.[state.columns.length - 1]} />
             : kind === "table"
               ? <DataTable columns={state.columns} rows={state.rows} />
-              : <Chart kind={kind} {...projectCompare(spec, state)} format={fmt} secondaryFormat={secondaryFmt}
+              : <Chart kind={kind} labels={Object.fromEntries(Object.values(model.metrics).map(m => [m.name, m.label]))} {...projectCompare(spec, state)} format={fmt} secondaryFormat={secondaryFmt}
                        onPick={(onCrossFilter || onDrill) && dimensions?.length
                          ? (col, value) => {
                              const dim = dimensions.find((d) => dimAlias(d) === col);

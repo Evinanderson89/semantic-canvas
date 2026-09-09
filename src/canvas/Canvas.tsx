@@ -35,8 +35,10 @@ export function Canvas({
   const boxOf = (t: TileSpec): Box => ({ ...t.layout });
 
   const begin = useCallback((e: React.PointerEvent, id: string, handle: Handle | null) => {
-    if (canvas.locked) return;
+    if (canvas.locked || tiles.find(t => t.id === id)?.pinned) return;
+    if (!handle && (e.target as HTMLElement).closest("button,input,select,textarea,[contenteditable=true]")) return;
     e.stopPropagation();
+    (e.currentTarget.closest(".node") as HTMLElement)?.focus({ preventScroll: true });
     (e.target as Element).setPointerCapture?.(e.pointerId);
     // Direct DOM toggle, not React state -- a drag already fires onChange
     // (and a re-render) on every pointermove; a state update just to flip
@@ -47,7 +49,7 @@ export function Canvas({
     // actually moving the tile, so the transition can't fight the cursor
     // and make dragging feel laggy.
     surface.current?.classList.add("dragging");
-    const ids = selected.includes(id) ? selected : [id];
+    const ids = (selected.includes(id) ? selected : [id]).filter(id => !tiles.find(t => t.id === id)?.pinned);
     if (!selected.includes(id)) onSelect(e.shiftKey ? [...selected, id] : [id]);
     drag.current = {
       handle, ids, startX: e.clientX, startY: e.clientY,
@@ -110,9 +112,9 @@ export function Canvas({
   useEffect(() => {
     if (canvas.locked) return;
     const key = (e: KeyboardEvent) => {
-      if (!selected.length) return;
+      if (!selected.length || !(e.target as HTMLElement)?.closest(".canvas-surface")) return;
       const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable || (e.target as HTMLElement)?.closest("[role=dialog]")) return;
       const step = e.shiftKey ? 10 : canvas.snap ? canvas.grid : 1;
       const nudge: Record<string, [number, number]> = {
         ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step],
@@ -121,8 +123,8 @@ export function Canvas({
         e.preventDefault();
         const [dx, dy] = nudge[e.key];
         onCommit(tiles);
-        onChange(tiles.map((t) => selected.includes(t.id)
-          ? { ...t, layout: { ...t.layout, x: Math.max(0, t.layout.x + dx), y: Math.max(0, t.layout.y + dy) } } : t));
+        onChange(tiles.map((t) => selected.includes(t.id) && !t.pinned
+          ? { ...t, layout: e.altKey ? { ...t.layout, w: Math.max(80, t.layout.w + dx), h: Math.max(48, t.layout.h + dy) } : { ...t.layout, x: Math.max(0, t.layout.x + dx), y: Math.max(0, t.layout.y + dy) } } : t));
       }
       if (e.key === "Escape") onSelect([]);
     };
@@ -138,12 +140,17 @@ export function Canvas({
                       transform: `scale(${zoom})`, transformOrigin: "top left",
                       backgroundSize: canvas.snap ? `${canvas.grid * 4}px ${canvas.grid * 4}px` : undefined }}
              onPointerDown={() => onSelect([])}>
+          <span className="sr-only" id="canvas-keyboard-help">Arrow keys move selected tiles. Hold Shift for larger steps. Hold Alt to resize. Escape clears selection. Text editing uses normal cursor keys.</span>
           {!tiles.length && emptyState}
           {tiles.map((t) => {
             const on = selected.includes(t.id);
             return (
               <div key={t.id}
-                   className={"node" + (on ? " selected" : "")}
+                   className={"node" + (on ? " selected" : "") + (t.pinned ? " pinned" : "")}
+                   tabIndex={canvas.locked ? -1 : 0} role="group"
+                   aria-label={`${t.title ?? t.text ?? t.metrics.join(", ")}${t.pinned ? ", pinned" : ""}`}
+                   aria-describedby="canvas-keyboard-help"
+                   onFocus={(e) => { if (e.target === e.currentTarget && !canvas.locked) onSelect([t.id]); }}
                    style={{ left: t.layout.x, top: t.layout.y,
                             width: t.layout.w, height: t.layout.h,
                             zIndex: (t.layout as any).z ?? 1 }}
@@ -155,7 +162,7 @@ export function Canvas({
                 <div className="node-inner" onPointerDown={(e) => begin(e, t.id, null)}>
                   {renderTile(t, on)}
                 </div>
-                {on && !canvas.locked && HANDLES.map((h) => (
+                {on && !canvas.locked && !t.pinned && HANDLES.map((h) => (
                   <span key={h} className={`handle ${h}`}
                         onPointerDown={(e) => begin(e, t.id, h)} />
                 ))}

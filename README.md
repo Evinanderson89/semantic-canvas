@@ -6,7 +6,7 @@ An open-source canvas for building dashboards from governed metrics. Connect a s
 
 ## Run it
 
-Use Node.js 22 or newer.
+Use a supported Node.js release: 22.12+, 24.x, or 26+.
 
 ```sh
 npm ci
@@ -18,11 +18,12 @@ Open [Semantic Canvas](http://127.0.0.1:5173). The API runs at `127.0.0.1:5174`.
 ## What you can do
 
 - Start from scratch or generate a dashboard from the semantic catalog.
-- Move, resize, align and layer tiles; use Smart Arrange to apply a Grid or Exec Summary layout.
+- Move, resize, align and layer tiles. Preview Smart Arrange before applying a layout; sections and pinned positions are preserved.
 - Add KPIs, charts, tables, headings, notes, dividers and images.
 - Explore with filters and time drill-downs, then refresh data without replacing the design.
 - Save, reopen, save a copy, undo canvas changes and recover unsaved drafts from Home.
-- Use deterministic chart recommendations and optional AI critique, explanations and story suggestions.
+- Review charts against their current filters and drill state. Partial reviews identify unavailable or limited results.
+- Ask the optional AI assistant to improve the active unsaved document. Review its proposed edits, apply them together, and undo them in one step.
 - Export charts as CSV or export a dashboard as PNG.
 
 ## What this alpha guarantees—and where it stops
@@ -31,7 +32,9 @@ Saved documents have a version, a source identity and a revision. Conflicting up
 
 Queries validate metrics, dimensions and structured filters before compiling SQL. Charts, field samples, distinct values and ranges use the same row restrictions. A policy that cannot be enforced denies that query. A missing or malformed policy file stops startup instead of disabling restrictions.
 
-Period comparisons look up the previous calendar period, so gaps stay unknown. First-of-month snapshots remain visible. The app shows **Coverage unverified** because observed dates do not prove that a reporting period is complete. Fiscal calendars and upstream completeness metadata are not implemented.
+Time-series limits keep the newest result window. Responses disclose truncation and the visible date window; limited CSV exports are labeled. Period comparisons look up the previous calendar period, so gaps stay unknown. First-of-month snapshots remain visible. The app shows **Coverage unverified** because observed dates do not prove that a reporting period is complete. Fiscal calendars and upstream completeness metadata are not implemented.
+
+Snapshot and retention metrics in the sample declare their supported monthly grain. Unsupported rollups and all-time snapshot sums are rejected instead of returning misleading totals. Model authors can declare `time_grains`, `time_dimension`, optional dashboard `importance`, and `direction` (higher, lower or neutral) in YAML. Undeclared direction uses neutral KPI colors.
 
 These are tested local behaviors, not a claim of semantic equivalence with every vendor's query engine. See [the alpha contract](docs/alpha-contract.md) for supported imports, migration details and known limits.
 
@@ -69,7 +72,7 @@ To update a saved dashboard, call `get_dashboard` and pass its `revision` into `
 
 ## Data and recovery
 
-Saved dashboards live in `~/.semantic-canvas/dashboards.duckdb`. Set `SC_DATA_DIR` to choose another directory. Unsaved recovery drafts are stored in this browser and appear on Home; they do not include query result rows or connection credentials. Browser storage has a quota, so save larger image-heavy documents explicitly.
+Saved dashboards live in `~/.semantic-canvas/dashboards.duckdb`. Set `SC_DATA_DIR` to choose another directory. Unsaved recovery drafts are stored in this browser and appear on Home; they do not include query result rows or connection credentials. If browser recovery fails, internal navigation keeps the current document open and offers a downloadable JSON backup. Use **Import backup** on Home to restore it as a new document. Save larger image-heavy documents explicitly; browser storage has a quota.
 
 Before upgrading an existing installation, stop its server and back up the dashboard directory. The newer DuckDB engine and additive store migration are tested with the old schema. Older application versions may not understand the updated database format or source ownership fields.
 
@@ -99,6 +102,6 @@ Browser tests start their own servers on ports 5273/5274 and use `.test-data/` f
 
 ## Next
 
-Team authentication and authorization, native semantic-layer execution, completeness metadata, an evaluated AI action model with preview/apply/undo, responsive layouts and collaboration remain future work. This alpha focuses on preserving authored work and rejecting answers the current implementation cannot produce faithfully.
+Team authentication and authorization, native semantic-layer execution, completeness metadata, evaluated narrative accuracy, responsive viewer layouts and collaboration remain future work. This alpha focuses on preserving authored work and rejecting answers the current implementation cannot produce faithfully.
 
-MIT licensed. See [LICENSE](LICENSE).
+See [architecture and contracts](docs/architecture.md), [contributing](CONTRIBUTING.md), [security](SECURITY.md), and [release notes](CHANGELOG.md). MIT licensed. See [LICENSE](LICENSE).

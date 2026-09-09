@@ -31,7 +31,7 @@ export const querySchema = z.object({
   limit: finite.int().min(1).max(5000).optional(), compare: z.enum(["none", "prior", "yoy"]).optional(),
 }).strict();
 export const tileSchema = querySchema.extend({
-  id: name, metrics: z.array(name).max(50),
+  id: name, metrics: z.array(name).max(50), section: name.optional(), pinned: z.boolean().optional(),
   kind: z.enum(["metric", "heading", "text", "divider", "image"]).optional(),
   title: z.string().max(1000).optional(), text: z.string().max(100000).optional(),
   imageData: z.string().max(6 * 1024 * 1024).regex(/^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/).optional(),

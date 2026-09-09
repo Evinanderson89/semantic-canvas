@@ -1,8 +1,12 @@
-import { useState } from "react";
+import { visibleQuery } from "./query.ts";
+import { readResponse } from "./http.ts";
+import { validateTile } from "../compiler/compile.ts";
+import type { DrillEntry } from "./drill.ts";
+import { useState, useRef, useEffect } from "react";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 import type { CanvasSpec } from "../canvas/presets.ts";
 import type { Model } from "../semantic/model.ts";
-import { applyLayout } from "../canvas/layouts.ts";
+import { applyLayout, sectionsOf } from "../canvas/layouts.ts";
 import { inferChart } from "../suggest/chartRules.ts";
 import { timeColumnOf } from "../semantic/model.ts";
 import { coarserGrain, detectDegenerate, detectNoisy, type DegenerateFinding } from "../suggest/recommend.ts";
@@ -40,47 +44,52 @@ interface Story {
  * order), not just displayed, so the agent call returns structured JSON
  * instead of a paragraph.
  */
-export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash }: {
+export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, queryContext, drills }: {
   dash: DashboardSpec; canvas: CanvasSpec; model: Model; aiAvailable: boolean;
   onDash: (d: DashboardSpec) => void;
+  queryContext: string; drills: Record<string, DrillEntry[]>;
 }) {
   const [open, setOpen] = useState(false);
   const [hits, setHits] = useState<"checking" | Hit[] | null>(null);
   const [story, setStory] = useState<"checking" | Story | { error: string } | null>(null);
 
+  const [scan, setScan] = useState<{ reviewed: number; limited: number; failed: string[] } | null>(null);
+  const context = JSON.stringify([dash, canvas, queryContext, drills]);
+  const current = useRef(context); current.current = context;
+  const request = useRef<AbortController | null>(null);
+  useEffect(() => {
+    request.current?.abort(); setHits(null); setStory(null); setScan(null);
+    return () => request.current?.abort();
+  }, [context]);
+
   const scanTiles = async () => {
-    setHits("checking");
-    const found: Hit[] = [];
+    request.current?.abort(); const ac = new AbortController(); request.current = ac;
+    const snapshot = context;
+    setHits("checking"); setScan(null);
+    const found: Hit[] = [], failed: string[] = [];
+    let reviewed = 0, limited = 0;
     for (const t of dash.tiles) {
       if ((t.kind ?? "metric") !== "metric" || !t.metrics.length) continue;
-      const timeDimIdx = (t.dimensions ?? []).findIndex((d) => d.includes(":"));
-      const isSingleCategorical = t.dimensions.length === 1 && t.metrics.length === 1 && !t.dimensions[0].includes(":");
-      if (timeDimIdx === -1 && !isSingleCategorical) continue;
-      const title = t.title ?? t.metrics.map((m) => model.metrics[m]?.label ?? m).join(", ");
+      const query = visibleQuery(model, t, dash.crossFilters, drills[t.id]);
+      const timeDimIdx = query.dimensions.findIndex(d => d.includes(":"));
+      const isSingleCategorical = query.dimensions.length === 1 && t.metrics.length === 1 && timeDimIdx === -1;
+      const title = t.title ?? t.metrics.map(m => model.metrics[m]?.label ?? m).join(", ");
       try {
-        const r = await fetch("/api/query", {
-          method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ metrics: t.metrics, dimensions: t.dimensions, where: t.where, limit: t.limit }),
-        }).then((x) => x.json());
-        if (timeDimIdx !== -1) {
-          const grain = t.dimensions[timeDimIdx].split(":")[0];
-          const next = coarserGrain(grain);
-          if (next && detectNoisy(r.rows ?? [], r.columns ?? [], t.metrics).length)
+        const r = await fetch("/api/query", { method: "POST", signal: ac.signal,
+          headers: { "content-type": "application/json", "x-sc-refresh": queryContext }, body: JSON.stringify(query) }).then(readResponse);
+        reviewed++; if (r.truncated) limited++;
+        if (timeDimIdx !== -1 && !drills[t.id]?.length) {
+          const grain = query.dimensions[timeDimIdx].split(":")[0], next = coarserGrain(grain);
+          if (next && !validateTile(model, { ...t, dimensions: t.dimensions.map(d => d.includes(":") ? `${next}:${d.split(":")[1]}` : d) }).length && detectNoisy(r.rows ?? [], r.columns ?? [], t.metrics).length)
             found.push({ kind: "noise", tileId: t.id, title, grain, next });
         }
-        // Dimensions are selected first, metrics last -- the compiler's own
-        // convention -- so the single dimension's result column is always
-        // columns[0] here.
         if (isSingleCategorical) {
           const finding = detectDegenerate(r.rows ?? [], r.columns ?? [], r.columns?.[0], t.metrics[0]);
-          if (finding) {
-            const base = model.metrics[t.metrics[0]]?.baseTable ?? null;
-            found.push({ kind: "degenerate", tileId: t.id, title, finding, timeDimension: timeColumnOf(model, base) });
-          }
+          if (finding) found.push({ kind: "degenerate", tileId: t.id, title, finding, timeDimension: timeColumnOf(model, model.metrics[t.metrics[0]]?.baseTable ?? null) });
         }
-      } catch { /* one tile's scan failing shouldn't block the rest */ }
+      } catch (e: any) { if (ac.signal.aborted) return; failed.push(`${title}: ${e.message}`); }
     }
-    setHits(found);
+    if (current.current === snapshot && !ac.signal.aborted) { setHits(found); setScan({ reviewed, limited, failed }); }
   };
 
   const tileSummary = (t: TileSpec) => {
@@ -88,16 +97,17 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash }: 
     const title = t.title ?? ((t.kind ?? "metric") === "metric"
       ? t.metrics.map((m) => model.metrics[m]?.label ?? m).join(", ") || "(untitled)"
       : t.text ?? String(t.kind ?? "note"));
-    return { id: t.id, title, kind, metrics: t.metrics ?? [], dimensions: t.dimensions ?? [] };
+    return { id: t.id, title, kind, metrics: t.metrics ?? [], dimensions: t.dimensions ?? [], text: t.text, layout: t.layout, section: t.section, pinned: t.pinned };
   };
 
   const askAgent = () => {
     setStory("checking");
+    const snapshot = context;
     fetch("/api/agent/dashboard-story", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ tiles: dash.tiles.map(tileSummary) }),
-    }).then((r) => r.json()).then((d) => setStory(d.error ? { error: d.error } : d))
-      .catch((e) => setStory({ error: String(e?.message ?? e) }));
+    }).then(readResponse).then((d) => { if (current.current === snapshot) setStory(d); })
+      .catch((e) => { if (current.current === snapshot) setStory({ error: String(e?.message ?? e) }); });
   };
 
   const run = () => {
@@ -148,7 +158,8 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash }: 
     // layout.y/x, not array order -- so the suggested order is expressed as
     // synthetic y positions first, then handed to the same row-packer Smart
     // Arrange already uses, rather than inventing new placement math here.
-    const reranked = dash.tiles.map((t) => ({ ...t, layout: { ...t.layout, y: rank.get(t.id) ?? 9999, x: 0 } }));
+    const fixed = new Set(sectionsOf(dash.tiles).filter(group => group.some(t => t.pinned)).flat().map(t => t.id));
+    const reranked = dash.tiles.map((t) => fixed.has(t.id) ? t : ({ ...t, layout: { ...t.layout, y: rank.get(t.id) ?? 9999, x: 0 } }));
     const packed = applyLayout("grid", reranked, canvas.width);
     onDash({ ...dash, tiles: packed });
   };
@@ -183,7 +194,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash }: 
   return (
     <>
       <button className="tgl" onClick={run} disabled={!dash.tiles.length}
-              title="Suggest a title and a top-to-bottom reading order for the whole dashboard, and flag any tile that's hard to read at its current grain. Nothing changes until you click one of its suggestions -- unlike Smart arrange, which repacks the layout immediately.">
+              title="Suggest a title and a top-to-bottom reading order for the whole dashboard, and flag any tile that's hard to read at its current grain. Review the current results and composition. Changes are applied only when you choose a suggestion.">
         <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6">
           <path d="M3 17l7-7" strokeLinecap="round" />
           <path d="M13 3v3M11.5 4.5h3" strokeLinecap="round" />
@@ -218,11 +229,13 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash }: 
                 ))}
               </div>
             )}
+            {scan && <div className="review-coverage" role="status"><b>{scan.failed.length ? "Review incomplete" : "Review complete"}</b><p>{scan.reviewed} charts reviewed{scan.limited ? ` · ${scan.limited} limited result windows` : ""}{scan.failed.length ? ` · ${scan.failed.length} unavailable` : ""}.</p>{scan.failed.map(message => <p key={message} className="err">{message}</p>)}</div>}
+            {hits === null && <p className="explain-body">The dashboard changed. <button className="link" onClick={run}>Review this version</button></p>}
             {Array.isArray(hits) && hits.length === 0 &&
-              <p className="explain-body">No tile reads noisy or has a pointless breakdown.</p>}
+              <p className="explain-body">{scan?.failed.length ? "The readable tiles have no additional chart suggestions. The review is incomplete." : "No chart changes suggested for the results reviewed."}</p>}
 
             {!aiAvailable &&
-              <p className="explain-body hint">Configure an embedded agent (ANTHROPIC_API_KEY) for a title and reading-order suggestion.</p>}
+              <p className="explain-body hint">Connect an AI provider in Connections for editorial suggestions. Chart checks work without AI.</p>}
             {story === "checking" && <p className="explain-body loading">Reading the dashboard as a story…</p>}
             {story && story !== "checking" && "error" in story && <p className="explain-body error">{story.error}</p>}
             {story && story !== "checking" && !("error" in story) && (

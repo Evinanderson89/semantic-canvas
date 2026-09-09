@@ -1,14 +1,16 @@
 # Trustworthy local alpha contract
 
-This release repairs the document lifecycle and the confirmed query-governance gaps from the repository review. It does not implement the later native-semantic-layer or collaborative-canvas phases.
+This release strengthens document recovery and query governance, adds section-aware canvas composition, and makes assistant edits reviewable. Native semantic-engine execution and shared team deployment remain later phases.
 
 ## Document lifecycle
 
-Every new canvas, suggestion or demo clears saved identity, history, selection and drill state. Save only changes the status to Saved after a successful server response. Editing during an in-flight save remains dirty; navigating to another document prevents a late response from adopting the old ID. Save a copy offers a new identity when another tab or agent has changed the saved revision.
+Every new canvas, suggestion or demo clears saved identity, history, selection and drill state after the recovery gate succeeds. Save only changes the status to Saved after a successful server response. Editing during an in-flight save remains dirty; navigating to another document prevents a late response from adopting the old ID. Save a copy offers a new identity when another tab or agent has changed the saved revision.
 
 Document fingerprints include the spec and canvas settings. Cross-filters and drill state remain exploratory. Undo/redo covers tile edits, movement, keyboard nudges and canvas settings. Refresh invalidates the tile query context and cache key without regenerating tiles. A role change clears query and explanation state while preserving authored content.
 
-A browser draft is written after edits and immediately before navigation. Home offers recovery and explicit discard. Recovery is local to a browser origin, is subject to its quota, and is not a backup of the server database. Save errors and unavailable recovery storage remain visible.
+A browser draft is written after edits and immediately before navigation. Home offers recovery and explicit discard. Recovery records are validated. Failed recovery writes block document replacement and offer a downloadable JSON backup or explicit discard. Home can import a compatible backup as a new unsaved document after validating its source and contents. Recovery is local to a browser origin, is subject to its quota, and is not a backup of the server database. Save errors and unavailable recovery storage remain visible.
+
+Smart Arrange previews section-aware layouts before applying tiles and canvas dimensions as one undo step. A pinned tile anchors its section during arrangement. Assistant proposals receive the current unsaved document, validate all actions before application, and are rejected if the document has changed since the request. Applying a proposal does not save it automatically.
 
 ## API changes
 
@@ -29,13 +31,15 @@ Snowflake import preserves database/schema/table identity and all keys in a rela
 
 Period-over-period SQL matches the previous calendar bucket; missing matches produce NULL. Year-over-year uses calendar-year subtraction; a leap-day comparison clamps to February 28 in the prior year. Weekly year-over-year matches a date one calendar year earlier, not an ISO week-number convention; when there is no matching bucket, it stays unknown. No fiscal calendars, dense date-spine filling, or automatic missing-to-zero conversion are implemented.
 
-All observed buckets are retained. Period completeness is unknown until the model can declare coverage; the UI labels it accordingly. KPI cards select their named metric instead of accidentally displaying the last comparison column. Null latest KPI values remain unknown, and sparse prior periods are not silently substituted with an older observation.
+Time queries retain the newest bounded window and return it in chronological order. The server fetches one additional row to detect truncation, then removes that probe and returns the visible window, limit and warnings. Limited charts and exports are labeled. Upstream period completeness remains unknown; fitting all query rows into a response does not establish complete source coverage. KPI cards select their named metric and latest non-null time bucket. Null latest metric values remain unknown, and sparse prior periods are not silently substituted with an older observation.
+
+Metric authors may declare supported time grains and a required time dimension. The included snapshot and retention metrics require monthly grouping; unsupported coarsening and all-time totals are rejected. This restriction prevents unsafe aggregation but does not implement generic snapshot rollups. KPI change colors follow declared metric direction, with unknown direction shown neutrally.
 
 Metrics with different always-on filters aggregate separately and merge dimension keys null-safely. Aggregate filters across those differently scoped groups are rejected until a shared post-aggregation predicate stage is implemented.
 
 ## Storage and migration
 
-The dashboard store uses an additive migration for source ID, schema version and revision. Old document JSON is retained. Old text-size presets normalize to numeric sizes on read. A unique model-name-to-source mapping attaches legacy records; ambiguous matches remain unassigned and preserved.
+The dashboard store uses an additive migration for source ID, schema version and revision. Old document JSON is retained. Old text-size presets normalize to numeric sizes on read. A unique model-name-to-source mapping attaches legacy records; ambiguous matches remain unassigned and preserved. Section membership and pinned positions are optional tile fields. Older documents infer sections from heading positions when arranged; older app versions may reject the new fields.
 
 DuckDB connections serialize store operations. Saves validate first, check source/revision, and replace a row inside a transaction. The DuckDB client is pinned to 1.5.5-r.4; its predecessor was an early alpha and failed the new update regression. Explicit transactional replacement also avoids indexed-update limitations described in [DuckDB's index documentation](https://duckdb.org/docs/current/sql/indexes.html#constraint-checking-in-update-statements).
 
@@ -43,6 +47,6 @@ Stop the old server and copy its dashboard directory before upgrading. Do not sh
 
 ## Validation scope
 
-Tests cover the sample warehouse, exact synthetic DuckDB answers, source isolation, concurrent revisions, old store schema migration, malformed policy/config input, rejected adapter semantics, agent tool context and tool-schema serialization. Browser regressions exercise save/new/open, refresh and role changes, failed save retry, canvas undo and draft recovery.
+Tests cover the sample warehouse, exact synthetic DuckDB answers, source isolation, concurrent revisions, old store schema migration, malformed policy/config input, rejected adapter semantics, agent tool context and tool-schema serialization. Additional fixtures verify latest-window comparisons, native-grain restrictions, atomic proposals, pinned sections, retired pool drainage and the Snowflake SDK's TOML parser interface. Browser regressions exercise save/new/open, refresh and role changes, failed save retry, recovery failure, backup import, keyboard editing, layout preview/undo, partial design reviews and mocked assistant proposal flows.
 
-Live Snowflake, paid model responses and compatibility with arbitrary vendor manifests need integration testing with real credentials and fixtures. Team authentication, asset storage, source deletion ownership, query cancellation/budgets, complete connection-pool lifecycle handling, responsive dashboards and AI narrative evaluation remain outside this release.
+Live Snowflake, paid model responses and compatibility with arbitrary vendor manifests need integration testing with real credentials and fixtures. Replaced connection pools now reject queued/new work, drain active leases and close retired connections; partial initialization failures and warehouse timeout behavior still need further hardening. Team authentication, asset storage, source deletion ownership, general query cancellation/budgets, responsive published dashboards and AI narrative evaluation remain outside this release.

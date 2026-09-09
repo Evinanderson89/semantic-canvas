@@ -1,3 +1,4 @@
+import { finishResult, resultLimit } from "./compiler/result.ts";
 import express from "express";
 // Load .env before anything reads process.env, so a source that needs
 // SNOWFLAKE_* (or any other) credentials picks them up with no shell setup.
@@ -18,7 +19,7 @@ import { deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboar
 import { loadRls, type RlsConfig } from "./security/rls.ts";
 import { applyBestLayout, applyLayout, LAYOUTS } from "./canvas/layouts.ts";
 import { requireScope, scopedField } from "./security/queryScope.ts";
-import { saveSchema, querySchema, MAX_DOCUMENT_BYTES } from "./compiler/schema.ts";
+import { saveSchema, querySchema, dashboardSchema, canvasSchema, MAX_DOCUMENT_BYTES } from "./compiler/schema.ts";
 import { z } from "zod";
 import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardStory,
          type ChatMessage, type DashboardTileSummary } from "./agent/loop.ts";
@@ -247,7 +248,9 @@ async function readExistingBlock(id: string):
 
 async function hotReload() {
   const loaded = await loadSources(SOURCES_PATH);
+  const retired = sources;
   sources = loaded.sources;
+  void Promise.allSettled(retired.map(s => s.conn?.close()));
   defaultPrincipal = loaded.defaultPrincipal;
   ai = loaded.ai;
   return {
@@ -583,9 +586,12 @@ app.post("/api/agent/chat", safe(async (req, res) => {
   const source = pick(req).id;
   const historyKey = JSON.stringify([source, principal, conversationId]);
   const history = agentConversations.get(historyKey) ?? [];
-  const { text, messages } = await agentChat(ai, history, message, { source, principal });
-  agentConversations.set(historyKey, messages);
-  res.json({ text });
+  const active = req.body.document ? z.object({ spec: dashboardSchema, canvas: canvasSchema, selected: z.array(z.string()).max(500).default([]) }).strict().parse(req.body.document) : undefined;
+  const controller = new AbortController();
+  res.on("close", () => controller.abort());
+  const { text, messages, proposal } = await agentChat(ai, history.slice(-12), message, { source, principal, signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined);
+  agentConversations.set(historyKey, messages.slice(-12));
+  res.json({ text, proposal });
 }));
 
 /**
@@ -643,6 +649,8 @@ app.post("/api/agent/dashboard-story", safe(async (req, res) => {
     id: String(t.id ?? ""), title: String(t.title ?? ""), kind: String(t.kind ?? ""),
     metrics: Array.isArray(t.metrics) ? t.metrics : [],
     dimensions: Array.isArray(t.dimensions) ? t.dimensions : [],
+    text: typeof t.text === "string" ? t.text.slice(0, 100000) : undefined,
+    layout: t.layout, section: t.section, pinned: t.pinned,
   })).filter((t: DashboardTileSummary) => t.id) : [];
   if (!tiles.length) return res.status(400).json({ error: "tiles is required" });
   const principal = principalOf(req)?.id ?? "";
@@ -760,14 +768,14 @@ app.post("/api/query", safe(async (req, res) => {
     // client that strips its filters still gets a scoped query.
     const scope = requireScope(modelOf(req), base, rls, who);
     const scoped = { ...tile, where: [...(tile.where ?? []), ...scope.filters] };
-    const sql = compileTile(modelOf(req), connOf(req), scoped);
-    const out = await connOf(req).execute(sql, tile.limit ?? 5000, `${who?.id ?? "anon"}:${req.header("x-sc-refresh") ?? ""}`);
+    const sql = compileTile(modelOf(req), connOf(req), scoped, { probe: true });
+    const out = await connOf(req).execute(sql, resultLimit(tile) + 1, `${who?.id ?? "anon"}:${req.header("x-sc-refresh") ?? ""}`);
     // A coarsened time dimension's first/last bucket, if it doesn't span a
     // full period, comes back flagged rather than silently dropped -- split
     // out here, right at the query's only consumer, so no caller of
     // compileTile() has to know these two columns exist at all.
     const { columns, rows, partial } = splitPartialPeriods(out);
-    res.json({ ...out, columns, rows,
+    res.json({ ...finishResult({ ...out, columns, rows }, tile),
       partial,
       coverage: tile.dimensions.some((d) => d.includes(":")) ? "unknown" : undefined,
       principal: who?.id ?? null,

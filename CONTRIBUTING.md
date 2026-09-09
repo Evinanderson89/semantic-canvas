@@ -2,20 +2,19 @@
 
 ## Setup
 
-    npm install
+    npm ci
     npm start          # api on :5174, ui on :5173
 
 This runs against the bundled sample warehouse (`sample-data/`) -- no
-credentials needed. See the README's "Connecting your own source" for
+credentials needed. See the README's "Connect a source" for
 attaching a real one.
 
 ## Before opening a PR
 
-    npm run check       # typecheck + unit tests + e2e
+    npx playwright install chromium
+    npm run check       # types + result/regression tests + build + browser tests
 
-All three have to pass. The e2e suite (`e2e/smoke.spec.ts`) expects the dev
-server already running (`npm start` in another terminal) -- it does not start
-one itself.
+All checks must pass. Browser tests start isolated servers on ports 5273/5274 and use `.test-data/`. The ordinary preview does not need to be running. Use Node.js 22.12+, 24.x, or 26+.
 
 Each test in `test/corpus.test.ts` and `e2e/smoke.spec.ts` exists because a
 specific defect reached a user; if you're fixing a bug, a new test that fails
@@ -38,3 +37,5 @@ actually works, and the natural way to explain what broke.
 Open a GitHub issue. For anything that touches row-level security or
 credential handling, please describe the scenario rather than pasting
 real credentials or customer data.
+
+For changes to metric behavior, add an executable reference-result fixture. For editor changes, exercise save/reopen and undo. For AI actions, test malformed, stale, and unsupported proposals without paid model calls. Keep live-provider verification separate and document what was actually exercised.
