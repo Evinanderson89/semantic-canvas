@@ -38,23 +38,27 @@ export function demoDashboardAvailable(model: Model): boolean {
   return metrics.every((m) => m in model.metrics) && tables.every((t) => t in model.tables);
 }
 
-export function demoDashboard(): DashboardSpec {
-  return {
+export function demoDashboard(width = 1120): DashboardSpec {
+  const dashboard: DashboardSpec = {
     title: "SaaS Overview (rough draft)",
-    description: "Deliberately unpolished -- try Beautify (the wand icon, in "
-      + "edit mode) on d2-d4, and Smart Arrange on the whole thing.",
+    description: "A messy example: use Design review to improve the charts, then Smart arrange to bring it together.",
     tiles: [
       { id: "d1", kind: "metric", title: "MRR (USD)", metrics: ["mrr"], dimensions: [],
         layout: { x: 40, y: 40, w: 260, h: 130 } },
       { id: "d2", kind: "metric", title: "Web sessions", metrics: ["web_sessions"],
         dimensions: ["day:fct_web_sessions.session_date"], chart: "line",
         layout: { x: 220, y: 110, w: 560, h: 280 } },
-      { id: "d3", kind: "metric", title: "New MRR (USD) by movement_type", metrics: ["new_mrr"],
+      { id: "d3", kind: "metric", title: "New MRR (USD)", metrics: ["new_mrr"],
         dimensions: ["fct_mrr_movements.movement_type"], chart: "bar",
-        layout: { x: 700, y: 60, w: 380, h: 260 } },
+        layout: { x: 700, y: 60, w: 380, h: 300 } },
       { id: "d4", kind: "metric", title: "New signups by country", metrics: ["new_signups"],
         dimensions: ["dim_users.country"], chart: "table",
         layout: { x: 80, y: 400, w: 900, h: 260 } },
     ],
   };
+  // Keep the example visible in a compact workspace without fixing its overlaps.
+  const scale = Math.max(640, width) / 1120;
+  return { ...dashboard, tiles: dashboard.tiles.map(t => ({ ...t, layout: { ...t.layout,
+    x: Math.round(t.layout.x * scale), w: Math.max(180, Math.round(t.layout.w * scale)),
+  } })) };
 }

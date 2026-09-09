@@ -30,7 +30,7 @@ function Icon({ d }: { d: string }) {
 
 export function Sidebar({ model, active, view, onPick, onView, collapsed, onToggle,
                           principals = [], principal = "", onPrincipal = () => {},
-                          sources = [], activeSource = null }: {
+                          sources = [], activeSource = null, demo }: {
   model: Model; active: string | null; view: string;
   onPick: (table: string | null) => void;
   onView: (v: "home" | "registry" | "model" | "connections") => void;
@@ -40,6 +40,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
   onPrincipal?: (id: string) => void;
   sources?: { id: string; label: string; status: "ready" | "error"; error?: string }[];
   activeSource?: { label: string; status: "ready" | "error"; error?: string } | null;
+  demo?: { active: boolean; onOpen: () => void };
 }) {
   const [theme, setTheme] = useState(() => {
     try { return localStorage.getItem("sc:theme") === "dark" ? "dark" : "light"; } catch { return "light"; }
@@ -96,6 +97,12 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
             <span className="count">{ms.length}</span>
           </button>
         ))}
+        {demo && <button className={"nav cat" + (demo.active ? " on" : "")}
+          aria-label="Messy dashboard" aria-current={demo.active ? "page" : undefined}
+          title="An example to clean up with Design review and Smart arrange" onClick={demo.onOpen}>
+          <span className="label">Messy dashboard</span>
+          <span className="count" aria-hidden="true">Example</span>
+        </button>}
       </nav>
 
       <div className="who">

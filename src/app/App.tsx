@@ -37,6 +37,7 @@ export function App() {
   const [model, setModel] = useState<Model | null>(null);
   const [dash, setDash] = useState<DashboardSpec | null>(null);
   const [table, setTable] = useState<string | null>(null);
+  const [demoActive, setDemoActive] = useState(false);
   const [grain, setGrain] = useState("month");
   const [picking, setPicking] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -202,7 +203,7 @@ export function App() {
     setDash(next); setCanvas(surface); setDashId(options.id ?? null); setRevision(options.revision ?? 0);
     setSavedFingerprint(next && options.saved ? fingerprint(next, surface) : null);
     setGrain(documentGrain(next));
-    setSelected([]); setDrills({}); setNotice(""); setSaving(false); setTable(null);
+    setSelected([]); setDrills({}); setNotice(""); setSaving(false); setTable(null); setDemoActive(false);
     setPicking(false); setRefreshed(null); setRefreshToken(crypto.randomUUID());
     return true;
   }, [stashDraft]);
@@ -511,6 +512,13 @@ export function App() {
         </button>
       )}
       <Sidebar model={model} active={table} view={dash ? "" : view}
+               demo={demoDashboardAvailable(model) ? { active: demoActive, onOpen: () => {
+                 const surface = freshCanvas(), example = demoDashboard(surface.width);
+                 surface.height = Math.max(surface.height, ...example.tiles.map(t => t.layout.y + t.layout.h + 24));
+                 if (beginDocument(example, { canvas: surface })) {
+                   setDemoActive(true); setView("home"); pendingFit.current = true;
+                 }
+               } } : undefined}
                onPick={(t) => { setView("home"); pick(t); }}
                onView={(v) => { if (beginDocument(null)) setView(v); }}
                collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}
@@ -554,11 +562,7 @@ export function App() {
           <DataModel model={model} />
         ) : !dash ? (
           <><Entry model={model} onSuggest={() => setInterview(true)}
-                 onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }}
-                 onDemo={demoDashboardAvailable(model) ? () => {
-                   pendingFit.current = true;
-                   beginDocument(demoDashboard());
-                 } : null} />
+                 onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} />
         <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>Saved dashboards and drafts on this computer</span></div>
           <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
           <button className="link" onClick={() => backupInput.current?.click()}>Import backup</button>
@@ -604,6 +608,7 @@ export function App() {
                   <span>{prettifyModelName(model.name)}</span>
                   {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
                 </div>
+                {demoActive && <p className="demo-hint">Use <b>Design review</b> to improve the charts, then <b>Smart arrange</b> to bring it together.</p>}
               </div>
               <label className="period-control">
                 <span>Period</span>
@@ -746,7 +751,7 @@ export function App() {
   );
 }
 
-function Entry({ model, onSuggest, onScratch, onDemo }: any) {
+function Entry({ model, onSuggest, onScratch }: any) {
   return (
     <div className="entry">
       <div className="eyebrow">Your analytics studio</div>
@@ -765,9 +770,6 @@ function Entry({ model, onSuggest, onScratch, onDemo }: any) {
           <p>Make room for your own perspective. Add charts, notes, and a clear narrative.</p>
         </button>
       </div>
-      {onDemo && <button className="demo-link" onClick={onDemo}>
-        <span className="demo-mark" aria-hidden="true">↳</span><span>Try the design playground<small>A rough dashboard to explore Smart arrange and Design review.</small></span><span aria-hidden="true">→</span>
-      </button>}
     </div>
   );
 }
