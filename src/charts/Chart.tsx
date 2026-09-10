@@ -14,8 +14,8 @@ import type { ChartKind } from "../compiler/spec.ts";
  * covers the long tail immediately; any individual kind can later be replaced
  * with hand-built D3 primitives without the spec, compiler or canvas noticing.
  */
-export function Chart({ kind, columns, rows, format, secondaryFormat, onPick }: {
-  kind: ChartKind; columns: string[]; rows: unknown[][];
+export function Chart({ kind, columns, rows, format, secondaryFormat, labels = {}, onPick }: {
+  kind: ChartKind; columns: string[]; rows: unknown[][]; labels?: Record<string, string>;
   format?: import("../format/format.ts").FormatSpec;
   /** A combo chart's bar and line are two different metrics by fixed
    *  position, each potentially needing its own number style (spend as
@@ -52,7 +52,12 @@ export function Chart({ kind, columns, rows, format, secondaryFormat, onPick }: 
     const data = rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, coerce(r[i])])));
     try {
       const el = host.current;
-      el.replaceChildren(render(kind, columns, data, box, format, secondaryFormat));
+      const mount = (chart: Element) => {
+        const figure = chart.tagName.toLowerCase() === "figure" ? chart : document.createElement("figure");
+        if (figure !== chart) figure.appendChild(chart);
+        el.replaceChildren(figure);
+      };
+      mount(render(kind, columns, data, box, format, secondaryFormat, labels));
       // Plot stacks a legend ABOVE the svg, so a figure given height H is taller
       // than H and spills out of the tile. The legend's height is not knowable
       // before it exists, so measure once and redraw the plot that much shorter.
@@ -64,8 +69,8 @@ export function Chart({ kind, columns, rows, format, secondaryFormat, onPick }: 
         // them makes the correction wrong at every zoom except 100%.
         const spill = Math.round(fig.offsetHeight - box.h);
         if (spill > 1) {
-          el.replaceChildren(render(kind, columns, data,
-            { w: box.w, h: Math.max(60, box.h - spill) }, format, secondaryFormat));
+          mount(render(kind, columns, data,
+            { w: box.w, h: Math.max(60, box.h - spill) }, format, secondaryFormat, labels));
           attachPicker(el, dimColumn(columns, data), data, onPick);
         }
       }
@@ -75,7 +80,7 @@ export function Chart({ kind, columns, rows, format, secondaryFormat, onPick }: 
       msg.textContent = `Could not draw this as a ${kind}: ${e?.message ?? e}`;
       host.current.replaceChildren(msg);
     }
-  }, [kind, columns, rows, box.w, box.h, JSON.stringify(format), JSON.stringify(secondaryFormat), !!onPick]);
+  }, [kind, columns, rows, box.w, box.h, JSON.stringify(format), JSON.stringify(secondaryFormat), JSON.stringify(labels), !!onPick]);
 
   return <div ref={host} style={{ width: "100%", height: "100%" }} />;
 }
@@ -250,7 +255,7 @@ export function definedRows<T extends Record<string, unknown>>(rows: T[], key: s
 
 function render(kind: ChartKind, columns: string[], data: any[], box: { w: number; h: number },
                 fmt?: import("../format/format.ts").FormatSpec,
-                secondaryFmt?: import("../format/format.ts").FormatSpec) {
+                secondaryFmt?: import("../format/format.ts").FormatSpec, labels: Record<string, string> = {}) {
   const f = fmt ?? DEFAULT_FORMAT;
   const tick = makeFormatter(f);
   const secondaryTick = secondaryFmt ? makeFormatter(secondaryFmt) : tick;
@@ -275,7 +280,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
     x: { label: f.xTitle, axis: f.showX ? "bottom" : null, ...xScale },
     y: { label: f.yTitle, axis: f.showY ? "left" : null,
          grid: f.grid, nice: true, tickFormat: tick },
-    color: { range: palette },
+    color: { range: palette, tickFormat: (value: string) => labels[value] ?? value },
   };
   const legend = f.legend !== "hide";
 

@@ -26,41 +26,38 @@ export function MetricRegistry({ model, onUse }: {
 
   return (
     <div className="explore">
+      <div className="eyebrow">Your semantic layer</div>
       <h1>Metric Registry</h1>
-      <p className="lede">Every governed metric in the model. These are the only things
-        that can be charted — that constraint is the point.</p>
+      <p className="lede">A shared language for your data. Explore a metric, understand its meaning, and bring it onto the canvas.</p>
 
       <div className="ex-tools">
-        <input autoFocus className="txt" placeholder="Filter by name, description or synonym…"
+        <input autoFocus className="txt" aria-label="Filter metrics" placeholder="Find a metric…"
                value={q} onChange={(e) => setQ(e.target.value)} />
-        <div className="tabs">
-          <button className={"pill" + (table === null ? " on" : "")} onClick={() => setTable(null)}>
-            All {all.length}
-          </button>
-          {tables.map((t) => (
-            <button key={t} className={"pill" + (table === t ? " on" : "")} onClick={() => setTable(t)}>
-              {prettyTable(t)}
-            </button>
-          ))}
-        </div>
+        <select aria-label="Filter by topic" value={table ?? ""} onChange={(e) => setTable(e.target.value || null)}>
+          <option value="">All topics</option>
+          {tables.map((t) => <option key={t} value={t}>{prettyTable(t)}</option>)}
+        </select>
       </div>
 
-      <div className="ex-count">{shown.length} of {all.length}</div>
+      <div className="ex-count">{shown.length} {shown.length === 1 ? "metric" : "metrics"}{q || table ? ` of ${all.length}` : ""}</div>
       <div className="mlist">
         {shown.map((m) => (
           <div key={m.name} className="mrow">
             <div className="mrow-top">
               <b>{m.label}</b>
-              <code className="mono">{m.name}</code>
-              <span className="base mono">{m.baseTable}</span>
+
               <button className="use" onClick={() => onUse(m.name)}>Chart it →</button>
             </div>
             {m.description && <p>{m.description}</p>}
+            <div className="metric-topic">{prettyTable(m.baseTable)}</div>
+            <details className="metric-definition"><summary>View definition</summary>
+            <code className="metric-id">{m.name}</code>
             <pre className="expr">{m.expression}</pre>
             {m.filter && <div className="afilter mono">always: {m.filter}</div>}
             {m.synonyms.length > 0 && (
               <div className="syns">{m.synonyms.map((s) => <i key={s}>{s}</i>)}</div>
             )}
+            </details>
           </div>
         ))}
         {shown.length === 0 && <div className="empty">Nothing matches “{q}”.</div>}

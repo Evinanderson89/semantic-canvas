@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { z } from "zod";
 import YAML from "yaml";
 import type { FilterSpec } from "../compiler/spec.ts";
 import { fieldReachable, type Model } from "../semantic/model.ts";
@@ -12,15 +13,15 @@ export interface Principal {
 export interface RlsConfig { policies: RlsPolicy[]; principals: Record<string, Principal> }
 
 export async function loadRls(path: string): Promise<RlsConfig> {
-  try {
-    const d: any = YAML.parse(await readFile(path, "utf8"));
-    const principals: Record<string, Principal> = {};
-    for (const [id, p] of Object.entries<any>(d.principals ?? {}))
-      principals[id] = { id, name: p.name ?? id, ...p };
-    return { policies: d.policies ?? [], principals };
-  } catch {
-    return { policies: [], principals: {} };
-  }
+  const claim = z.union([z.string(), z.number().finite(), z.boolean(), z.null()]);
+  const data = z.object({
+    policies: z.array(z.object({ id: z.string().min(1), table: z.string().min(1), column: z.string().min(1),
+      claim: z.string().min(1), description: z.string().optional() })),
+    principals: z.record(z.string(), z.record(z.string(), z.union([claim, z.array(claim)]))).default({}),
+  }).parse(YAML.parse(await readFile(path, "utf8")));
+  const principals: Record<string, Principal> = {};
+  for (const [id, p] of Object.entries(data.principals)) principals[id] = { ...p, id, name: String(p.name ?? id) };
+  return { policies: data.policies, principals };
 }
 
 export interface Scope {
@@ -50,9 +51,7 @@ export function scopeFor(
     // A principal with "*" is unrestricted for this policy.
     if (allowed === "*") continue;
 
-    const reachable = fieldReachable(model, baseTable, field) ||
-                      fieldReachable(model, baseTable, p.column) ||
-                      baseTable === p.table;
+    const reachable = fieldReachable(model, baseTable, field);
     if (!reachable) {
       // The tile may still expose governed data through a pre-aggregate. Say so
       // rather than pretending the policy applied.

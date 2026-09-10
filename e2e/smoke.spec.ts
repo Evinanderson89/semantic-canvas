@@ -1,3 +1,4 @@
+import { openStarter } from "./library-helpers.ts";
 import { expect, test, type Page } from "@playwright/test";
 
 /**
@@ -23,7 +24,7 @@ function watchConsole(page: Page) {
 async function openDashboard(page: Page) {
   await page.goto("/");
   await page.getByRole("button", { name: "Home" }).waitFor();
-  await page.locator(".nav.cat").first().click();
+  await openStarter(page, "SaaS overview");
   await page.locator(".tile").first().waitFor();
   // Charts draw asynchronously after their query resolves.
   await expect
@@ -114,7 +115,7 @@ test("a new element lands where the user can see it", async ({ page }) => {
 
 test("locking hides edit chrome but keeps the data", async ({ page }) => {
   await openDashboard(page);
-  await page.getByRole("button", { name: /Editing/ }).click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await expect(page.locator(".editbar select")).toHaveCount(0);
   await expect(page.locator(".tile").first()).toBeVisible();
   await expect(page.locator(".tile figure").first()).toBeVisible();

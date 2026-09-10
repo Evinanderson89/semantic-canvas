@@ -394,6 +394,7 @@ metrics:
     synonyms: [impressions, ad views]
 
   cost_per_click:
+    direction: lower
     label: Cost per click (USD)
     base_table: fct_marketing_spend
     expression: SUM(fct_marketing_spend.spend_usd) / NULLIF(SUM(fct_marketing_spend.clicks), 0)
@@ -409,10 +410,13 @@ metrics:
 
   # ------------------------------------------------------ unit economics --
   # These live on fct_saas_monthly because they span revenue and acquisition.
-  # Grouped by month they are exact; ungrouped they are a blended figure over
-  # every month in scope.
+  # Snapshot and retention expressions require their native month grain.
+  # A different grain needs a separately defined metric or a native semantic engine.
 
   starting_mrr:
+    direction: higher
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: Starting MRR (USD)
     base_table: fct_saas_monthly
     expression: SUM(fct_saas_monthly.starting_mrr_usd)
@@ -420,6 +424,10 @@ metrics:
     synonyms: [opening mrr, bom mrr]
 
   ending_mrr:
+    direction: higher
+    importance: 100
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: Ending MRR (USD)
     base_table: fct_saas_monthly
     expression: SUM(fct_saas_monthly.ending_mrr_usd)
@@ -427,6 +435,10 @@ metrics:
     synonyms: [closing mrr, eom mrr]
 
   nrr:
+    direction: higher
+    importance: 90
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: Net revenue retention
     base_table: fct_saas_monthly
     expression: "(SUM(fct_saas_monthly.starting_mrr_usd) + SUM(fct_saas_monthly.expansion_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0)"
@@ -434,6 +446,9 @@ metrics:
     synonyms: [net revenue retention, ndr, net dollar retention]
 
   grr:
+    direction: higher
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: Gross revenue retention
     base_table: fct_saas_monthly
     expression: "(SUM(fct_saas_monthly.starting_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0)"
@@ -441,6 +456,9 @@ metrics:
     synonyms: [gross revenue retention, gross retention]
 
   logo_churn_rate:
+    direction: lower
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: Logo churn rate
     base_table: fct_saas_monthly
     expression: SUM(fct_saas_monthly.churned_customers) * 1.0 / NULLIF(SUM(fct_saas_monthly.customers_start), 0)
@@ -448,6 +466,9 @@ metrics:
     synonyms: [customer churn rate, logo churn, cancellation rate]
 
   revenue_churn_rate:
+    direction: lower
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: Revenue churn rate
     base_table: fct_saas_monthly
     expression: SUM(fct_saas_monthly.churned_mrr_usd) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0)
@@ -455,6 +476,8 @@ metrics:
     synonyms: [mrr churn rate, dollar churn]
 
   cac:
+    direction: lower
+    importance: 80
     label: CAC (USD)
     base_table: fct_saas_monthly
     expression: SUM(fct_saas_monthly.marketing_spend_usd) / NULLIF(SUM(fct_saas_monthly.new_customers), 0)
@@ -462,6 +485,8 @@ metrics:
     synonyms: [customer acquisition cost, acquisition cost]
 
   arpa:
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: ARPA (USD)
     base_table: fct_saas_monthly
     expression: SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0)
@@ -469,6 +494,8 @@ metrics:
     synonyms: [average revenue per account, arpu monthly]
 
   ltv:
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: LTV (USD)
     base_table: fct_saas_monthly
     expression: "(SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0)) / NULLIF(SUM(fct_saas_monthly.churned_customers) * 1.0 / NULLIF(SUM(fct_saas_monthly.customers_start), 0), 0)"
@@ -476,6 +503,8 @@ metrics:
     synonyms: [lifetime value, customer lifetime value]
 
   ltv_cac_ratio:
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: LTV / CAC
     base_table: fct_saas_monthly
     expression: "((SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0)) / NULLIF(SUM(fct_saas_monthly.churned_customers) * 1.0 / NULLIF(SUM(fct_saas_monthly.customers_start), 0), 0)) / NULLIF(SUM(fct_saas_monthly.marketing_spend_usd) / NULLIF(SUM(fct_saas_monthly.new_customers), 0), 0)"
@@ -483,6 +512,9 @@ metrics:
     synonyms: [ltv to cac, ltv cac]
 
   cac_payback_months:
+    direction: lower
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: CAC payback (months)
     base_table: fct_saas_monthly
     expression: "(SUM(fct_saas_monthly.marketing_spend_usd) / NULLIF(SUM(fct_saas_monthly.new_customers), 0)) / NULLIF(SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0), 0)"
@@ -490,6 +522,8 @@ metrics:
     synonyms: [payback period, cac payback]
 
   mrr_growth_rate:
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: MRR growth rate
     base_table: fct_saas_monthly
     expression: (SUM(fct_saas_monthly.ending_mrr_usd) - SUM(fct_saas_monthly.starting_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0)
@@ -497,6 +531,8 @@ metrics:
     synonyms: [growth rate, mrr growth]
 
   nrr_annualized:
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: NRR (annualized)
     base_table: fct_saas_monthly
     expression: "POWER((SUM(fct_saas_monthly.starting_mrr_usd) + SUM(fct_saas_monthly.expansion_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0), 12)"
@@ -504,6 +540,8 @@ metrics:
     synonyms: [annual nrr, net dollar retention annual, ndr]
 
   grr_annualized:
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: GRR (annualized)
     base_table: fct_saas_monthly
     expression: "POWER((SUM(fct_saas_monthly.starting_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0), 12)"
@@ -511,6 +549,8 @@ metrics:
     synonyms: [annual grr, gross retention annual]
 
   logo_churn_annualized:
+    time_grains: [month]
+    time_dimension: fct_saas_monthly.month
     label: Logo churn (annualized)
     base_table: fct_saas_monthly
     expression: "1 - POWER(1 - SUM(fct_saas_monthly.churned_customers) * 1.0 / NULLIF(SUM(fct_saas_monthly.customers_start), 0), 12)"

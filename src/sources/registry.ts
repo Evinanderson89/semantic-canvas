@@ -97,7 +97,7 @@ export async function loadSources(path: string): Promise<{
   } catch (e: any) {
     // Surfaced now rather than left to the generic "no usable source" below --
     // a first run against a typo'd YAML file should say so, not just fail.
-    console.error(`could not read/parse ${path}: ${e?.message ?? e}`);
+    console.error(JSON.stringify({ event: "sources.config_unavailable", level: "error", errorType: e?.name ?? "Error" }));
     cfg = {};
   }
   const list: SourceConfig[] = cfg.sources ?? [];

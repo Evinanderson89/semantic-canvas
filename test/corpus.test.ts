@@ -66,8 +66,10 @@ describe.skipIf(!available)("every metric in the real model compiles and runs", 
   });
 
   it("each metric, on its own", async () => {
-    for (const name of Object.keys(model.metrics))
-      await mustRun(tile({ metrics: [name] }), `metric ${name}`);
+    for (const [name, m] of Object.entries(model.metrics)) {
+      if (m.timeGrains) expect(validateTile(model, tile({ metrics: [name] }))).not.toEqual([]);
+      await mustRun(tile({ metrics: [name], dimensions: m.timeGrains ? [`${m.timeGrains[0]}:${m.timeDimension}`] : [] }), `metric ${name}`);
+    }
   }, 120_000);
 
   it("each metric, broken down by its table's time column", async () => {
@@ -145,78 +147,21 @@ describe.skipIf(!available)("demoDashboard (the checked-in Beautify/Smart-Arrang
   });
 });
 
-describe.skipIf(!available)("coarsening web_sessions to week drops the partial edge buckets", () => {
-  // Directly what a user saw after clicking d2's own "Switch to week"
-  // suggestion: the real data starts 2024-09-01 and ends 2026-08-31,
-  // neither a Monday, so date_trunc('week', ...) buckets the very first
-  // and last real rows with a week that's mostly outside the data --
-  // Aug 26-Sep 1 has only Sep-1's rows, Aug 31-Sep 6 has only Aug-31's.
-  // Verified against the actual warehouse, not a synthetic fixture, so a
-  // change to the sample data's date range would fail this instead of
-  // quietly making the regression untestable.
-  it("excludes exactly the two partial weeks, and no others", async () => {
+describe.skipIf(!available)("observed periods remain visible without completeness metadata", () => {
+  it("keeps both edge weeks and preserves their actual counts", async () => {
     const t = tile({ metrics: ["web_sessions"], dimensions: ["week:fct_web_sessions.session_date"] });
-    const sql = compileTile(model, conn, t);
-    const r = await conn.execute(sql, 2000);
-    const { rows, partial } = splitPartialPeriods(r);
-    const dateIdx = r.columns.findIndex((c) => c.includes("session_date"));
-    const dates = rows.map((row) => String(row[dateIdx]));
-    expect(dates).not.toContain("2024-08-26");
-    expect(dates).not.toContain("2026-08-31");
-    // Exact count, not just "some were dropped" -- 106 real weeks minus the
-    // 2 partial ones. A loose "at least one excluded" check would still
-    // pass if the fix over- or under-trimmed by one week at either edge.
-    expect(rows.length).toBe(104);
-    expect(partial).toEqual({ start: true, end: true });
-    // Every remaining week should be a real, full one -- none of them
-    // should read anywhere near the single-day totals (365, 602) the
-    // partial buckets had.
-    const valIdx = r.columns.indexOf("web_sessions");
-    const vals = rows.map((row) => Number(row[valIdx]));
-    expect(Math.min(...vals)).toBeGreaterThan(1000);
+    const result = splitPartialPeriods(await conn.execute(compileTile(model, conn, t), 2000));
+    expect(result.rows).toHaveLength(106);
+    expect(result.rows[0]).toEqual(["2024-08-26", 365]);
+    expect(result.rows.at(-1)).toEqual(["2026-08-31", 602]);
+    expect(result.rows.find((r) => r[0] === "2024-09-02")).toEqual(["2024-09-02", 2399]);
   });
-
-  it("keeps every full week that WAS already reading correctly", async () => {
-    // The fix should be a pure trim, not a resize -- a week untouched by
-    // the boundary problem must come back with the exact same total it
-    // always had.
-    const t = tile({ metrics: ["web_sessions"], dimensions: ["week:fct_web_sessions.session_date"] });
-    const sql = compileTile(model, conn, t);
-    const r = await conn.execute(sql, 2000);
-    const { rows } = splitPartialPeriods(r);
-    const dateIdx = r.columns.findIndex((c) => c.includes("session_date"));
-    const valIdx = r.columns.indexOf("web_sessions");
-    const row = rows.find((row) => String(row[dateIdx]) === "2024-09-02");
-    expect(Number(row![valIdx])).toBe(2399);
-  });
-
-  it("reports no trimming at all for a grain that already lines up cleanly", async () => {
-    // month grain here happens to still have partial edges (same reasoning,
-    // different period length) -- day grain is the true negative case,
-    // since compileTile() never wraps it at all.
-    const t = tile({ metrics: ["web_sessions"], dimensions: ["day:fct_web_sessions.session_date"] });
-    const sql = compileTile(model, conn, t);
-    const r = await conn.execute(sql, 2000);
-    expect(r.columns).not.toContain("__partial_start");
-    expect(r.columns).not.toContain("__partial_end");
-    expect(splitPartialPeriods(r).partial).toEqual({ start: false, end: false });
-  });
-
-  it("a data set that's entirely inside one partial period returns zero rows, correctly flagged", async () => {
-    // A 5-day window comfortably inside the MIDDLE of September (not
-    // touching either edge of the month) -- at month grain this is
-    // entirely one bucket whose natural span (the whole of September)
-    // extends both before AND after this narrow real range, so both
-    // flags should be true, and there's no complete month left to show.
-    const t = tile({
-      metrics: ["web_sessions"], dimensions: ["month:fct_web_sessions.session_date"],
-      where: [{ id: "w", field: "fct_web_sessions.session_date", source: "dimension", mode: "range",
-                min: "2024-09-10", max: "2024-09-15" }],
-    });
-    const sql = compileTile(model, conn, t);
-    const r = await conn.execute(sql, 10);
-    const { rows, partial } = splitPartialPeriods(r);
-    expect(rows).toEqual([]);
-    expect(partial).toEqual({ start: true, end: true });
+  it("keeps a filtered window within one month instead of discarding all its rows", async () => {
+    const t = tile({ metrics: ["web_sessions"], dimensions: ["month:fct_web_sessions.session_date"],
+      where: [{ id: "w", field: "fct_web_sessions.session_date", source: "dimension", mode: "range", min: "2024-09-10", max: "2024-09-15" }] });
+    const result = splitPartialPeriods(await conn.execute(compileTile(model, conn, t), 10));
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0][0]).toBe("2024-09-01");
+    expect(Number(result.rows[0][1])).toBeGreaterThan(0);
   });
 });

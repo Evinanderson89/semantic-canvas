@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as d3 from "d3";
+import { kpiSummary } from "./kpiSummary.ts";
 import { DEFAULT_SPARK, type SparkOptions } from "../compiler/spec.ts";
 
 type Point = { x: unknown; y: number };
@@ -11,8 +12,10 @@ type Point = { x: unknown; y: number };
  * wants a zero baseline, a retention ratio wants a tight domain or it reads as
  * a flat line.
  */
-export function Kpi({ label, series, options, onOptions, format }: {
-  label: string; series: Point[];
+export function Kpi({ label, series, options, onOptions, format, grain, previous, comparisonLabel, direction = "neutral", actions }: {
+  actions?: ReactNode;
+  direction?: "higher" | "lower" | "neutral";
+  label: string; series: Point[]; grain?: string | null; previous?: number | null; comparisonLabel?: string;
   options?: Partial<SparkOptions>;
   onOptions?: (o: Partial<SparkOptions>) => void;
   format?: (n: number) => string;
@@ -23,15 +26,13 @@ export function Kpi({ label, series, options, onOptions, format }: {
   const [open, setOpen] = useState(false);
 
   const clean = series.filter((p) => Number.isFinite(p.y));
-  const latest = clean.at(-1)?.y ?? null;
-  const basis = o.compare === "first" ? clean[0]?.y : clean.at(-2)?.y;
-  const delta = latest != null && basis != null && basis !== 0
-    ? (latest - basis) / Math.abs(basis) : null;
+  const { latest, delta } = kpiSummary(series, o.compare, grain, previous);
   const up = delta != null && delta >= 0;
+  const sentiment = direction === "neutral" || delta == null || delta === 0 ? "flat" : up === (direction === "higher") ? "pos" : "neg";
 
   const stroke = o.color === "accent" ? "var(--accent)"
     : o.color === "neutral" ? "var(--ink-3)"
-    : up ? "var(--pos)" : "var(--neg)";
+    : sentiment === "flat" ? "var(--ink-3)" : sentiment === "pos" ? "var(--pos)" : "var(--neg)";
 
   useEffect(() => {
     const svg = d3.select(ref.current);
@@ -84,7 +85,7 @@ export function Kpi({ label, series, options, onOptions, format }: {
       svg.append("circle").attr("cx", x(hover.i)).attr("cy", y(clean[hover.i].y))
         .attr("r", 3).attr("fill", "var(--surface)").attr("stroke", stroke).attr("stroke-width", 1.6);
     }
-  }, [JSON.stringify(clean), stroke, o.shape, o.scale, o.showMinMax, hover?.i]);
+  }, [JSON.stringify(clean), stroke, o.shape, o.scale, o.showMinMax, hover?.i, direction]);
 
   const fmt = format ?? ((n: number) =>
     Math.abs(n) >= 1000 ? d3.format(".3~s")(n).replace("G", "B") : d3.format(",.3~f")(n));
@@ -93,7 +94,7 @@ export function Kpi({ label, series, options, onOptions, format }: {
   return (
     <div className="kpi">
       <div className="kpi-head">
-        <span className="kpi-label">{label}</span>
+        <span className="kpi-label" title={label}>{label}</span>
         {onOptions && (
           <button className="gear" title="Sparkline options"
                   onClick={() => setOpen((v) => !v)}>
@@ -104,14 +105,16 @@ export function Kpi({ label, series, options, onOptions, format }: {
             </svg>
           </button>
         )}
+        {actions}
       </div>
 
+      <div className="kpi-asof">{grain === "month" ? "Period " : "As of "}{grain === "month" && series.at(-1)?.x ? new Date(String(series.at(-1)?.x).slice(0, 10) + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" }) : period(series.at(-1)?.x) || "—"}</div>
       <div className="kpi-value">{latest == null ? "—" : fmt(latest)}</div>
       <div className="kpi-delta">
         {delta == null ? <span className="flat">no comparison</span> : (
           <>
-            <span className={up ? "pos" : "neg"}>{up ? "+" : "−"}{d3.format(".1%")(Math.abs(delta))}</span>
-            <span className="vs">vs {o.compare === "first" ? "first period" : "prior period"}</span>
+            <span className={sentiment}>{up ? "+" : "−"}{d3.format(".1%")(Math.abs(delta))}</span>
+            <span className="vs">vs {o.compare === "first" ? "first shown period" : (comparisonLabel ?? "prior period")}</span>
           </>
         )}
       </div>
@@ -133,9 +136,8 @@ export function Kpi({ label, series, options, onOptions, format }: {
       </div>
 
       {o.showRange && clean.length > 1 && (
-        <div className="spark-range">
+        <div className="spark-range" title={`${clean.length} points. Period completeness is not declared by the source.`}>
           <span>{period(clean[0].x)}</span>
-          <span>{clean.length} pts</span>
           <span>{period(clean.at(-1)!.x)}</span>
         </div>
       )}

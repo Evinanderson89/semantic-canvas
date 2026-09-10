@@ -12,11 +12,13 @@ type Draft = Omit<TileSpec, "id" | "layout">;
  * because adding things is the most frequent action while composing, and it
  * should be reachable without moving your eye off the work.
  */
-export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker }: {
+export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker, onFilter, onLibrary, onSaveView, canSaveView }: {
   model: Model;
   onInsert: (d: Draft, size?: { w: number; h: number }) => void;
   onInsertMany: (d: Draft[], layout: "row") => void;
   onOpenPicker: () => void;
+  onFilter: () => void;
+  onLibrary: () => void; onSaveView: () => void; canSaveView: boolean;
 }) {
   const [open, setOpen] = useState<null | "views" | "elements">(null);
   const byTable = metricsByTable(model);
@@ -26,8 +28,10 @@ export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker }: {
     <div className="insert">
       {open === "views" && (
         <div className="pop">
-          <h5>Pre-composed views</h5>
-          <p className="pop-hint">Drops a whole block, laid out and ready.</p>
+          <h5>CoreCanvas Library</h5>
+          <button className="pop-item" onClick={() => { setOpen(null); onLibrary(); }}><b>Browse saved views</b><small>Add a chart or section you’ve already composed.</small></button>
+          <button className="pop-item" disabled={!canSaveView} onClick={() => { setOpen(null); onSaveView(); }}><b>Save a view</b><small>Keep selected tiles or the current tab for reuse.</small></button>
+          <h5 className="view-starters-heading">Quick starters</h5>
           {tables.slice(0, 6).map(([name, ms]) => (
             <button key={name} className="pop-item" onClick={() => {
               onInsertMany(ms.slice(0, 4).map((m) => ({
@@ -79,6 +83,7 @@ export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker }: {
                 onClick={() => setOpen(open === "views" ? null : "views")}>
           Views
         </button>
+        <button className="ins" onClick={() => { setOpen(null); onFilter(); }}>Filter</button>
         <button className={"ins" + (open === "elements" ? " on" : "")}
                 onClick={() => setOpen(open === "elements" ? null : "elements")}>
           Text

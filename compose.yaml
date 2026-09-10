@@ -1,0 +1,18 @@
+name: semantic-canvas
+services:
+  canvas:
+    build: .
+    init: true
+    restart: unless-stopped
+    ports: ["127.0.0.1:5173:5174"]
+    volumes: ["workspace:/data"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  workspace:

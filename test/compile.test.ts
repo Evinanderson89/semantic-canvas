@@ -72,7 +72,7 @@ describe("compileTile", () => {
     const sql = compileTile(model, conn,
       tile({ metrics: ["revenue", "live_revenue"], dimensions: ["month:sold_on"] }) as TileSpec);
     expect(sql).toContain("WITH g0 AS");
-    expect(sql).toContain("FULL OUTER JOIN g1 USING (\"sold_on_month\")");
+    expect(sql).toContain("FULL OUTER JOIN g1 ON g0.\"sold_on_month\" IS NOT DISTINCT FROM g1.\"sold_on_month\"");
   });
 
   it("cross joins the groups when there is no dimension to join on", () => {
@@ -86,81 +86,12 @@ describe("compileTile", () => {
     expect(() => compileTile(model, conn, tile({ metrics: ["nope"] }) as TileSpec)).toThrow();
   });
 
-  describe("partial edge periods", () => {
-    // Regression: a metric's real date range rarely lines up with a
-    // week/month/quarter/year boundary. date_trunc still buckets the first
-    // real row with whatever period it falls in even when most of that
-    // period predates any data, so the bucket's total reads as a collapse
-    // next to a full neighbor -- a chart that looks like it drops to zero
-    // at both ends. These check the SQL SHAPE (a stub connector, no real
-    // execution); corpus.test.ts checks the actual ROWS against the real
-    // warehouse.
-    it("wraps a week-grain query with a bounds check", () => {
-      const sql = compileTile(model, conn, tile({ dimensions: ["week:sold_on"] }) as TileSpec);
-      expect(sql).toContain("__bounds");
-      expect(sql).toContain("__periods");
-      expect(sql).toContain(`"sold_on_week" >= __bounds.lo`);
-      // week = +7 days, then -1 day, for that bucket's own last day.
-      expect(sql).toContain("INTERVAL '7 day'");
-      expect(sql).toContain("INTERVAL '-1 day'");
-    });
-
-    it("expresses quarter as 3 months -- there's no native quarter interval", () => {
-      const sql = compileTile(model, conn, tile({ dimensions: ["quarter:sold_on"] }) as TileSpec);
-      expect(sql).toContain("INTERVAL '3 month'");
-    });
-
-    it("does not wrap a day-grain query -- a day is already one full unit", () => {
-      const sql = compileTile(model, conn, tile({ dimensions: ["day:sold_on"] }) as TileSpec);
-      expect(sql).not.toContain("__bounds");
-    });
-
-    it("does not wrap a tile with no time dimension at all", () => {
-      const sql = compileTile(model, conn, tile({ dimensions: ["dim_users.country"] }) as TileSpec);
-      expect(sql).not.toContain("__bounds");
-    });
-
-    it("still composes with period-over-period comparison", () => {
-      // The bounds wrapper must apply BEFORE the LAG-based comparison, not
-      // after -- comparing against an already-partial neighbor would report
-      // a real-looking but meaningless swing. Asserted here as "produces
-      // valid-shaped SQL referencing both", not the exact string -- the
-      // ORDER matters more than the surrounding syntax.
-      const sql = compileTile(model, conn,
-        tile({ dimensions: ["month:sold_on"], compare: "prior" }) as TileSpec);
-      expect(sql).toContain("__bounds");
-      const boundsAt = sql.indexOf("__bounds");
-      const lagAt = sql.indexOf("LAG(");
-      expect(boundsAt).toBeGreaterThan(-1);
-      expect(lagAt).toBeGreaterThan(boundsAt);
-    });
-
-    it("reports a trimmed edge as columns, rather than trimming it silently", () => {
-      const sql = compileTile(model, conn, tile({ dimensions: ["week:sold_on"] }) as TileSpec);
-      expect(sql).toContain(`AS "__partial_start"`);
-      expect(sql).toContain(`AS "__partial_end"`);
-      // A second, independent bounds query -- not the same __bounds used to
-      // filter -- specifically so the flags survive even when filtering
-      // leaves zero rows for the first one to attach to.
-      expect(sql).toContain("__report_bounds");
-      expect(sql).toContain("LEFT JOIN");
-    });
-
-    it("still reports the flags when combined with period-over-period comparison", () => {
-      // The flag-reporting wrap is applied LAST in compileTile(), so it's
-      // always the OUTERMOST query -- confirmed here by the very first CTE
-      // name in the string being __report_bounds, not __bounds (the
-      // earlier, filtering one). A nested `WITH` puts its CTEs textually
-      // BEFORE their own usage, so index position alone can't distinguish
-      // "applied after" from "applied before" -- nesting depth (outermost
-      // = applied last) is what actually matters here.
-      const sql = compileTile(model, conn,
-        tile({ dimensions: ["month:sold_on"], compare: "prior" }) as TileSpec);
-      expect(sql.trim().startsWith("WITH __report_bounds")).toBe(true);
-      expect(sql).toContain("LAG(");
-      expect(sql).toContain(`AS "__partial_start"`);
-    });
+  it("does not infer completeness from the first and last observed events", () => {
+    const sql = compileTile(model, conn, tile({ dimensions: ["month:sold_on"] }));
+    expect(sql).not.toContain("__bounds");
+    expect(sql).not.toContain("MIN(fct_sales");
   });
+
 });
 
 describe("splitPartialPeriods", () => {
@@ -249,9 +180,9 @@ describe("buildPredicate", () => {
     expect(p!.having).toBe(false);
   });
 
-  it("ignores a field that is not in the model", () => {
-    expect(buildPredicate(model, conn, "fct_sales",
-      f({ field: "dim_users.ssn", values: ["x"] }))).toBeNull();
+  it("rejects a field that is not in the model", () => {
+    expect(() => buildPredicate(model, conn, "fct_sales",
+      f({ field: "dim_users.ssn", values: ["x"] }))).toThrow(/unknown or unreachable/);
   });
 });
 

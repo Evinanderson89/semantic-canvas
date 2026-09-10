@@ -1,3 +1,5 @@
+import { useSession } from "./Session.tsx";
+import { WorkspaceSetup } from "./WorkspaceSetup.tsx";
 import { useEffect, useState, type FormEvent } from "react";
 
 export interface SourceInfo {
@@ -8,19 +10,13 @@ export interface SourceInfo {
 export interface RlsPolicy { id: string; field: string; claim: string }
 export interface Principal { id: string; name: string }
 
-/**
- * Connections is where a data engineer looks to answer "what is this thing
- * plugged into, and as whom." It reads the same registry the server booted
- * from -- nothing here is configurable in-browser, because credentials
- * belong in .env, read once at boot, not passed through a form and held in
- * client state.
- */
 type FormMode = { kind: "add" } | { kind: "edit"; id: string } | null;
 
 export function Connections({ sources, activeId, onSelect, onRefresh, principals, policies }: {
   sources: SourceInfo[]; activeId: string; onSelect: (id: string) => void;
   onRefresh: () => void; principals: Principal[]; policies: RlsPolicy[];
 }) {
+  const { canAdmin } = useSession();
   const [form, setForm] = useState<FormMode>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
@@ -45,12 +41,8 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
   return (
     <div className="explore">
       <h1>Connections</h1>
-      <p className="lede">
-        Every data source configured in <code className="mono">sources.yaml</code>. A source
-        pairs a semantic adapter (what the model is written in) with a connector (where the
-        SQL runs); both load independently at boot, so one warehouse being unreachable never
-        takes the others down.
-      </p>
+      <p className="lede">Connect your semantic layer, check your workspace, and bring your team’s metrics together.</p>
+      {canAdmin && <WorkspaceSetup refreshKey={sources} />}
 
       <div className="ex-head-row">
         <h4 className="ex-h" style={{ margin: 0 }}>Sources</h4>
@@ -70,7 +62,7 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
                 <button className="use" onClick={() => onSelect(s.id)}>Use this source →</button>
               )}
               {s.status === "error" && <span className="active-badge err">Unavailable</span>}
-              {form === null && confirmRemove !== s.id && (
+              {canAdmin && form === null && confirmRemove !== s.id && (
                 <>
                   <button className="link conn-action"
                           onClick={() => setForm({ kind: "edit", id: s.id })}>Edit</button>
@@ -104,6 +96,7 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
         {sources.length === 0 && <div className="empty">No sources configured.</div>}
       </div>
 
+      {canAdmin && <>
       <div className="ex-head-row">
         <h4 className="ex-h" style={{ margin: 0 }}>
           {form?.kind === "edit" ? "Edit source" : "Add a source"}
@@ -117,24 +110,13 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
           onSaved={() => { setForm(null); onRefresh(); }}
         />
       ) : (
-        <p className="tbl-body-p">
-          Connects live, right here -- the server test-connects with what you enter before saving
-          anything. On success, credentials are written to <code className="mono">.env</code> (never
-          to <code className="mono">sources.yaml</code>, which only ever gets a{" "}
-          <code className="mono">{"${VAR}"}</code> reference) and the source is available
-          immediately, with no restart. Editing works the same way -- leave a credential field
-          blank to keep what's already there.
-        </p>
+        <p className="tbl-body-p">Connect your warehouse with a read-only account. We test each connection before saving it. Leave saved credentials blank when editing to keep them.</p>
       )}
 
       <h4 className="ex-h">AI agent</h4>
-      <p className="tbl-body-p">
-        The embedded chat panel on the canvas -- not the MCP port, which needs no key of its own.
-        Tested before it saves, the same way a source is: the key is checked against Anthropic
-        before it's written to <code className="mono">.env</code> (never to{" "}
-        <code className="mono">sources.yaml</code>).
-      </p>
+      <p className="tbl-body-p">Enable story review, explanations, and reference imports with an Anthropic API key. Credentials stay on your server.</p>
       <AiAgentSection />
+      </>}
 
       <h4 className="ex-h">Row-level security</h4>
       <p className="tbl-body-p">
@@ -437,6 +419,17 @@ function SourceForm({ editId, onCancel, onSaved }: {
                    : "~/path/to/semantic_model.yaml"}
                  onChange={(e) => set("model", e.target.value)} />
         </label>
+
+        {form.adapter !== "dbt" && <label className="ctl span2"><span>Or upload your semantic model</span><input type="file" accept=".yaml,.yml" disabled={busy} onChange={async e => {
+          const file = e.target.files?.[0]; e.target.value = ""; if (!file) return;
+          setBusy(true); setError(null);
+          try {
+            if (file.size > 5 * 1024 * 1024) throw new Error("Semantic model exceeds 5 MB");
+            const r = await fetch("/api/setup/model", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: await file.text(), adapter: form.adapter }) });
+            const d = await r.json(); if (!r.ok) throw new Error(d.error ?? "Upload failed"); set("model", d.path);
+          } catch (error: any) { setError(error.message); } finally { setBusy(false); }
+        }} /><small>The model stays on your server. The connection test validates it before the source is saved.</small></label>}
+        {form.adapter === "dbt" && <p className="span2">Mount your dbt target folder on the server, including manifest.json and semantic_manifest.json.</p>}
 
         {form.connectorType === "duckdb" ? (
           <>

@@ -1,0 +1,27 @@
+name: Bug report
+description: Report incorrect results or unexpected editor behavior.
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps and expected behavior
+      description: Include the metric, reporting grain, filters and source adapter when relevant. Use a minimal anonymized fixture.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Actual behavior
+      description: Screenshots, sanitized errors or reference query results help. Do not include credentials or private data.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system, browser and Node.js version

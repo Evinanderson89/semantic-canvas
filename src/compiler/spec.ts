@@ -32,10 +32,17 @@ export const DEFAULT_SPARK: SparkOptions = {
  * grid of charts into something with an argument, and they belong on the same
  * canvas with the same geometry rather than in a separate system.
  */
-export type TileKind = "metric" | "heading" | "text" | "divider" | "image";
+export type TileKind = "metric" | "heading" | "text" | "divider" | "image" | "filter";
 
 export interface TileSpec {
   id: string;
+  /** Omitted tiles belong to the first tab for backwards compatibility. */
+  tabId?: string;
+  filterId?: string;
+  /** Heading tile that owns this content. */
+  section?: string;
+  /** Automatic composition preserves this tile and its section. */
+  pinned?: boolean;
   kind?: TileKind;
   title?: string;
   /** Body copy for heading/text tiles. */
@@ -59,8 +66,8 @@ export interface TileSpec {
   chart?: ChartKind;
   /**
    * Period-over-period comparison. Requires a time dimension; the compiler
-   * wraps the aggregate in a CTE and LAGs it by one period ("prior") or by a
-   * full year's worth of periods ("yoy"), which is what "Month-over-Month
+   * matches the aggregate to the previous calendar period ("prior") or
+   * the same calendar date one year earlier ("yoy"), which is what "Month-over-Month
    * Revenue by Region" actually means.
    */
   compare?: "none" | "prior" | "yoy";
@@ -83,6 +90,8 @@ export interface DashboardSpec {
   title: string;
   description?: string;
   tiles: TileSpec[];
+  tabs?: { id: string; title: string }[];
+  filters?: DashboardFilter[];
   /**
    * Dashboard-wide filters, set by clicking a mark in any chart. Applied to
    * every tile that can actually reach the field -- a cross-filter on
@@ -90,6 +99,22 @@ export interface DashboardSpec {
    * than erroring or, worse, being ignored while looking applied.
    */
   crossFilters?: FilterSpec[];
+}
+
+export interface FilterValue {
+  values?: (string | number | boolean | null)[];
+  min?: number | string | null;
+  max?: number | string | null;
+}
+export interface DashboardFilter {
+  id: string;
+  label: string;
+  field: string;
+  control: "select" | "date" | "number";
+  scope: "tab" | "report";
+  tabId?: string;
+  bindings: { tileId: string; field: string }[];
+  defaultValue?: FilterValue;
 }
 
 /**
@@ -113,6 +138,8 @@ export interface FilterSpec {
   min?: number | string | null;
   max?: number | string | null;
   exclude?: boolean;
+  /** Half-open upper bound, used for inclusive calendar-day controls and drill buckets. */
+  maxExclusive?: boolean;
 }
 
 export interface ValidationIssue { tile: string; problem: string }

@@ -1,10 +1,22 @@
+import { ChartActivityProvider } from "./ChartActivity.tsx";
+import { ChartSettings, useChartPreferences } from "./ChartPreferences.tsx";
+import { LibraryBrowser, LibraryNavigation, SaveViewDialog, ViewPreviewDialog, useCoreLibrary } from "./CoreLibrary.tsx";
+import { StudioDialog } from "./StudioDialog.tsx";
+import { fitStarter } from "../library/fitStarter.ts";
+import { insertView } from "../library/views.ts";
+import { viewSaveSchema, type LibraryItem, type LibraryView } from "../library/model.ts";
+import { useSession } from "./Session.tsx";
+import { applyProposal } from "../canvas/proposals.ts";
+import { canvasSchema, dashboardSchema } from "../compiler/schema.ts";
+import { validateTile } from "../compiler/compile.ts";
 import React, { useCallback, useEffect, useState } from "react";
 import { Tile } from "./Tile.tsx";
 import { TileBoundary } from "./TileBoundary.tsx";
 import { Picker } from "./Picker.tsx";
-import { Sidebar, prettyTable } from "./Sidebar.tsx";
+import { Sidebar } from "./Sidebar.tsx";
 import { Canvas } from "../canvas/Canvas.tsx";
 import { EditBar } from "./EditBar.tsx";
+import { Popover } from "./Popover.tsx";
 import { DashboardBeautify } from "./DashboardBeautify.tsx";
 import { InsertMenu } from "./InsertMenu.tsx";
 import { Interview } from "./Interview.tsx";
@@ -17,35 +29,77 @@ import type { Brief } from "../suggest/match.ts";
 import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
 import { applyLayout } from "../canvas/layouts.ts";
-import { demoDashboard, demoDashboardAvailable } from "../suggest/demo.ts";
 import { downloadPng, slugForFilename } from "./export.ts";
-import { metricsByTable, prettifyModelName, type Model } from "../semantic/model.ts";
+import { prettifyModelName, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
+
+import { readResponse } from "./http.ts";
+import { documentSnapshot, fingerprint, withGrain, parseDrafts, documentGrain, type DocumentSnapshot, type Draft } from "./document.ts";
+import { MAX_DOCUMENT_BYTES } from "../compiler/schema.ts";
+import { currentTab, mergeTab, tabView, tabsOf } from "./tabs.ts";
+import { filtersForTile, validateDashboard } from "./filters.ts";
+import type { FilterValue } from "../compiler/spec.ts";
+
+import { DistributeDialog } from "./DistributeDialog.tsx";
+import { ReferenceImport } from "./ReferenceImport.tsx";
+import { TabStrip } from "./TabStrip.tsx";
+import { FilterControl, FilterDesigner } from "./FilterControls.tsx";
 
 const GRAINS = ["day", "week", "month", "quarter", "year"];
 
 export function App() {
+  const session = useSession();
+  const storage = session.mode === "team" ? sessionStorage : localStorage;
+  const draftStorageKey = session.user ? `sc:team:${session.user.id}:drafts` : "sc:drafts";
+  const sourceStorageKey = session.user ? `sc:team:${session.user.id}:source` : "sc:source";
+  const [bootError, setBootError] = useState("");
   const [model, setModel] = useState<Model | null>(null);
-  const [dash, setDash] = useState<DashboardSpec | null>(null);
-  const [table, setTable] = useState<string | null>(null);
+  const [book, setBook] = useState<DashboardSpec | null>(null);
+  const [activeTabId, setActiveTabId] = useState("main");
+  const [referenceImport, setReferenceImport] = useState(false);
+  const [distributing, setDistributing] = useState(false);
+  const [filterEditing, setFilterEditing] = useState<string | null>(null);
+  const [filterValues, setFilterValues] = useState<Record<string, FilterValue>>({});
+  const dash = React.useMemo(() => book ? tabView(book, activeTabId) : null, [book, activeTabId]);
+  const setDash = useCallback((update: React.SetStateAction<DashboardSpec | null>) => {
+    setBook(previous => {
+      const view = previous ? tabView(previous, activeTabId) : null;
+      const next = typeof update === "function" ? update(view) : update;
+      return next ? mergeTab(previous, next, activeTabId) : null;
+    });
+  }, [activeTabId]);
+  const [templateId, setTemplateId] = useState<string | null>(null);
+  const [dashboardFolder, setDashboardFolder] = useState<string | null>(null);
   const [grain, setGrain] = useState("month");
   const [picking, setPicking] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    const compact = window.matchMedia("(max-width: 650px)");
+    const resize = () => setCollapsed(compact.matches);
+    resize(); compact.addEventListener("change", resize);
+    return () => compact.removeEventListener("change", resize);
+  }, []);
   const [refreshed, setRefreshed] = useState<Date | null>(null);
-  const [canvas, setCanvas] = useState<CanvasSpec>(DEFAULT_CANVAS);
+  const [canvas, setCanvas] = useState<CanvasSpec>({ ...DEFAULT_CANVAS, locked: !session.canEdit });
   const [zoom, setZoom] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [interview, setInterview] = useState(false);
-  const [view, setView] = useState<"home" | "registry" | "model" | "connections">("home");
+  const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library">("home");
+  const [libraryFolder, setLibraryFolder] = useState<string | null>(null);
+  const [viewPicker, setViewPicker] = useState(false), [saveViewOpen, setSaveViewOpen] = useState(false);
+  const [viewPreview, setViewPreview] = useState<LibraryItem | null>(null);
+  const [viewPickError, setViewPickError] = useState(""), [viewPickBusy, setViewPickBusy] = useState(false);
   const [principals, setPrincipals] = useState<Principal[]>([]);
   const [policies, setPolicies] = useState<RlsPolicy[]>([]);
   const [asWho, setAsWho] = useState<string>(() => {
     try { return localStorage.getItem("sc:principal") ?? ""; } catch { return ""; }
   });
+  const chartPreferences = useChartPreferences(session.user ? `team:${session.user.id}` : `local:${asWho}`);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [autoSourceId, setAutoSourceId] = useState<string | null>(null);
   const [sourceId, setSourceId] = useState<string>(() => {
-    try { return localStorage.getItem("sc:source") ?? ""; } catch { return ""; }
+    try { return storage.getItem(sourceStorageKey) ?? ""; } catch { return ""; }
   });
   const activeSourceId = sourceId || autoSourceId || "";
   const activeSource = sources.find((s) => s.id === activeSourceId) ?? null;
@@ -58,13 +112,17 @@ export function App() {
   React.useEffect(() => {
     const orig = window.fetch;
     window.fetch = (input: any, init: any = {}) => {
-      const headers = new Headers(init.headers ?? {});
+      const url = new URL(typeof input === "string" ? input : input.url ?? input.toString(), location.href);
+      if (url.origin !== location.origin || !url.pathname.startsWith("/api/")) return orig(input, init);
+      const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : {}));
       if (asWhoRef.current) headers.set("x-sc-principal", asWhoRef.current);
       if (sourceRef.current) headers.set("x-sc-source", sourceRef.current);
       return orig(input, { ...init, headers });
     };
     return () => { window.fetch = orig; };
   }, []);
+
+  const coreLibrary = useCoreLibrary(`${activeSourceId}:${asWho}`);
 
   React.useEffect(() => {
     fetch("/api/principals").then((r) => r.json())
@@ -74,7 +132,12 @@ export function App() {
 
   const refreshSources = useCallback(() =>
     fetch("/api/sources").then((r) => r.json())
-      .then((d) => { setSources(d.sources ?? []); setAutoSourceId(d.active ?? null); })
+      .then((d) => { setSources(d.sources ?? []); setAutoSourceId(d.active ?? null);
+        if (!sourceRef.current) sourceRef.current = d.active ?? "";
+        if (localStorage.getItem("sc:principal") === null && d.defaultPrincipal) {
+          asWhoRef.current = d.defaultPrincipal; setAsWho(d.defaultPrincipal);
+          localStorage.setItem("sc:principal", d.defaultPrincipal);
+        } })
       .catch(() => {}),
   []);
   React.useEffect(() => { refreshSources(); }, [refreshSources]);
@@ -82,14 +145,42 @@ export function App() {
   const [dashId, setDashId] = useState<string | null>(null);
   const [saved, setSaved] = useState<{ id: string; name: string; updated_at: string }[]>([]);
   const [openList, setOpenList] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  const [savedFingerprint, setSavedFingerprint] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [refreshToken, setRefreshToken] = useState<string>(crypto.randomUUID());
+  const dirty = session.canEdit && !!book && fingerprint(book, canvas) !== savedFingerprint;
+  const documentEpoch = React.useRef(0);
+  const draftKey = React.useRef<string>(crypto.randomUUID());
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const currentDocument = React.useRef({ dash: book, canvas, dashId, revision, dirty, source: activeSourceId, folderId: dashboardFolder });
+  currentDocument.current = { dash: book, canvas, dashId, revision, dirty, source: activeSourceId, folderId: dashboardFolder };
+  const readDrafts = useCallback(() => {
+    try { setDrafts(parseDrafts(storage.getItem(draftStorageKey))); } catch { setDrafts([]); }
+  }, []);
+  useEffect(readDrafts, [readDrafts]);
+  const stashDraft = useCallback(() => {
+    const d = currentDocument.current;
+    if (!session.canEdit || !d.dash || !d.dirty) return true;
+    try {
+      const all: Draft[] = parseDrafts(storage.getItem(draftStorageKey));
+      const next: Draft = { ...documentSnapshot(d.dash, d.canvas), key: draftKey.current,
+        id: d.dashId, revision: d.revision, source: d.source, folderId: d.folderId, updated: new Date().toISOString() };
+      storage.setItem(draftStorageKey, JSON.stringify([next, ...all.filter((x) => x.key !== next.key)]));
+      readDrafts();
+      return true;
+    } catch { setNotice("Recovery backup failed. Your dashboard is still open. Save it or download a backup before leaving."); return false; }
+  }, [readDrafts]);
+  useEffect(() => { window.addEventListener("sc:session-ending", stashDraft); return () => window.removeEventListener("sc:session-ending", stashDraft); }, [stashDraft]);
+  useEffect(() => { const timer = setTimeout(stashDraft, 500); return () => clearTimeout(timer); }, [book, canvas, dirty, revision, stashDraft]);
+  useEffect(() => {
+    const leaving = (e: BeforeUnloadEvent) => { if (currentDocument.current.dirty) { stashDraft(); e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", leaving);
+    return () => window.removeEventListener("beforeunload", leaving);
+  }, [stashDraft]);
 
-  // Per-tile drill-down stacks. Ephemeral view state, keyed by tile id, not
-  // part of the saved spec -- the same reasoning as crossFilters vs. a
-  // tile's own `where`. Never explicitly cleared on dashboard switch: a
-  // stale entry for a tile id from a previous dashboard is simply never
-  // looked up again once that tile isn't on screen, so it's inert rather
-  // than a leak worth the bookkeeping to null out.
+  // Exploration state is reset on document and role changes.
   const [drills, setDrills] = useState<Record<string, import("./drill.ts").DrillEntry[]>>({});
 
   // Same status the AgentChat toggle polls for -- whether "Explain this" on
@@ -108,19 +199,26 @@ export function App() {
 
   // Undo history. Every edit pushes; the canvas is a design surface and Cmd+Z is
   // the first thing anyone tries after moving something by accident.
-  const past = React.useRef<DashboardSpec[]>([]);
-  const future = React.useRef<DashboardSpec[]>([]);
+  const past = React.useRef<DocumentSnapshot[]>([]);
+  const future = React.useRef<DocumentSnapshot[]>([]);
   const applying = React.useRef(false);
 
   const commit = React.useCallback((next: DashboardSpec) => {
-    if (!applying.current && dash) { past.current.push(dash); future.current = []; }
+    if (!applying.current && book) { past.current.push(documentSnapshot(book, canvas)); future.current = []; }
     if (past.current.length > 80) past.current.shift();
-    setDirty(true);
     setDash(next);
-  }, [dash]);
+  }, [book, canvas, setDash]);
+  const commitBook = (next: DashboardSpec) => {
+    const parsed = dashboardSchema.safeParse(next);
+    if (!parsed.success) { setNotice("This change exceeds the document limits. Keep at most 20 tabs, 500 tiles and 64 filters."); return; }
+    if (book) { past.current.push(documentSnapshot(book, canvas)); future.current = []; }
+    if (past.current.length > 80) past.current.shift();
+    setBook(parsed.data);
+  };
 
   React.useEffect(() => {
     const key = (e: KeyboardEvent) => {
+      if (document.querySelector("dialog[open]")) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable) return;
       const meta = e.metaKey || e.ctrlKey;
@@ -129,31 +227,64 @@ export function App() {
       applying.current = true;
       if (e.shiftKey) {
         const n = future.current.pop();
-        if (n && dash) { past.current.push(dash); setDash(n); }
+        if (n && book) { past.current.push(documentSnapshot(book, canvas)); setBook(n.spec); setCanvas(n.canvas); }
       } else {
         const p = past.current.pop();
-        if (p && dash) { future.current.push(dash); setDash(p); }
+        if (p && book) { future.current.push(documentSnapshot(book, canvas)); setBook(p.spec); setCanvas(p.canvas); }
       }
       queueMicrotask(() => { applying.current = false; });
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [dash]);
+  }, [book, canvas]);
 
-  const refreshSaved = React.useCallback(() =>
-    fetch("/api/dashboards").then((r) => r.json())
-      .then((d) => setSaved(d.dashboards ?? [])), []);
+  const compose = (spec: DashboardSpec, surface: CanvasSpec) => {
+    if (book) { past.current.push(documentSnapshot(book, canvas)); future.current = []; }
+    setDash(spec); setCanvas(surface);
+  };
+  const changeCanvas = (next: CanvasSpec) => {
+    if (book) { past.current.push(documentSnapshot(book, canvas)); future.current = []; }
+    setCanvas(next);
+  };
+  const beginDocument = useCallback((next: DashboardSpec | null, options: {
+    id?: string | null; revision?: number; canvas?: CanvasSpec; saved?: boolean; draftKey?: string; folderId?: string | null;
+  } = {}) => {
+    if (!stashDraft()) return false;
+    documentEpoch.current++;
+    draftKey.current = options.draftKey ?? crypto.randomUUID();
+    past.current = []; future.current = [];
+    const surface = { ...DEFAULT_CANVAS, ...options.canvas, ...(!session.canEdit ? { locked: true } : {}) };
+    if (next?.tiles.length && !options.canvas) surface.height = Math.max(surface.height, ...next.tiles.map((t) => t.layout.y + t.layout.h + 24));
+    setBook(next); setActiveTabId(next ? tabsOf(next)[0].id : "main"); setFilterValues({});
+    setCanvas(surface); setDashId(options.id ?? null); setRevision(options.revision ?? 0);
+    setSavedFingerprint(next && options.saved ? fingerprint(next, surface) : null);
+    setGrain(documentGrain(next));
+    setSelected([]); setReferenceImport(false); setDistributing(false); setFilterEditing(null); setDrills({}); setNotice(""); setSaving(false); setTemplateId(null); setDashboardFolder(options.folderId ?? null);
+    setPicking(false); setViewPicker(false); setSaveViewOpen(false); setViewPreview(null); setViewPickError(""); setViewPickBusy(false); setRefreshed(null); setRefreshToken(crypto.randomUUID());
+    return true;
+  }, [stashDraft]);
+  const refreshData = () => { setRefreshToken(crypto.randomUUID()); setRefreshed(new Date()); };
+
+  const refreshSaved = React.useCallback(() => {
+    coreLibrary.refresh(); const source = sourceRef.current;
+    return fetch("/api/dashboards").then(readResponse)
+      .then(d => { if (sourceRef.current === source) setSaved(d.dashboards ?? []); }).catch(() => {});
+  }, [coreLibrary.refresh]);
   React.useEffect(() => { refreshSaved(); }, [refreshSaved]);
 
   const switchSource = useCallback((id: string) => {
+    if (!beginDocument(null)) return;
     sourceRef.current = id;
     setSourceId(id);
-    try { localStorage.setItem("sc:source", id); } catch {}
-    past.current = []; future.current = [];
-    setDash(null); setTable(null); setView("home");
-    fetch("/api/model").then((r) => r.json()).then(setModel);
+    setLibraryFolder(null);
+    try { storage.setItem(sourceStorageKey, id); } catch {}
+    setView("home"); setModel(null);
+    const epoch = documentEpoch.current;
+    fetch("/api/model").then(readResponse).then((m) => {
+      if (documentEpoch.current === epoch) { setModel(m); setBootError(""); }
+    }).catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
     refreshSaved();
-  }, [refreshSaved]);
+  }, [refreshSaved, beginDocument]);
 
   const [exportingPng, setExportingPng] = useState(false);
   const exportDashboardPng = async () => {
@@ -171,25 +302,71 @@ export function App() {
     }
   };
 
-  const save = async () => {
-    if (!dash) return;
-    const id = dashId ?? `d${Math.random().toString(36).slice(2, 9)}`;
-    await fetch("/api/dashboards", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id, name: dash.title, spec: dash, canvas }),
-    });
-    setDashId(id); setDirty(false); refreshSaved();
+  const save = async (asCopy = false, throwOnFailure = false) => {
+    if (!book || saving) return;
+    const epoch = documentEpoch.current, key = draftKey.current;
+    const id = asCopy ? crypto.randomUUID() : dashId ?? crypto.randomUUID();
+    const snapshot = documentSnapshot(book, canvas);
+    const body = JSON.stringify({ id, name: book.title, ...snapshot, revision: asCopy ? 0 : revision, schemaVersion: 1, ...(!dashId || asCopy ? { folderId: dashboardFolder } : {}) });
+    setSaving(true); setNotice("");
+    try {
+      if (new Blob([body]).size > MAX_DOCUMENT_BYTES) throw new Error("Dashboard exceeds the 8 MB save limit. Remove or resize an image and try again.");
+      const result = await fetch("/api/dashboards", {
+        method: "POST", headers: { "content-type": "application/json" }, body,
+      }).then(readResponse);
+      if (documentEpoch.current !== epoch) return;
+      setDashId(id); setTemplateId(null); setRevision(result.revision); setSavedFingerprint(JSON.stringify(snapshot));
+      try {
+        const all: Draft[] = parseDrafts(storage.getItem(draftStorageKey));
+        storage.setItem(draftStorageKey, JSON.stringify(all.filter((d) => d.key !== key)));
+        readDrafts();
+      } catch { /* the server copy is saved even if recovery storage is unavailable */ }
+      refreshSaved();
+    } catch (e: any) { if (documentEpoch.current === epoch) setNotice(`Save failed: ${e.message}`); if (throwOnFailure) throw e; }
+    finally { if (documentEpoch.current === epoch) setSaving(false); }
   };
 
   const openSaved = async (id: string) => {
-    const d = await fetch(`/api/dashboards/${id}`).then((r) => r.json());
-    if (!d?.spec) return;
-    past.current = []; future.current = [];
-    setDash(d.spec); setDashId(id); setDirty(false); setOpenList(false);
-    if (d.canvas) setCanvas((c) => ({ ...c, ...d.canvas }));
-    setRefreshed(new Date());
+    const epoch = documentEpoch.current;
+    try {
+      const d = await fetch(`/api/dashboards/${encodeURIComponent(id)}`).then(readResponse);
+      if (documentEpoch.current !== epoch) return;
+      const document = d.isTemplate ? fitStarter(d.spec, d.canvas, freshCanvas().width) : d;
+      if (!beginDocument(document.spec, { id: d.isTemplate ? null : id, revision: d.isTemplate ? 0 : d.revision, canvas: document.canvas, saved: !d.isTemplate, folderId: d.folderId })) return;
+      setTemplateId(d.isTemplate ? id : null);
+      setOpenList(false); pendingFit.current = true;
+    } catch (e: any) { setNotice(`Could not open dashboard: ${e.message}`); }
   };
+  const browseLibrary = (folder: string | null) => {
+    if (beginDocument(null)) { setView("library"); setLibraryFolder(folder); if (window.matchMedia("(max-width: 650px)").matches) setCollapsed(true); coreLibrary.refresh(); }
+  };
+  const openLibraryItem = (item: LibraryItem) => {
+    if (item.kind === "dashboard") void openSaved(item.id); else setViewPreview(item);
+  };
+  const addSavedView = (view: LibraryView) => {
+    if (!book || !model || !session.canEdit) return;
+    const next = insertView(book, canvas, activeTabId, view.spec, model);
+    if (new Blob([JSON.stringify(next.spec)]).size > MAX_DOCUMENT_BYTES) throw new Error("Adding this view would exceed the 8 MB dashboard limit.");
+    commitBook(next.spec); setCanvas(next.canvas); setSelected([]);
+    pendingReveal.current = { x: 24, y: next.top, w: Math.max(100, canvas.width - 48), h: 180 };
+    setViewPicker(false); setViewPreview(null); setNotice(`“${view.name}” added. Undo restores the previous canvas.`);
+  };
+  const chooseLibraryView = async (item: LibraryItem) => {
+    if (viewPickBusy) return; const epoch = documentEpoch.current;
+    setViewPickBusy(true); setViewPickError("");
+    try {
+      const savedView = viewSaveSchema.parse(await fetch(`/api/library/views/${encodeURIComponent(item.id)}`).then(readResponse));
+      if (documentEpoch.current === epoch) addSavedView(savedView);
+    } catch (e: any) { if (documentEpoch.current === epoch) setViewPickError(e.message); }
+    finally { if (documentEpoch.current === epoch) setViewPickBusy(false); }
+  };
+  const backupInput = React.useRef<HTMLInputElement>(null);
   const mainRef = React.useRef<HTMLElement>(null);
+  // New compositions start at a readable size for this workspace. Saved
+  // documents keep their authored dimensions when opened or resized.
+  const freshCanvas = useCallback((): CanvasSpec => ({ ...DEFAULT_CANVAS, preset: "custom",
+    width: Math.max(640, Math.min(1440, Math.floor(((mainRef.current?.clientWidth ?? 1100) - 44) / 8) * 8)),
+  }), []);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
 
   /**
@@ -218,7 +395,7 @@ export function App() {
   }, [zoom, canvas.width, canvas.height, dash?.tiles]);
   const selectedTile = dash && selected.length === 1
     ? dash.tiles.find((t) => t.id === selected[0]) ?? null : null;
-  const inspecting = !!selectedTile && !canvas.locked;
+  const inspecting = !!selectedTile && selectedTile.kind !== "filter" && !canvas.locked;
 
   // Selecting a tile opens the Inspector, which takes real width out of the
   // canvas viewport (the `.shell` grid's third column) -- so a tile sitting
@@ -296,6 +473,7 @@ export function App() {
     if (!pendingFit.current) return;
     pendingFit.current = false;
     fit();
+    scrollRef.current?.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [dash, fit]);
 
   // Same race, different trigger: adding a tile below existing content
@@ -328,40 +506,25 @@ export function App() {
     el.scrollTo({ left: Math.max(0, scrollLeft), top: Math.max(0, scrollTop), behavior: "auto" });
   }, [dash, zoom]);
 
-  useEffect(() => { fetch("/api/model").then((r) => r.json()).then(setModel); }, []);
+  useEffect(() => { fetch("/api/model").then(readResponse).then((m) => { setModel(m); setBootError(""); }).catch((e) => setBootError(e.message)); }, []);
 
   const build = useCallback((brief: Brief) => {
     setInterview(false);
+    const surface = freshCanvas();
+    if (!beginDocument(null, { canvas: surface })) return;
+    const epoch = documentEpoch.current;
     return fetch("/api/suggest", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...brief, width: canvas.width }),
-    }).then((r) => r.json()).then((d) => {
+      body: JSON.stringify({ ...brief, width: surface.width }),
+    }).then(readResponse).then((d) => {
+      if (documentEpoch.current !== epoch) return;
       pendingFit.current = true;
-      setDash(d); setRefreshed(new Date()); setTable(brief.table ?? null);
-      if (brief.grain) setGrain(brief.grain);
-    });
-  }, [canvas.width]);
+      setDash(d); setCanvas((c) => ({ ...c, height: Math.max(c.height, ...d.tiles.map((t: TileSpec) => t.layout.y + t.layout.h + 24)) })); setRefreshed(new Date());
+      setGrain(documentGrain(d));
+    }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
+  }, [freshCanvas, beginDocument]);
 
-  const load = useCallback((t: string | null, g: string) => {
-    const q = new URLSearchParams({ grain: g, width: String(canvas.width),
-                                    ...(t ? { table: t } : {}) });
-    return fetch(`/api/suggest?${q}`).then((r) => r.json()).then((d) => {
-      // Show the whole authored canvas rather than clipping it at the viewport.
-      pendingFit.current = true;
-      setDash(d); setRefreshed(new Date());
-    });
-  }, [canvas.width]);
-
-  if (!model) return <div className="boot">Loading semantic layer…</div>;
-
-  const byTable = metricsByTable(model);
-  const tabs = Object.entries(byTable).sort((a, b) => b[1].length - a[1].length).map(([n]) => n);
-
-  const pick = (t: string | null) => {
-    setTable(t);
-    if (t === null) { setDash(null); return; }
-    load(t, grain);
-  };
+  if (!model) return bootError ? <div className="setup-empty"><Connections sources={sources} activeId={activeSourceId} onSelect={switchSource} onRefresh={() => { refreshSources(); switchSource(""); }} principals={principals} policies={policies} /><p role="alert">{session.canAdmin ? "Connect a source to open your metric catalogue." : "No accessible source is ready. Contact your workspace administrator."}</p></div> : <div className="boot">Loading semantic layer…</div>;
 
   const nextId = () => `t${Math.random().toString(36).slice(2, 8)}`;
   // dropPoint pushes a tile below existing content when the natural spot is
@@ -413,23 +576,45 @@ export function App() {
           </svg>
         </button>
       )}
-      <Sidebar model={model} active={table} view={dash ? "" : view}
-               onPick={(t) => { setView("home"); pick(t); }}
-               onView={(v) => { setView(v); setDash(null); setTable(null); }}
+      <Sidebar model={model} view={dash ? "" : view}
+               library={<LibraryNavigation key={activeSourceId} data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} activeId={dashId ?? templateId} onBrowse={browseLibrary} onOpen={openLibraryItem} />}
+               onView={(v) => { if (beginDocument(null)) setView(v); }}
                collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}
+               onSettings={() => setSettingsOpen(true)}
                principals={principals} principal={asWho}
                onPrincipal={(id) => {
                  asWhoRef.current = id;
                  setAsWho(id);
                  try { localStorage.setItem("sc:principal", id); } catch {}
-                 if (dash) load(table, grain);
+                 setDrills({}); setFilterValues({}); refreshData();
                }}
                sources={sources} activeSource={activeSource} />
 
       <main className="main" ref={mainRef}>
-        {!dash && view === "connections" ? (
+        <input ref={backupInput} type="file" accept="application/json,.json" hidden aria-label="Import dashboard backup" onChange={async e => {
+          const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; const epoch = documentEpoch.current;
+          try {
+            if (file.size > MAX_DOCUMENT_BYTES) throw new Error("Backup exceeds the 8 MB document limit");
+            const data = JSON.parse(await file.text()); if (documentEpoch.current !== epoch) return;
+            if (data.schemaVersion !== 1) throw new Error("Unsupported backup version");
+            if (data.source && data.source !== activeSourceId) throw new Error(`Select the backup's source (${data.source}) before importing it`);
+            const spec = dashboardSchema.parse(data.spec), surface = canvasSchema.parse(data.canvas);
+            const issues = validateDashboard(model, spec); if (issues.length) throw new Error(issues[0].problem);
+            if (beginDocument(spec, { canvas: surface })) { setView("home"); setNotice("Backup restored as a new dashboard. Save to keep a server copy."); }
+          } catch (error: any) { setNotice(`Could not import backup: ${error.message}`); }
+        }} />
+        {notice && <div className="document-notice" role="alert"><span>{notice}</span>{dash && <button className="link" onClick={() => {
+          const url = URL.createObjectURL(new Blob([JSON.stringify({ schemaVersion: 1, source: activeSourceId, ...documentSnapshot(book!, canvas) }, null, 2)], { type: "application/json" }));
+          const a = document.createElement("a"); a.href = url; a.download = `${slugForFilename(dash.title)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }}>Download backup</button>}{dash && notice.startsWith("Recovery backup failed") && <button className="link" onClick={() => {
+          if (window.confirm("Leave this dashboard without saving? Download a backup first if you want to keep these changes.")) { currentDocument.current.dirty = false; beginDocument(null); setView("home"); }
+        }}>Discard and leave</button>}</div>}
+        {!dash && view === "library" ? (
+          <LibraryBrowser key={activeSourceId} data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} refresh={refreshSaved} folderId={libraryFolder} onFolder={setLibraryFolder} onOpen={openLibraryItem}
+            onNewDashboard={folderId => { if (beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas(), folderId })) pendingFit.current = true; }} />
+        ) : !dash && view === "connections" ? (
           <Connections sources={sources} activeId={activeSourceId} onSelect={switchSource}
-                       onRefresh={refreshSources} principals={principals} policies={policies} />
+                       onRefresh={() => { refreshSources(); fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message)); }} principals={principals} policies={policies} />
         ) : !dash && view === "registry" ? (
           <MetricRegistry model={model} onUse={(m) => {
             const t = model.metrics[m].baseTable;
@@ -438,92 +623,86 @@ export function App() {
         ) : !dash && view === "model" ? (
           <DataModel model={model} />
         ) : !dash ? (
-          <Entry model={model} onSuggest={() => setInterview(true)}
-                 onScratch={() => { setDash({ title: "Untitled dashboard", tiles: [] });
-                                    setRefreshed(new Date()); }}
-                 onDemo={demoDashboardAvailable(model) ? () => {
-                   pendingFit.current = true;
-                   setDash(demoDashboard()); setRefreshed(new Date());
-                 } : null} />
+          <>{session.canEdit ? <Entry model={model} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)}
+                 onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} /> : <div className="explore"><span className="eyebrow">Company workspace</span><h1>Your metrics, in focus.</h1><p className="lede">Open a shared dashboard below, or browse CoreCanvas Library. Filters and drill-downs follow your company’s data permissions.</p></div>}
+        <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>{session.mode === "team" ? "Shared dashboards and your drafts in this tab" : "Saved dashboards and drafts on this computer"}</span></div>
+          <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
+          {session.canEdit && <button className="link" onClick={() => backupInput.current?.click()}>Import backup</button>}
+          {drafts.filter((d) => d.source === activeSourceId).map((d) => <div key={d.key}>
+            <button className="link" onClick={() => beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key, folderId: d.folderId })}>Recover draft: {d.spec.title}</button>
+            <button className="link" aria-label={`Discard draft ${d.spec.title}`} onClick={() => {
+              storage.setItem(draftStorageKey, JSON.stringify(drafts.filter((x) => x.key !== d.key))); readDrafts();
+            }}>Discard</button>
+          </div>)}
+        </div>
+          </>
         ) : (
           <>
             <div className="topbar">
-              <button className="link" onClick={() => { setDash(null); setTable(null); }}>← Back</button>
+              <button className="link back-link" onClick={() => beginDocument(null)}>← <span>Workspace</span></button>
               <span className="spacer" />
-              <span className="refreshed">
-                {refreshed && `Last refreshed ${refreshed.toLocaleString(undefined,
-                  { dateStyle: "medium", timeStyle: "short" })}`}
-              </span>
-              <button className="icon" title="Refresh" onClick={() => load(table, grain)}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
+              <span className={"save-status" + (dirty ? " dirty" : "")} role="status">{!session.canEdit ? "Viewer access" : saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
+              <button className="icon quiet" title="Refresh" aria-label="Refresh" onClick={refreshData}>
+                <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M16 10a6 6 0 1 1-1.8-4.2M16 3v3.5h-3.5" /></svg>
               </button>
-              <button className="icon" title="Open a saved dashboard"
-                      aria-label="Open saved dashboard" onClick={() => { refreshSaved(); setOpenList(true); }}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <path d="M3 6a2 2 0 0 1 2-2h3l2 2h5a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+              <button className="save-button" onClick={() => save()} disabled={saving || !session.canEdit} aria-label="Save dashboard">
+                {saving ? "Saving…" : "Save"}
               </button>
-              <button className={"icon" + (dirty ? " primary" : "")} onClick={save}
-                      title={dirty ? "Unsaved changes — click to save" : "Saved"}
-                      aria-label="Save dashboard">
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <path d="M4 4h9l3 3v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z" /><path d="M7 4v4h6V4M7 17v-5h6v5" /></svg>
-              </button>
-              <button className="icon" title="Copy dashboard spec"
-                      onClick={() => navigator.clipboard?.writeText(JSON.stringify(dash, null, 2))}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <rect x="7" y="3" width="10" height="12" rx="2" /><path d="M13 17H5a2 2 0 0 1-2-2V7" /></svg>
-              </button>
-              <button className="icon" title={exportingPng ? "Exporting…" : "Export dashboard as PNG"}
-                      disabled={exportingPng} onClick={exportDashboardPng}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
-                  <path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 15h12" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              </button>
-              <button className="icon primary" title="Add tile" onClick={() => setPicking(true)}>
-                <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8">
-                  <path d="M10 4v12M4 10h12" /></svg>
-              </button>
+              <Popover label="Dashboard actions" trigger={<span aria-hidden="true">•••</span>} align="end" className="document-menu">
+                {(close) => <>
+                  <button onClick={() => { close(); refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
+                  <button disabled={saving || !session.canEdit} onClick={() => { close(); save(true); }}>Save a copy</button>
+                  <button disabled={!session.canEdit} onClick={() => { close(); setDistributing(true); }}>Copy charts to…</button>
+                  <button disabled={!session.canEdit || !dash.tiles.length} onClick={() => { close(); coreLibrary.refresh(); setSaveViewOpen(true); }}>Save a view to library</button>
+                  <button disabled={!session.canEdit} onClick={() => { close(); setReferenceImport(true); }}>Recreate from reference</button>
+                  <button disabled={exportingPng} onClick={() => { close(); exportDashboardPng(); }}>
+                    {exportingPng ? "Exporting…" : "Export dashboard as PNG"}
+                  </button>
+                  <button onClick={() => { close(); navigator.clipboard?.writeText(JSON.stringify(book, null, 2)); }}>Copy dashboard spec</button>
+                </>}
+              </Popover>
             </div>
 
-            <h1 className="dash-title">{dash.title}</h1>
-
-            <div className="tabs">
-              {tabs.map((t) => (
-                <button key={t} className={"pill" + (t === table ? " on" : "")}
-                        onClick={() => pick(t)}>
-                  {prettyTable(t)}
-                </button>
-              ))}
-            </div>
-
-            <div className="controls">
-              <label>
+            <div className="dashboard-heading">
+              <div className="dashboard-identity">
+                <span className="eyebrow">Dashboard</span>
+                <h1 className="dash-title">{dash.title}</h1>
+                <div className="dashboard-meta">
+                  <span>{dash.tiles.length} tiles</span><span aria-hidden="true">·</span>
+                  <span>{prettifyModelName(model.name)}</span>
+                  {templateId && <span title="This starter opens as a new dashboard. Save to keep your version.">· Starter copy</span>}
+                  {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
+                </div>
+              </div>
+              <label className="period-control">
                 <span>Period</span>
-                <select value={grain} onChange={(e) => { setGrain(e.target.value); load(table, e.target.value); }}>
-                  {GRAINS.map((g) => (
-                    <option key={g} value={g}>{g[0].toUpperCase() + g.slice(1)}ly
-                      {g === "day" ? "" : ""}</option>
-                  ))}
+                <select aria-label="Period" value={documentGrain(dash)} onChange={(e) => { const next = withGrain(dash, e.target.value); const issues = next.tiles.flatMap(t => validateTile(model, t)); if (issues.length) { setNotice(issues[0].problem); return; } setNotice(""); setGrain(e.target.value); setDrills({}); commit(next); }}>
+                  {documentGrain(dash) === "mixed" && <option value="mixed" disabled>Mixed periods</option>}
+                  {GRAINS.map((g) => <option key={g} value={g}>{g === "day" ? "Daily" : g[0].toUpperCase() + g.slice(1) + "ly"}</option>)}
                 </select>
               </label>
-              <span className="spacer" />
-              <span className="hint mono">
-                {dash.tiles.length} tiles · {Object.keys(model.metrics).length} metrics available
-              </span>
             </div>
 
+            <TabStrip spec={book!} active={activeTabId} locked={canvas.locked} onChange={commitBook} onSelect={id => {
+              setActiveTabId(id); setSelected([]); setDrills({}); setBook(b => b ? { ...b, crossFilters: [] } : b); pendingFit.current = true;
+            }} />
+            {(book!.filters ?? []).some(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)) && <div className="shared-filter-shelf" aria-label="Dashboard filters">
+              {(book!.filters ?? []).filter(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)).map(f => <FilterControl key={f.id} compact filter={f} value={filterValues[f.id] ?? f.defaultValue ?? {}} onChange={v => setFilterValues(values => ({ ...values, [f.id]: v }))} spec={book!} model={model} activeTab={currentTab(book!, activeTabId).id} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onEdit={!canvas.locked ? () => setFilterEditing(f.id) : undefined} />)}
+            </div>}
             {!canvas.locked && (
-              <EditBar canvas={canvas} onCanvas={setCanvas} zoom={zoom} onZoom={setZoom} onFit={fit}
+              <EditBar canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit} onSettings={() => setSettingsOpen(true)}
                        selected={selected} tiles={dash.tiles}
+                       onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
                        beautify={<DashboardBeautify dash={dash} canvas={canvas} model={model}
-                                                     aiAvailable={aiAvailable} onDash={commit} />} />
+                                                     aiAvailable={aiAvailable} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues)]))} />} />
             )}
-            {canvas.locked && (
+            {canvas.locked && session.canEdit && (
               <div className="editbar slim">
                 <span className="spacer" />
-                <button className="lock on" onClick={() => setCanvas({ ...canvas, locked: false })}>
-                  🔒 Locked — click to edit
+                <button className="lock on" onClick={() => changeCanvas({ ...canvas, locked: false })}>
+                  Edit dashboard
                 </button>
               </div>
             )}
@@ -545,17 +724,28 @@ export function App() {
               </div>
             )}
 
+            <ChartActivityProvider key={`${activeSourceId}:${asWho}:${draftKey.current}`} preferences={chartPreferences.preferences} dashboardId={dashId} document={book!} revision={revision} dirty={dirty} onSave={() => save(false, true)} model={model}>
             <Canvas canvas={canvas} tiles={dash.tiles} zoom={zoom}
+                    emptyState={!canvas.locked ? <div className="canvas-empty">
+                      <div className="empty-composition" aria-hidden="true"><i /><i /><i /></div>
+                      <h2>Every story starts somewhere.</h2>
+                      <p>Add your first metric, then make it your own.</p>
+                      <button className="save-button" onClick={() => setPicking(true)}>Add a chart</button>
+                      <span>Or add a heading or note from the toolbar below.</span>
+                    </div> : undefined}
                     selected={selected} onSelect={setSelected}
-                    onChange={(t) => { setDirty(true); setDash({ ...dash, tiles: t }); }}
+                    onChange={(t) => { setDash({ ...dash, tiles: t }); }}
                     scrollRef={scrollRef}
-                    onCommit={(before) => { past.current.push({ ...dash, tiles: before });
+                    onCommit={(before) => { past.current.push(documentSnapshot(mergeTab(book, { ...dash, tiles: before }, activeTabId), canvas));
                                             future.current = [];
                                             if (past.current.length > 80) past.current.shift(); }}
-                    renderTile={(t) => (
+                    renderTile={(t) => t.kind === "filter" ? (() => {
+                      const f = book!.filters?.find(f => f.id === t.filterId);
+                      return f ? <FilterControl filter={f} value={filterValues[f.id] ?? f.defaultValue ?? {}} onChange={v => setFilterValues(values => ({ ...values, [f.id]: v }))} spec={book!} model={model} activeTab={currentTab(book!, activeTabId).id} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onEdit={!canvas.locked ? () => setFilterEditing(f.id) : undefined} /> : <p role="alert">This filter needs a connection.</p>;
+                    })() : (
                       <TileBoundary label={t.title ?? t.metrics.join(", ")}>
-                      <Tile model={model} spec={t} locked={canvas.locked}
-                            crossFilters={dash.crossFilters}
+                      <Tile key={`${activeSourceId}:${asWho}:${refreshToken}`} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} model={model} spec={t} locked={canvas.locked}
+                            crossFilters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, t, filterValues)]}
                             onCrossFilter={(f) => setDash((d) => !d ? d : ({
                               ...d,
                               crossFilters: [
@@ -566,7 +756,7 @@ export function App() {
                             onDrill={(entry) => setDrills((d) => ({ ...d, [t.id]: [...(d[t.id] ?? []), entry] }))}
                             onDrillUp={(toIndex) => setDrills((d) => ({
                               ...d, [t.id]: (d[t.id] ?? []).slice(0, toIndex) }))}
-                            onRemove={(id) => commit({ ...dash, tiles: dash.tiles.filter((x) => x.id !== id) })}
+                            onRemove={(id) => commit({ ...dash, tiles: dash.tiles.filter((x) => x.id !== id).map(x => ({ ...x, section: x.section === id ? undefined : x.section })) })}
                             onUpdate={(next) => {
                               const merged = dash.tiles.map((x) => (x.id === next.id ? next : x));
                               // A tile's own edit can change its HEIGHT (Beautify's
@@ -588,10 +778,36 @@ export function App() {
                             }} />
                       </TileBoundary>
                     )} />
+            </ChartActivityProvider>
           </>
         )}
       </main>
 
+      {settingsOpen && <ChartSettings preferences={chartPreferences.preferences} onChange={chartPreferences.update} error={chartPreferences.error} onClose={() => setSettingsOpen(false)} />}
+      {saveViewOpen && book && <SaveViewDialog key={`${activeSourceId}:${asWho}`} book={book} canvas={canvas} activeTab={activeTabId} selected={selected} folders={coreLibrary.data.folders} defaultFolder={coreLibrary.data.folders.some(f => f.id === libraryFolder) ? libraryFolder : null} model={model} onClose={() => setSaveViewOpen(false)} onSaved={() => { setSaveViewOpen(false); coreLibrary.refresh(); setNotice("View saved to CoreCanvas Library. Find it under Views → Browse saved views."); }} />}
+      {viewPicker && book && <StudioDialog title="CoreCanvas Library" wide onClose={() => { if (!viewPickBusy) setViewPicker(false); }}>
+        <LibraryBrowser key={activeSourceId} viewsOnly data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} refresh={coreLibrary.refresh} folderId={libraryFolder} onFolder={setLibraryFolder} onOpen={chooseLibraryView} />
+        {viewPickError && <p className="library-error" role="alert">{viewPickError}</p>}{viewPickBusy && <p className="library-error" role="status">Adding your view…</p>}
+      </StudioDialog>}
+      {viewPreview && <ViewPreviewDialog key={`${activeSourceId}:${asWho}:${viewPreview.id}`} item={viewPreview} model={model} canInsert={!!book && session.canEdit && !canvas.locked} onClose={() => setViewPreview(null)}
+        onInsert={v => { try { addSavedView(v); } catch (e: any) { setViewPreview(null); setNotice(e.message); } }}
+        onOpen={v => { const issues = validateDashboard(model, v.spec); if (issues.length) { setViewPreview(null); setNotice(issues[0].problem); return; } if (beginDocument({ ...v.spec, title: v.name }, { canvas: v.canvas })) { setView("home"); pendingFit.current = true; } }} />}
+
+      {referenceImport && <ReferenceImport key={`${activeSourceId}:${asWho}`} model={model} width={freshCanvas().width} aiAvailable={aiAvailable} onClose={() => setReferenceImport(false)} onConnections={() => { if (beginDocument(null)) setView("connections"); }} onCreate={(spec, height) => {
+        if (beginDocument(spec, { canvas: { ...freshCanvas(), height } })) { setView("home"); pendingFit.current = true; setNotice("Reference recreated with live catalogue metrics. Review the matches and save when ready."); }
+      }} />}
+      {distributing && book && <DistributeDialog key={`${activeSourceId}:${asWho}`} spec={book} selected={selected} activeTab={activeTabId} currentId={dashId} model={model} canvas={canvas} onChange={(s, c) => { commitBook(s); setCanvas(c); }} onClose={() => setDistributing(false)} onNotice={setNotice} />}
+      {filterEditing && book && <FilterDesigner key={filterEditing} spec={book} model={model} tabId={currentTab(book, activeTabId).id} existing={book.filters?.find(f => f.id === filterEditing)} onClose={() => setFilterEditing(null)} onDelete={() => {
+        commitBook({ ...book, filters: book.filters?.filter(f => f.id !== filterEditing), tiles: book.tiles.filter(t => t.filterId !== filterEditing) }); setFilterEditing(null);
+      }} onSave={f => {
+        const owner = currentTab(book, activeTabId).id;
+        const kept = book.tiles.filter(t => t.filterId !== f.id || f.scope === "report" || (t.tabId ?? tabsOf(book)[0].id) === owner).map(t => t.filterId === f.id ? { ...t, title: f.label } : t);
+        const existing = kept.some(t => t.filterId === f.id);
+        const at = dropPoint(360, 150);
+        const next = { ...book, filters: [...(book.filters ?? []).filter(x => x.id !== f.id), f], tiles: existing ? kept : [...kept, { id: nextId(), kind: "filter" as const, filterId: f.id, tabId: owner, title: f.label, metrics: [], dimensions: [], layout: { ...at, w: 360, h: 150 } }] };
+        const issues = validateDashboard(model, next); if (issues.length) { setNotice(issues[0].problem); return; }
+        commitBook(next); if (!existing) { growCanvasFor(at.y + 174); pendingReveal.current = { ...at, w: 360, h: 150 }; } setFilterEditing(null);
+      }} />}
       {inspecting && (
         <Inspector model={model}
                    tile={selectedTile!}
@@ -600,11 +816,7 @@ export function App() {
                    onClose={() => setSelected([])} />
       )}
       {openList && (
-        <div className="iv-scrim" onClick={() => setOpenList(false)}>
-          <div className="iv open-list" onClick={(e) => e.stopPropagation()}>
-            <div className="iv-head"><span className="iv-step">Saved dashboards</span>
-              <span className="spacer" />
-              <button className="link" onClick={() => setOpenList(false)}>Close</button></div>
+        <StudioDialog title="Saved dashboards" onClose={() => setOpenList(false)}>
             <section>
               {saved.length === 0
                 ? <p className="lede">Nothing saved yet. Build a dashboard and hit save.</p>
@@ -614,57 +826,49 @@ export function App() {
                     </button>
                   ))}
             </section>
-          </div>
-        </div>
+        </StudioDialog>
       )}
       {interview && <div className="iv-scrim">
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
-      <AgentChat />
+      <AgentChat key={`${activeSourceId}:${asWho}:${activeTabId}`} document={dash && session.canEdit ? { spec: dash, canvas, selected } : null}
+        onApply={(proposal, expected) => {
+          if (!session.canEdit || !dash || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Request a fresh proposal before applying it."); return false; }
+          try { const next = applyProposal(dash, canvas, proposal, model); compose(next.spec, next.canvas); setNotice("Changes applied. Undo restores the previous version."); return true; }
+          catch (e: any) { setNotice(`Could not apply proposal: ${e.message}`); return false; }
+        }} />
       {dash && !canvas.locked && (
         <InsertMenu model={model} onInsert={addTile} onInsertMany={addMany}
-                    onOpenPicker={() => setPicking(true)} />
+                    onLibrary={() => { setViewPickError(""); coreLibrary.refresh(); setViewPicker(true); }} onSaveView={() => { coreLibrary.refresh(); setSaveViewOpen(true); }} canSaveView={dash.tiles.length > 0}
+                    onOpenPicker={() => setPicking(true)} onFilter={() => setFilterEditing("new")} />
       )}
       {picking && <Picker model={model} onAdd={(d) => addTile(d)} onClose={() => setPicking(false)} />}
     </div>
   );
 }
 
-function Entry({ model, onSuggest, onScratch, onDemo }: any) {
+function Entry({ model, onSuggest, onScratch, onReference }: any) {
   return (
     <div className="entry">
-      <h2>{prettifyModelName(model.name)}</h2>
-      <p className="lede">
-        {model.description} Every chart is built from its{" "}
-        {Object.keys(model.metrics).length} governed metrics across{" "}
-        {Object.keys(model.tables).length} tables — no SQL is written by hand, and
-        nothing outside the model can be charted.
-      </p>
+      <div className="eyebrow">Your analytics studio</div>
+      <h2>Give your data<br /><em>a point of view.</em></h2>
+      <p className="lede">A space to explore what matters, compose a dashboard, and tell the story behind the numbers.</p>
+      <div className="model-summary"><span className="dot ready" />{prettifyModelName(model.name)}<span>· {Object.keys(model.metrics).length} metrics ready to explore</span></div>
       <div className="paths">
-        <button className="path" onClick={onSuggest}>
-          <h3>Suggest a dashboard →</h3>
-          <p>Reads the model and proposes one: headline KPIs with movement, trends
-             over time grouped so unlike units never share an axis, and the
-             breakdowns the join graph actually supports.</p>
+        <button className="path suggested" onClick={onSuggest}>
+          <span className="path-glyph" aria-hidden="true">✧</span>
+          <h3>Suggest a dashboard <span>↗</span></h3>
+          <p>Start with a question. Find a useful set of metrics, trends, and comparisons.</p>
         </button>
         <button className="path" onClick={onScratch}>
-          <h3>Start from scratch →</h3>
-          <p>An empty canvas. Add tiles by picking metrics and dimensions; the
-             picker only offers combinations that compile.</p>
+          <span className="path-glyph" aria-hidden="true">+</span>
+          <h3>Start from scratch <span>↗</span></h3>
+          <p>Make room for your own perspective. Add charts, notes, and a clear narrative.</p>
         </button>
-        {/* Only offered for a model with the specific bundled-sample tables
-            and metrics this fixed spec names (see demo.ts) -- a real
-            connected source just doesn't get this card, rather than
-            showing one that would fail to compile against it. */}
-        {onDemo && (
-          <button className="path demo" onClick={onDemo}>
-            <h3>See Beautify in action →</h3>
-            <p>A deliberately rough dashboard -- a noisy chart, a breakdown that
-               doesn't actually vary, a chart-kind mismatch, and a messy layout.
-               Try Beautify and Smart Arrange on it.</p>
-          </button>
-        )}
+        <button className="path reference-path" aria-label="Recreate from reference" onClick={onReference}>
+          <span className="path-glyph" aria-hidden="true">▧</span><div><h3>Recreate from reference <span>↗</span></h3><p>A sketch, photo or PDF. Your layout, brought to life with catalogue metrics.</p></div>
+        </button>
       </div>
     </div>
   );

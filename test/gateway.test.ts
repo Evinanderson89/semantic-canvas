@@ -1,0 +1,19 @@
+import { beforeAll, afterAll, expect, it } from 'vitest';
+import express from 'express';
+import { createServer, type Server } from 'node:http';
+import { generateKeyPair, exportJWK, SignJWT } from 'jose';
+import { CompanyAuth, identityOf } from '../src/security/auth.ts';
+let provider:Server,server:Server,issuer:string,url:string,keys:Awaited<ReturnType<typeof generateKeyPair>>,auth:CompanyAuth;
+beforeAll(async()=>{
+ keys=await generateKeyPair('RS256');const jwk={...await exportJWK(keys.publicKey),kid:'gateway-test',alg:'RS256'};
+ provider=createServer((_q,r)=>{r.setHeader('content-type','application/json');r.end(JSON.stringify({keys:[jwk]}));});await new Promise<void>(r=>provider.listen(0,'127.0.0.1',r));issuer=`http://127.0.0.1:${(provider.address() as any).port}`;
+ auth=new CompanyAuth({mode:'gateway',publicUrl:'http://semantic-canvas.apps.localhost:10000',issuer,clientId:'gateway-portal',jwksUri:issuer+'/jwks',portalUrl:'http://apps.localhost:10000',scopes:'openid',sessionSeconds:3600,access:{groupsClaim:'groups',bindings:[{group:'data-users',role:'viewer',principal:'emea',sources:['sample']}]}});await auth.start();
+ const app=express();auth.mount(app);app.use('/api',auth.guard);app.all('/api/dashboards',(_q,r)=>r.json({ok:true}));app.get('/api/identity',(q,r)=>r.json({identity:identityOf(q),forwarded:auth.forwarded(q)}));server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));url=`http://127.0.0.1:${(server.address() as any).port}`;
+});
+afterAll(async()=>{await Promise.all([server,provider].map(s=>new Promise<void>(r=>s.close(()=>r()))));});
+async function token(groups=['data-users'],aud='gateway-portal',expires='5m'){return new SignJWT({groups,name:'Casey'}).setProtectedHeader({alg:'RS256',kid:'gateway-test'}).setIssuer(issuer).setSubject('casey').setAudience(aud).setExpirationTime(expires).sign(keys.privateKey);}
+it('verifies Gateway cookies and retains the configured RLS principal and sources',async()=>{const cookie=`gw_session=${await token()}`;const session=await (await fetch(url+'/api/auth/session',{headers:{cookie}})).json();expect(session.authenticated).toBe(true);expect(session.canEdit).toBe(false);const body=await(await fetch(url+'/api/identity',{headers:{cookie,'x-sc-principal':'admin','x-gateway-groups':'data-admins'}})).json();expect(body.identity.principal).toBe('emea');expect(body.identity.sources).toEqual(['sample']);expect(body.forwarded.cookie).toBe(cookie);expect(body.forwarded.csrf).toBe(session.csrf);});
+it('denies spoofed gateway identity headers without a verified JWT',async()=>{expect((await fetch(url+'/api/identity',{headers:{'x-gateway-user':'admin','x-gateway-groups':'data-users'}})).status).toBe(401);});
+it.each(['wrong-audience','expired','unassigned'])('rejects %s tokens',async(kind)=>{const jwt=await token(kind==='unassigned'?['other']:['data-users'],kind==='wrong-audience'?'another-app':'gateway-portal',kind==='expired'?'-1s':'5m');expect((await fetch(url+'/api/identity',{headers:{cookie:`gw_session=${jwt}`}})).status).toBe(401);});
+it('enforces CSRF and viewer restrictions even with valid Gateway identity',async()=>{const cookie=`gw_session=${await token()}`;const s=await(await fetch(url+'/api/auth/session',{headers:{cookie}})).json();expect((await fetch(url+'/api/dashboards',{method:'POST',headers:{cookie}})).status).toBe(403);expect((await fetch(url+'/api/dashboards',{method:'POST',headers:{cookie,'x-sc-csrf':s.csrf}})).status).toBe(403);});
+it('uses Gateway as the login entry point',async()=>{const r=await fetch(url+'/api/auth/login',{redirect:'manual'});expect(r.headers.get('location')).toBe('http://apps.localhost:10000/auth/login');});

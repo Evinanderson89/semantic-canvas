@@ -20,7 +20,10 @@ export interface Table {
   columns: Column[];
   partitionKeys: string[];
   primaryKey?: string | null;
+  relation?: { database?: string; schema?: string; table: string };
 }
+
+export type TimeGrain = "day" | "week" | "month" | "quarter" | "year";
 
 export interface Metric {
   name: string;
@@ -28,6 +31,11 @@ export interface Metric {
   description?: string;
   baseTable: string;
   expression: string;
+  /** Declared native reporting grains. Omitted means the expression owns rollup semantics. */
+  importance?: number;
+  direction?: "higher" | "lower" | "neutral";
+  timeGrains?: TimeGrain[];
+  timeDimension?: string;
   /** Always-on filter, e.g. status = 'active'. */
   filter?: string | null;
   synonyms: string[];
@@ -39,6 +47,7 @@ export interface Join {
   right: string;
   rightOn: string;
   type: "left" | "inner";
+  columns?: { left: string; right: string }[];
 }
 
 export interface Model {
@@ -69,7 +78,8 @@ export function metricsByTable(model: Model): Record<string, Metric[]> {
 }
 
 export function findJoin(model: Model, left: string, right: string): Join | null {
-  return model.joins.find((j) => j.left === left && j.right === right) ?? null;
+  const matches = model.joins.filter((j) => j.left === left && j.right === right);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 /**
@@ -157,5 +167,18 @@ export function fieldReachable(model: Model, baseTable: string, field: string): 
   const table = model.tables[t];
   if (!table || !table.columns.some((x) => x.name === c)) return false;
   if (t === baseTable) return true;
-  return model.joins.some((j) => j.left === baseTable && j.right === t);
+  return findJoin(model, baseTable, t) !== null;
+}
+
+export const joinPairs = (join: Join) => join.columns ?? [{ left: join.leftOn, right: join.rightOn }];
+
+/** Restricted metrics require their declared time dimension at a supported grain. */
+export function metricGrainIssue(metric: Metric, dimensions: string[]): string | null {
+  if (!metric.timeGrains) return null;
+  const dimension = dimensions.find((d) => {
+    const field = d.split(":")[1];
+    return field && (field.includes(".") ? field : `${metric.baseTable}.${field}`) === metric.timeDimension;
+  });
+  return dimension && metric.timeGrains.includes(dimension.split(":")[0] as TimeGrain) ? null
+    : `${metric.label} requires ${metric.timeGrains.join(" or ")} reporting on ${metric.timeDimension}. Other grains would change the metric's meaning.`;
 }

@@ -22,7 +22,7 @@ export interface Connector {
    *  it only rounds an existing date DOWN to a period's start. */
   dateAdd(unit: "day" | "month" | "year", expr: string, n: number): string;
   /** What to put in FROM for a catalog table. */
-  relation(table: string): string;
+  relation(table: string, physical?: { database?: string; schema?: string; table: string }): string;
   execute(sql: string, limit?: number, cacheKey?: string): Promise<QueryResult>;
   close(): Promise<void>;
 }

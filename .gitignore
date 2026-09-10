@@ -4,3 +4,11 @@ dist/
 test-results/
 playwright-report/
 *.local
+
+.test-data/
+*.tsbuildinfo
+.preview-data/
+.env.team
+deploy/access.yaml
+deploy/policies.yaml
+backups/

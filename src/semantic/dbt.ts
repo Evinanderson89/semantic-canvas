@@ -50,8 +50,10 @@ export const dbtAdapter: SemanticAdapter = {
         name: table, description: (sm.description ?? "").trim(), grain: "",
         synonyms: [], partitionKeys: [], primaryKey: null, columns: [],
       });
+      t.relation = { database: sm.node_relation?.database, schema: sm.node_relation?.schema_name, table };
       t.grain = sm.description?.trim() || t.grain;
       for (const d of sm.dimensions ?? []) {
+        if (d.expr && d.expr !== d.name) throw new Error(`dbt import: dimension expression ${sm.name}.${d.name} is not yet supported`);
         if (!t.columns.some((c) => c.name === d.name))
           t.columns.push({ name: d.name, type: d.type === "time" ? "date" : "string",
                            description: (d.description ?? "").trim() });
@@ -59,6 +61,7 @@ export const dbtAdapter: SemanticAdapter = {
       }
       for (const e of sm.entities ?? []) {
         const col = e.expr ?? e.name;
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(col)) throw new Error(`dbt import: entity expression ${e.name} is not supported`);
         if (!t.columns.some((c) => c.name === col))
           t.columns.push({ name: col, type: "string" });
         if (e.type === "primary" || e.type === "unique") t.primaryKey = col;
@@ -82,24 +85,30 @@ export const dbtAdapter: SemanticAdapter = {
 
     const metrics: Model["metrics"] = {};
     for (const m of sem?.metrics ?? []) {
-      const measure = m.type_params?.measure?.name ?? m.type_params?.numerator?.name;
+      if (m.type !== "simple") throw new Error(`dbt import: metric ${m.name} has unsupported type "${m.type}". This adapter supports simple metrics only; ratio, derived and cumulative metrics require native Semantic Layer execution.`);
+      if (m.filter?.where_filters?.length || m.type_params?.measure?.filter) throw new Error(`dbt import: filters on metric ${m.name} are not yet supported`);
+      const measure = m.type_params?.measure?.name;
       const owner = (sem.semantic_models ?? []).find((sm: any) =>
         (sm.measures ?? []).some((x: any) => x.name === measure));
       const base = owner?.node_relation?.alias ?? owner?.name;
-      if (!base) continue;
+      if (!base) throw new Error(`dbt import: measure ${measure} for metric ${m.name} could not be resolved`);
       const spec = (owner.measures ?? []).find((x: any) => x.name === measure);
-      const agg = String(spec?.agg ?? "sum").toUpperCase();
+      const aggregation: Record<string, string> = { sum: "SUM", count: "COUNT", count_distinct: "COUNT_DISTINCT", min: "MIN", max: "MAX", average: "AVG" };
+      const agg = aggregation[spec?.agg];
+      if (!agg || spec?.non_additive_dimension || spec?.agg_params || spec?.filter)
+        throw new Error(`dbt import: measure ${measure} uses unsupported aggregation semantics`);
       const expr = spec?.expr ?? measure;
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(expr) && !(agg === "COUNT" && String(expr) === "1"))
+        throw new Error(`dbt import: measure expression for ${measure} is not a supported column reference`);
+      const ref = String(expr) === "1" ? "1" : `${base}.${expr}`;
       metrics[m.name] = {
         name: m.name,
         label: m.label ?? m.name,
         description: (m.description ?? "").trim(),
         baseTable: base,
         expression: agg === "COUNT_DISTINCT"
-          ? `COUNT(DISTINCT ${base}.${expr})` : `${agg}(${base}.${expr})`,
-        filter: m.filter?.where_filters?.[0]?.where_sql_template
-          ?.replace(/\{\{\s*Dimension\(['"]([^'"]+)['"]\)\s*\}\}/g,
-                    (_: string, d: string) => `${base}.${d.split("__").pop()}`) ?? null,
+          ? `COUNT(DISTINCT ${ref})` : `${agg}(${ref})`,
+        filter: null,
         synonyms: m.meta?.synonyms ?? [],
       };
     }
@@ -115,5 +124,5 @@ export const dbtAdapter: SemanticAdapter = {
 };
 
 async function readJson(path: string): Promise<any | null> {
-  try { return JSON.parse(await readFile(path, "utf8")); } catch { return null; }
+  try { return JSON.parse(await readFile(path, "utf8")); } catch (e: any) { if (e.code === "ENOENT") return null; throw e; }
 }

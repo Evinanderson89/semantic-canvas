@@ -1,0 +1,42 @@
+name: semantic-canvas-team
+services:
+  canvas:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env.team
+    environment:
+      SC_MODE: team
+      SC_ACCESS_PATH: /app/security/access.yaml
+      RLS_PATH: /app/security/company-policies.yaml
+    volumes:
+      - workspace:/data
+      - ./deploy/access.yaml:/app/security/access.yaml:ro
+      - ./deploy/policies.yaml:/app/security/company-policies.yaml:ro
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SC_DOMAIN: ${SC_DOMAIN:?Set SC_DOMAIN in .env.team}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - certificates:/data
+      - proxy_config:/config
+    depends_on:
+      canvas: { condition: service_healthy }
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  workspace:
+  certificates:
+  proxy_config:

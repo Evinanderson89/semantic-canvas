@@ -1,5 +1,6 @@
+import { useSession, signOut } from "./Session.tsx";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Model } from "../semantic/model.ts";
-import { metricsByTable } from "../semantic/model.ts";
 
 const ICONS: Record<string, string> = {
   home: "M3 9.5 10 4l7 5.5V16a1 1 0 0 1-1 1h-4v-4H8v4H4a1 1 0 0 1-1-1z",
@@ -27,21 +28,29 @@ function Icon({ d }: { d: string }) {
   );
 }
 
-export function Sidebar({ model, active, view, onPick, onView, collapsed, onToggle,
+export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, library,
                           principals = [], principal = "", onPrincipal = () => {},
                           sources = [], activeSource = null }: {
-  model: Model; active: string | null; view: string;
-  onPick: (table: string | null) => void;
+  model: Model; view: string;
   onView: (v: "home" | "registry" | "model" | "connections") => void;
   collapsed: boolean; onToggle: () => void;
+  onSettings: () => void;
+  library: ReactNode;
   principals?: { id: string; name: string }[];
   principal?: string;
   onPrincipal?: (id: string) => void;
   sources?: { id: string; label: string; status: "ready" | "error"; error?: string }[];
   activeSource?: { label: string; status: "ready" | "error"; error?: string } | null;
 }) {
-  const byTable = metricsByTable(model);
-  const tables = Object.entries(byTable).sort((a, b) => b[1].length - a[1].length);
+  const session = useSession();
+  const gatewayUrl = session.gatewayUrl ?? (session.mode === "local" ? import.meta.env.VITE_GATEWAY_PORTAL_URL : undefined);
+  const [theme, setTheme] = useState(() => {
+    try { return localStorage.getItem("sc:theme") === "dark" ? "dark" : "light"; } catch { return "light"; }
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem("sc:theme", theme); } catch { /* Appearance still works without storage. */ }
+  }, [theme]);
 
   return (
     <aside className={"sidebar" + (collapsed ? " collapsed" : "")}>
@@ -59,14 +68,18 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
         </button>
       </div>
 
+      {gatewayUrl && <a className="gateway-return" href={gatewayUrl} title="All Gateway apps" aria-label="All Gateway apps">
+        <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="12" y="3" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="12" y="12" width="5" height="5" rx="1"/></svg>
+        <span>All Gateway apps</span>
+      </a>}
       <button className="search" aria-label="Search metrics" onClick={() => onView("registry")}>
         <Icon d="M9 3a6 6 0 1 0 3.5 10.9l3.3 3.3 1.4-1.4-3.3-3.3A6 6 0 0 0 9 3zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8z" />
-        <span>Search</span><kbd>⌘K</kbd>
+        <span>Find a metric</span>
       </button>
 
       <nav>
-        <NavItem icon="home" label="Home" active={view === "home" && active === null}
-                 onClick={() => { onView("home"); onPick(null); }} />
+        <NavItem icon="home" label="Home" active={view === "home"}
+                 onClick={() => onView("home")} />
         <NavItem icon="registry" label="Metric Registry" active={view === "registry"}
                  badge={String(Object.keys(model.metrics).length)}
                  onClick={() => onView("registry")} />
@@ -78,22 +91,21 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
                  onClick={() => onView("connections")} />
       </nav>
 
-      <div className="section">Categories</div>
-      <nav>
-        {tables.map(([name, ms]) => (
-          <button key={name}
-            className={"nav cat" + (active === name ? " on" : "")}
-            onClick={() => onPick(name)}>
-            <span className="label">{prettyTable(name)}</span>
-            <span className="count">{ms.length}</span>
-          </button>
-        ))}
-      </nav>
-
+      {library}
       <div className="who">
+        <button className="workspace-settings" onClick={onSettings}>
+          <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="M3 6h14M3 14h14" /><circle cx="7" cy="6" r="2" fill="var(--panel)" /><circle cx="13" cy="14" r="2" fill="var(--panel)" /></svg>
+          Settings
+        </button>
+        <div className="workspace-caption"><span title={session.mode === "team" ? "Access is managed by your company" : "Roles are simulations on this computer, not authentication"}>{session.mode === "team" ? `Company workspace · ${session.user?.role}` : "Local alpha · Role preview"}</span>
+          <button className="theme-toggle" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} appearance`}
+            title={`Switch to ${theme === "light" ? "dark" : "light"} appearance`} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+            {theme === "light" ? "◐" : "◑"}
+          </button>
+        </div>
         <div className="who-row">
           <span className="avatar">{(principal || "SC").slice(0, 2).toUpperCase()}</span>
-          {principals.length > 0 ? (
+          {session.mode === "team" ? <span className="name">{session.user?.name}</span> : principals.length > 0 ? (
             <select className="who-sel" value={principal} aria-label="Acting as"
                     title="No principal denies all row-level-secured data"
                     onChange={(e) => onPrincipal(e.target.value)}>
@@ -102,6 +114,7 @@ export function Sidebar({ model, active, view, onPick, onView, collapsed, onTogg
             </select>
           ) : <span className="name">Local</span>}
         </div>
+        {session.mode === "team" && <button className="link" onClick={signOut}>Sign out</button>}
         <button className="who-source" onClick={() => onView("connections")}
                 title={activeSource
                   ? `${activeSource.label}${activeSource.status === "error" ? ` — ${activeSource.error}` : ""}`
@@ -127,5 +140,6 @@ function NavItem({ icon, label, badge, active, onClick }: any) {
 
 export function prettyTable(name: string) {
   return name.replace(/^(fct|dim)_/, "").replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\bSaas\b/g, "SaaS").replace(/\bMrr\b/g, "MRR");
 }
