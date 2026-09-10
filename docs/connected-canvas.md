@@ -89,6 +89,7 @@ Ingest generates the draft from the reviewed mapping, in duckglue shape, and sho
 - Columns: mapped types, plus the three lineage columns.
 - Dimensions: text, boolean, date and timestamp columns except identifiers and lineage columns.
 - Time dimension: the first `date` or `timestamp` column, declared as `default_date_column` on the table entry; Canvas treats it as a time axis only after an admin confirms it is a periodic fact date, not a lifecycle attribute.
+- Only `table`, `metrics` and `provenance` travel in the registration payload. Dimension lists, partition keys and the plain-language lines stay in Ingest; Canvas derives dimensions from column types and never proposes lineage columns.
 - Draft metrics, all with `reviewed: false`: `<dataset>_rows` (`count(*)`), and for each numeric column not flagged as money-without-unit, `<dataset>_<column>_total` (`sum(column)`) and `<dataset>_<column>_avg`. No time grains, no direction, no importance until review.
 
 ## Registration contract
@@ -121,9 +122,9 @@ A second import into an existing dataset name lands in `staging/`. Nothing Canva
 
 ## Phases
 
-1. **Ingest lake destination.** Layout, dataset records, lineage columns, naming, flags, quotas, staged load, promote and roll back with the drift check, draft model generation, minimal UI. Fully testable locally against a temporary lake directory. No Canvas call yet.
-2. **Canvas overlay and registration.** The overlay loader, the three endpoints, role rules, unreviewed visibility, provenance and "data as of" in the UI. Testable with fixtures.
-3. **Wire them together.** Ingest calls the registration endpoint, shows the Canvas status on the dataset, deep-links "Open in Semantic Canvas", and disconnects. Verified through the local launcher with both apps running.
+1. **Ingest lake destination (done).** Layout, dataset records, lineage columns, naming, flags, quotas, staged load, promote and roll back with the drift check, draft model generation, minimal UI. Fully testable locally against a temporary lake directory. No Canvas call yet.
+2. **Canvas overlay and registration (done).** The overlay loader, the three endpoints, role rules, unreviewed visibility, provenance and "data as of" in the UI. Testable with fixtures.
+3. **Wire them together (done).** Ingest calls the registration endpoint, shows the Canvas status on the dataset, deep-links "Open in Semantic Canvas", and disconnects. Verified through the local launcher with both apps running.
 4. **Snowflake landing schema.** Same record and semantics over Snowflake tables.
 5. **Live acceptance and docs.** Fresh Compose run, a real Salesforce or Stripe account, the operator guide, and the release-gate updates in `suite-packaging.md`.
 
