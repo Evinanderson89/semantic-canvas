@@ -1,3 +1,4 @@
+import { ChartActivityProvider } from "./ChartActivity.tsx";
 import { useSession } from "./Session.tsx";
 import { applyProposal } from "../canvas/proposals.ts";
 import { canvasSchema, dashboardSchema } from "../compiler/schema.ts";
@@ -279,7 +280,7 @@ export function App() {
     }
   };
 
-  const save = async (asCopy = false) => {
+  const save = async (asCopy = false, throwOnFailure = false) => {
     if (!book || saving) return;
     const epoch = documentEpoch.current, key = draftKey.current;
     const id = asCopy ? crypto.randomUUID() : dashId ?? crypto.randomUUID();
@@ -299,7 +300,7 @@ export function App() {
         readDrafts();
       } catch { /* the server copy is saved even if recovery storage is unavailable */ }
       refreshSaved();
-    } catch (e: any) { if (documentEpoch.current === epoch) setNotice(`Save failed: ${e.message}`); }
+    } catch (e: any) { if (documentEpoch.current === epoch) setNotice(`Save failed: ${e.message}`); if (throwOnFailure) throw e; }
     finally { if (documentEpoch.current === epoch) setSaving(false); }
   };
 
@@ -698,6 +699,7 @@ export function App() {
               </div>
             )}
 
+            <ChartActivityProvider key={`${activeSourceId}:${asWho}:${draftKey.current}`} dashboardId={dashId} document={book!} revision={revision} dirty={dirty} onSave={() => save(false, true)} model={model}>
             <Canvas canvas={canvas} tiles={dash.tiles} zoom={zoom}
                     emptyState={!canvas.locked ? <div className="canvas-empty">
                       <div className="empty-composition" aria-hidden="true"><i /><i /><i /></div>
@@ -751,6 +753,7 @@ export function App() {
                             }} />
                       </TileBoundary>
                     )} />
+            </ChartActivityProvider>
           </>
         )}
       </main>

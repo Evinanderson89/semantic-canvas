@@ -105,7 +105,7 @@ Stop the app first; DuckDB locks out a second process. The command refuses to ov
 SC_DATA_DIR=/safe/new-workspace npm run restore -- /safe/location/library.json
 ```
 
-Configure the same source IDs and policy/model configuration before opening restored dashboards. Restoration validates every document and applies the library atomically. It refuses an existing nonempty database.
+Library backups include chart comments, replies, alert rules, and the last 30 alert observations. They contain discussion text and observed metric values, so restrict their access. Restored alerts start paused and must be reviewed before resuming. Configure the same source IDs and policy/model configuration before opening restored dashboards. Restoration validates every document and applies the library atomically. It refuses an existing nonempty database.
 
 **Full installation backup:** stop the application, then back up the entire `/data` volume plus `.env.team`, `deploy/access.yaml`, `deploy/policies.yaml` and any external mounted model/data files. This includes secrets: encrypt the archive and restrict access. Do not copy an active DuckDB file. Example team volume backup, from the repo root:
 
@@ -121,6 +121,14 @@ Save the private host configuration files separately with the same backup date. 
 For restoration, provision an empty named volume and restore the archive using the same UID (1000) while the app is stopped. Never unpack an untrusted archive or restore over a populated workspace. Restore the matching private host files, then start the same application version. Start with a library restore if you only need dashboards.
 
 Before upgrading, record the current commit/image ID, make the full stopped backup, then rebuild and restart. Keep the backup and old image until you have checked login, restricted queries, saves and reference imports. Database migrations are additive today; do not assume future migrations are reversible. Roll back both the old image and its matching backup if a migration fails. No automatic scheduled backup or off-host storage is included.
+
+## Chart alert operations
+
+Alerts use the same semantic compiler and row-level permissions as chart queries. Results and rules remain private to the owner; comments are shared only within the same source and RLS scope. A policy change changes that scope instead of exposing earlier discussions under broader access.
+
+The single-process scheduler checks due watches once a minute, up to 100 per sweep, sequentially. Rules choose 15-minute, hourly, or daily checks. There is no distributed scheduler or off-host notification service. Checks are in-app; a closed browser can still receive saved observations when reopened, provided the server was running and, in company mode, the owner still had an unexpired authenticated session. Sign-out/session expiry pauses query execution. A changed metric, filter configuration, or semantic model requires updating the watch.
+
+Anomaly checks are robust statistical heuristics, not a guarantee of incident detection. Stale or missing data yields a waiting state. Reporting periods are interpreted in UTC; source completeness and warehouse ingestion watermarks are not verified. Query timeouts/cancellation and richer seasonal forecasting remain part of the broader operational work below.
 
 ## Current operational limits
 

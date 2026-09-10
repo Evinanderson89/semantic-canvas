@@ -1,3 +1,4 @@
+import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
@@ -829,6 +830,8 @@ function principalOf(req: any) {
   return rls.principals[id] ?? null;
 }
 
+const chartActivity = mountChartActivity(app, { safe, auth, source: pick, sources: () => sources, principal: principalOf, rls: () => rls });
+
 app.get("/api/principals", safe((req, res) =>
   res.json({
     mode: auth.config.mode,
@@ -874,6 +877,7 @@ if (process.env.SC_SERVE_UI === "true") {
 const host = process.env.SC_HOST ?? (auth.config.mode === "team" ? "0.0.0.0" : "127.0.0.1");
 boot().then(() => {
   const server = app.listen(PORT, host);
-  const stop = () => { ready = false; telemetry.log("server.stopping"); server.close(async () => { await Promise.allSettled(sources.map(s => s.conn?.close())); await closeStore(); await telemetry.close(); process.exit(0); }); setTimeout(() => process.exit(1), 15000).unref(); };
+  chartActivity.start();
+  const stop = () => { ready = false; telemetry.log("server.stopping"); server.close(async () => { await chartActivity.stop(); await Promise.allSettled(sources.map(s => s.conn?.close())); await closeStore(); await telemetry.close(); process.exit(0); }); setTimeout(() => process.exit(1), 15000).unref(); };
   process.once("SIGTERM", stop); process.once("SIGINT", stop);
 }).catch(async e => { telemetry.log("server.start_failed", { errorType: e?.name ?? "Error" }, "error"); process.stderr.write(`Semantic Canvas could not start: ${String(e?.message ?? "Invalid configuration")}\n`); await telemetry.close(); process.exit(1); });

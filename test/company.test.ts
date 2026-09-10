@@ -136,6 +136,39 @@ it("forwards the signed-in session for embedded tools and ignores forged scope a
     expect(result.principal).toBe("emea");
   } finally { if (previous === undefined) delete process.env.PORT; else process.env.PORT = previous; }
 });
+it("scopes chart discussions to data permissions and watches to their authenticated owner", async () => {
+  const editor = await login("discussion-editor", ["editors"]), viewer = await login("discussion-viewer", ["viewers"]), admin = await login("discussion-admin", ["admins"]);
+  const tile = { id: "events", metrics: ["event_count"], dimensions: [], layout: { x: 0, y: 0, w: 400, h: 240 } };
+  const document = { id: "discussion-dashboard", spec: { title: "Discussion", tiles: [tile] } };
+  expect((await call("/api/dashboards", { method: "POST", headers: headers(editor), body: JSON.stringify(document) })).status).toBe(200);
+  const path = "/api/chart-activity/discussion-dashboard/events";
+  const comment = await call(path + "/comments", { method: "POST", headers: headers(viewer), body: JSON.stringify({ body: "A scoped observation" }) });
+  expect(comment.status, await comment.clone().text()).toBe(201);
+  const shared = await (await call(path, { headers: headers(editor) })).json();
+  expect(shared.threads).toHaveLength(1); expect(shared.threads[0].authorId).toBe(viewer.user.id);
+  expect((await (await call(path, { headers: headers(admin) })).json()).threads).toHaveLength(0);
+  expect((await call(path, { headers: { ...headers(viewer), "x-sc-source": "private" } })).status).toBe(403);
+  expect((await call(path + "/comments", { method: "POST", headers: { cookie: viewer.cookie, "content-type": "application/json" }, body: JSON.stringify({ body: "No CSRF" }) })).status).toBe(403);
+  expect((await call(path + "/comments", { method: "POST", headers: headers(viewer), body: JSON.stringify({ body: "Forged name", authorId: editor.user.id }) })).status).toBe(400);
+  const payload = { rule: { metric: "event_count", mode: "threshold", threshold: 0 }, revision: 1, version: 0 };
+  expect((await call(path + "/alert", { method: "PUT", headers: headers(viewer), body: JSON.stringify(payload) })).status).toBe(200);
+  expect((await (await call(path, { headers: headers(editor) })).json()).alert).toBeNull();
+  expect((await call(path + "/alerts/check", { method: "POST", headers: headers(viewer) })).status).toBe(200);
+  expect((await call(path + "/alerts/check", { method: "POST", headers: headers(viewer) })).status).toBe(200);
+  const checked = await (await call(path, { headers: headers(viewer) })).json();
+  expect(checked.alert.evaluation.state).toBe("triggered"); expect(checked.alert.events).toHaveLength(1);
+  expect((await call(path + "/alert", { method: "PATCH", headers: headers(viewer), body: JSON.stringify({ enabled: false, version: 1 }) })).status).toBe(200);
+  expect((await call(path + "/alert", { method: "PUT", headers: headers(viewer), body: JSON.stringify({ ...payload, version: 2 }) })).status).toBe(200);
+  expect((await (await call(path, { headers: headers(viewer) })).json()).alert.enabled).toBe(false);
+  expect((await call(path + "/alerts/check", { method: "POST", headers: headers(viewer) })).status).toBe(400);
+  expect((await call(path + "/alert", { method: "PATCH", headers: headers(viewer), body: JSON.stringify({ enabled: true, version: 3 }) })).status).toBe(200);
+  const query = await (await call("/api/query", { method: "POST", headers: headers(viewer), body: JSON.stringify({ metrics: ["event_count"], dimensions: [] }) })).json();
+  expect(checked.alert.evaluation.value).toBe(Number(query.rows[0][0]));
+  expect((await call(path + "/alert", { method: "PUT", headers: headers(viewer), body: JSON.stringify(payload) })).status).toBe(409);
+  await call("/api/dashboards", { method: "POST", headers: headers(editor), body: JSON.stringify({ ...document, revision: 1, spec: { ...document.spec, tiles: [{ ...tile, where: [{ id: "country", source: "dimension", field: "dim_users.country", mode: "discrete", values: ["GB"] }] }] } }) });
+  await call(path + "/alerts/check", { method: "POST", headers: headers(viewer) });
+  expect((await (await call(path, { headers: headers(viewer) })).json()).alert.evaluation.state).toBe("needs_review");
+});
 it("provisions the first source from an empty registry and keeps its uploaded model", async () => {
   const s = await login("setup-admin", ["admins"]);
   const upload = await call("/api/setup/model", { method: "POST", headers: headers(s), body: JSON.stringify({ adapter: "duckglue", content: await readFile("sample-data/warehouse.yaml", "utf8") }) });

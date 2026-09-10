@@ -35,6 +35,7 @@ Open [Semantic Canvas](http://127.0.0.1:5173). The API runs at `127.0.0.1:5174`.
 - Copy charts into another tab or saved dashboard, with destination filter connections and revision protection.
 - Explore with filters and time drill-downs, then refresh data without replacing the design.
 - Save, reopen, save a copy, undo canvas changes and recover unsaved drafts from Home.
+- Open the message icon on a chart to discuss it, reply, and resolve conversations. Open the bell to create a personal threshold or anomaly watch, preview its result, and review its history.
 - Review charts against their current filters and drill state. Partial reviews identify unavailable or limited results.
 - Ask the optional AI assistant to improve the active unsaved document. Review its proposed edits, apply them together, and undo them in one step.
 - Export charts as CSV or export a dashboard as PNG.
@@ -90,7 +91,7 @@ To update a saved dashboard, call `get_dashboard` and pass its `revision` into `
 
 ## Data and recovery
 
-Saved dashboards live in `~/.semantic-canvas/dashboards.duckdb`. Set `SC_DATA_DIR` to choose another directory. Unsaved recovery drafts are stored in this browser and appear on Home; they do not include query result rows or connection credentials. If browser recovery fails, internal navigation keeps the current document open and offers a downloadable JSON backup. Use **Import backup** on Home to restore it as a new document. Save larger image-heavy documents explicitly; browser storage has a quota.
+Saved dashboards, chart conversations, and personal alert rules/history live in `~/.semantic-canvas/dashboards.duckdb`. Set `SC_DATA_DIR` to choose another directory. Unsaved recovery drafts are stored in this browser and appear on Home; they do not include query result rows or connection credentials. If browser recovery fails, internal navigation keeps the current document open and offers a downloadable JSON backup. Use **Import backup** on Home to restore it as a new document. Save larger image-heavy documents explicitly; browser storage has a quota.
 
 In Docker, data lives under `/data` in the persistent workspace volume. Company-mode drafts use account-specific tab session storage and are removed from that tab on sign-out. Administrators can download a consistent library snapshot; offline restore validates it and requires an empty store. See [backup and restore](docs/self-hosting.md#back-up-restore-and-upgrade).
 
@@ -126,3 +127,15 @@ Browser tests start their own servers on ports 5273/5274 and use `.test-data/` f
 Native semantic-layer execution, completeness metadata, evaluated narrative accuracy, responsive viewer layouts and collaboration remain future work. Company mode still needs real-provider validation, finer document permissions, provisioning, distributed sessions and deeper operational instrumentation. This alpha focuses on preserving authored work and rejecting answers the current implementation cannot produce faithfully.
 
 See [architecture and contracts](docs/architecture.md), [contributing](CONTRIBUTING.md), [security](SECURITY.md), and [release notes](CHANGELOG.md). MIT licensed. See [LICENSE](LICENSE).
+
+## Chart comments and alerts
+
+The message and bell icons are in the upper-right corner of metric charts, including KPI cards. Save the dashboard first. Comments are plain text with replies and resolution; author names come from company sign-in. Conversations are shared within the same source and RLS scope. Alert rules and observed values are private to their owner. Copies of a dashboard or chart start their own activity, and deleting a chart from a saved dashboard removes its activity.
+
+Alerts support a threshold above/below a value and an anomaly check for a single time series. They query the saved metric through the semantic compiler, with saved filter defaults and server-enforced RLS. Changing the saved query or semantic model requires reviewing the watch. Live cross-filtering and drilling do not alter it. Preview a check before saving, check now, pause/resume, and mark updates read. The bell has a small unread dot; it does not repeatedly notify on every check of the same ongoing breach. The last 30 triggered observations are retained.
+
+Checks run in the Node server every 15 minutes, hour, or day, with a scheduler sweep once a minute. Keep the server running. In company mode, an owner's unexpired authenticated session and source access are required; checks pause until sign-in resumes. Notification delivery is **in-app only**; no email, Slack, browser push, or external service is configured by this feature.
+
+Time-series checks skip the current UTC calendar period and wait for the most recently closed period. Nulls, missing periods, duplicate dates, stale data, and insufficient history produce a waiting state. Anomaly checks need 14 closed periods, use up to 60 prior observations, and compare against the median historical change with a scaled median absolute deviation range. Daily series use week-over-week changes once four weeks of history exist. Sensitivity adjusts the range, with a 1% floor for flat baselines. The range is an investigation aid, not a statistical confidence interval, and source completeness remains unverified. See the [NIST description of scaled MAD](https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/mad.htm).
+
+Library backups include conversations and alert observations, so handle them as company data. Restoring a library pauses all watches for review. Existing library backups without activity still restore correctly. Keep the same source and RLS configuration to recover the matching discussion scope.

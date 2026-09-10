@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as d3 from "d3";
 import { kpiSummary } from "./kpiSummary.ts";
 import { DEFAULT_SPARK, type SparkOptions } from "../compiler/spec.ts";
@@ -12,7 +12,8 @@ type Point = { x: unknown; y: number };
  * wants a zero baseline, a retention ratio wants a tight domain or it reads as
  * a flat line.
  */
-export function Kpi({ label, series, options, onOptions, format, grain, previous, comparisonLabel, direction = "neutral" }: {
+export function Kpi({ label, series, options, onOptions, format, grain, previous, comparisonLabel, direction = "neutral", actions }: {
+  actions?: ReactNode;
   direction?: "higher" | "lower" | "neutral";
   label: string; series: Point[]; grain?: string | null; previous?: number | null; comparisonLabel?: string;
   options?: Partial<SparkOptions>;
@@ -104,6 +105,7 @@ export function Kpi({ label, series, options, onOptions, format, grain, previous
             </svg>
           </button>
         )}
+        {actions}
       </div>
 
       <div className="kpi-asof">{grain === "month" ? "Period " : "As of "}{grain === "month" && series.at(-1)?.x ? new Date(String(series.at(-1)?.x).slice(0, 10) + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" }) : period(series.at(-1)?.x) || "—"}</div>

@@ -1,3 +1,4 @@
+import { ChartActivityButtons } from "./ChartActivity.tsx";
 import { visibleQuery } from "./query.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { memo, useEffect, useRef, useState } from "react";
@@ -321,6 +322,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
             </span>
           )}
           <span className="spacer" />
+          <ChartActivityButtons tileId={spec.id} />
           <TileActions sql={!locked ? state.sql : undefined}
                        onRemove={!locked ? () => onRemove(spec.id) : undefined}
                        onExplain={aiAvailable && state.status === "ok" ? runExplain : undefined}
@@ -328,6 +330,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                        onExport={state.status === "ok" ? () => setExportOpen((v) => !v) : undefined} />
         </header>
       )}
+      {kind === "kpi" && timeDimIndex < 0 && <div className="kpi-activity"><ChartActivityButtons tileId={spec.id} /></div>}
       {state.status === "ok" && state.truncated && <div className="result-warning" role="status" title={state.warnings?.join(" ")}>{state.window ? "Latest window" : "Limited results"} · {state.limit} rows · export is limited</div>}
       {beautifyOpen && (
         <div className="explain-pop beautify-pop">
@@ -436,7 +439,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         )}
         {state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
           kind === "kpi" && timeDimIndex >= 0
-            ? <Kpi label={title} grain={grain} direction={model.metrics[spec.metrics[0]]?.direction}
+            ? <Kpi label={title} actions={<ChartActivityButtons tileId={spec.id} />} grain={grain} direction={model.metrics[spec.metrics[0]]?.direction}
                    previous={query.compare && query.compare !== "none" ? state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)] ?? null : undefined}
                    comparisonLabel={spec.compare === "yoy" ? "same period last year" : "prior period"}
                    series={(state.rows ?? []).filter((r: any[]) => r[state.columns.indexOf(dimAlias(dimensions[timeDimIndex]))] != null).map((r: any[]) =>
