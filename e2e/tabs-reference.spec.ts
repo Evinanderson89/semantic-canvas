@@ -10,7 +10,7 @@ async function open(page: any, d: DashboardSpec) {
   const id = crypto.randomUUID();
   const saved = await page.request.post("/api/dashboards", { data: { id, spec: d, canvas: { ...DEFAULT_CANVAS, width: 1000, height: 850 }, revision: 0 } }); expect(saved.ok()).toBe(true);
   await page.goto("/"); await page.getByLabel("Acting as", { exact: true }).selectOption("admin");
-  await page.getByRole("button", { name: "Open saved dashboard", exact: true }).click(); await page.getByRole("button", { name: new RegExp(d.title) }).click(); return id;
+  await page.getByRole("button", { name: "Open saved dashboard", exact: true }).click(); await page.getByRole("dialog", { name: "Saved dashboards" }).getByRole("button", { name: new RegExp(d.title) }).click(); return id;
 }
 test("authors shared filters, carries selections across tabs and saves the whole document", async ({ page }) => {
   const d = spec(), id = await open(page, d);
@@ -22,7 +22,7 @@ test("authors shared filters, carries selections across tabs and saves the whole
   await expect(page.locator(".save-status")).toHaveText("Saved");
   const query = page.waitForResponse(r => r.url().endsWith("/api/query") && r.request().postDataJSON()?.id === "b" && r.request().postDataJSON()?.where?.some((f: any) => f.values?.includes("US")));
   await page.getByRole("tab", { name: /Detail/ }).click(); expect((await query).ok()).toBe(true);
-  await expect(page.getByLabel("Shared filters")).toContainText("US"); await expect(page.locator(".node")).toHaveCount(1);
+  await expect(page.getByLabel("Dashboard filters")).toContainText("US"); await expect(page.locator(".node")).toHaveCount(1);
   await page.getByRole("button", { name: "Tab actions", exact: true }).click(); await page.getByRole("button", { name: "Duplicate tab", exact: true }).click(); await expect(page.getByRole("tab", { name: /Detail \(copy\)/ })).toBeVisible();
   await page.getByRole("button", { name: "Save dashboard", exact: true }).click(); await expect(page.locator(".save-status")).toHaveText("Saved");
   const persisted = await (await page.request.get(`/api/dashboards/${id}`)).json(); expect(persisted.spec.tabs).toHaveLength(3); expect(persisted.spec.tiles).toHaveLength(4); expect(persisted.spec.filters[0].bindings).toHaveLength(3); expect(persisted.spec.filters[0].defaultValue).toBeUndefined();

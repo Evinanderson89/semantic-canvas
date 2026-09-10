@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
-export interface WorkspaceSession { mode: "local" | "team"; authenticated: boolean; canEdit: boolean; canAdmin: boolean; csrf?: string; user?: { id: string; name: string; role: string } }
+export interface WorkspaceSession { mode: "local" | "team"; authenticated: boolean; canEdit: boolean; canAdmin: boolean; csrf?: string; gatewayUrl?: string; user?: { id: string; name: string; role: string } }
 const local: WorkspaceSession = { mode: "local", authenticated: true, canEdit: true, canAdmin: true };
 const Context = createContext(local);
 export const useSession = () => useContext(Context);

@@ -18,6 +18,14 @@ Manual edits and complete layout changes record document snapshots. A layout tra
 
 Design Review can propose a story structure for an unsectioned, unpinned dashboard. `src/suggest/storyStructure.ts` groups existing tiles into headline metrics, a focal trend, supporting trends and breakdowns, then previews headings and a neutral reading guide. It preserves query fields, filters, authored titles and existing notes, and validates the resulting document. Existing headings or pinned tiles suppress this proposal rather than rewriting authored structure. The guide describes a reading order, not observed business findings. Applying the complete proposal is one document undo step.
 
+## Library persistence and reuse
+
+`src/library/model.ts` defines folder and reusable-view contracts. `src/store/store.ts` owns source-scoped `library_folders` and `library_views` tables and a nullable `dashboards.folder_id` column. Migrations are additive. Folder edits, document moves, renames and view saves share the store's serialized queue and optimistic revisions. Ordinary dashboard saves preserve an existing folder unless a folder change is explicitly supplied. Folder trees reject cycles, duplicate sibling names and depth beyond eight levels; deletion requires an empty folder.
+
+`src/library/views.ts` captures one tab or selection as an independent authored composition. It prunes unrelated filter bindings and strips temporary exploration state. Insertion remaps tile, heading and filter identities, keeps copies on the target tab, and preserves saved filter defaults without binding them to existing destination tiles. A view too wide for its destination is arranged to fit. The browser validates the complete resulting dashboard and records one undo snapshot. Saved view definitions are validated against the selected semantic model again when written and inserted; query-time RLS remains authoritative.
+
+`/api/library` returns metadata only. View definitions load on demand. Company write guards protect all library mutations; source allowlists apply before storage access. Folder membership is organizational metadata, not an ACL. Library backups include folders, views and dashboard folder membership, and older backups restore with empty library collections. Restore validates source references and parent trees before the transaction.
+
 ## AI action boundary
 
 The browser sends the current unsaved document and selection when opening a canvas conversation. The server supplies the authoritative model and binds tools to the selected source and simulated role. Active-canvas chat has read tools and `propose_canvas_changes`, not direct saved-document writes.
@@ -45,3 +53,11 @@ Before claiming native semantic compatibility, compare a representative fixture 
 The production server serves the built UI and API from one origin. Docker persists the store, editable source configuration, credentials and uploaded models under `/data`; team access/RLS rules are private operator-mounted files. Operator mutations are serialized and source configuration replacement is atomic. Dashboard library snapshots serialize with saves; validated restore is transactional and restricted to an empty store.
 
 `src/operations/telemetry.ts` emits allowlisted JSON records and optionally batches OTLP/HTTP logs and request spans. Requests carry generated IDs, template routes and pseudonymous actor IDs. No payloads, SQL, rows or credentials are recorded. Startup health, admin status counters and backup/recovery recipes are documented in `self-hosting.md`. All sessions and operational counters remain process-local; this is a single-instance design.
+
+The source-scoped library is initialized once with an editable folder structure. Bundled catalogue starters are persisted dashboard definitions flagged `is_template`; loading one in the UI starts a new document, while server saves reject overwriting a template. Template IDs are excluded from the recent saved-dashboard list. The initialization marker is included in backups, so deleted starter content does not reappear after a restart or restore. First setup files unorganized dashboards by their leading metric without rewriting their specifications or moving already-filed work.
+
+## Suite boundary
+
+Canvas is the analytics app in a suite with Ingest and shared Gateway infrastructure. Keep semantic compilation, source/row access and authored dashboard persistence in Canvas; keep ingestion staging, connector credentials and import jobs in Ingest. Gateway supplies discovery and authenticated access, not implicit cross-app data authorization. Canvas verifies Gateway sessions independently through `SC_MODE=gateway` and its existing access policy. The local launcher is an explicitly separate preview.
+
+See [suite packaging](suite-packaging.md) for standalone/full-workspace choices, the unimplemented reviewed data handoff, storage boundaries and release gates. Ingest's DuckDB file is not directly supported by the current Parquet-backed Canvas connector. A shared login, app link or volume does not close that gap.

@@ -6,9 +6,10 @@ import type { ActivitySummary, AlertInput, AlertRule, CommentThread, Evaluation 
 import { makeFormatter, resolveFormat } from "../format/format.ts";
 import { readResponse } from "./http.ts";
 import { useSession } from "./Session.tsx";
+import type { ChartPreferences } from "./ChartPreferences.tsx";
 
 type Panel = "comments" | "alerts";
-const Context = createContext<{ summary: ActivitySummary; open: (tileId: string, panel: Panel) => void } | null>(null);
+const Context = createContext<{ summary: ActivitySummary; preferences: ChartPreferences; open: (tileId: string, panel: Panel) => void } | null>(null);
 export function ActivityIcon({ kind }: { kind: Panel }) {
   return <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
     {kind === "comments" ? <path d="M16.5 9.5a6.5 6.5 0 0 1-6.5 6.5H3.5l1.1-3A6.5 6.5 0 1 1 16.5 9.5Z" strokeLinejoin="round" />
@@ -16,50 +17,55 @@ export function ActivityIcon({ kind }: { kind: Panel }) {
   </svg>;
 }
 export function ChartActivityButtons({ tileId }: { tileId: string }) {
-  const ctx = useContext(Context); if (!ctx) return null;
+  const ctx = useContext(Context); if (!ctx || !ctx.preferences.comments && !ctx.preferences.alerts) return null;
   const info = ctx.summary[tileId];
   return <span className="chart-activity-buttons" onPointerDown={e => e.stopPropagation()}>
-    <button type="button" className={info?.comments ? "has-activity" : ""} title="Chart comments" aria-label={`Chart comments${info?.comments ? `, ${info.comments} open` : ""}`} onClick={() => ctx.open(tileId, "comments")}>
+    {ctx.preferences.comments && <button type="button" className={info?.comments ? "has-activity" : ""} title="Chart comments" aria-label={`Chart comments${info?.comments ? `, ${info.comments} open` : ""}`} onClick={() => ctx.open(tileId, "comments")}>
       <ActivityIcon kind="comments" />{Boolean(info?.comments) && <span className="activity-count">{info.comments > 9 ? "9+" : info.comments}</span>}
-    </button>
-    <button type="button" className={info?.alert?.unread ? "has-alert" : info?.alert?.enabled ? "is-watching" : ""} title="Chart alerts" aria-label={`Chart alerts${info?.alert?.unread ? `, ${info.alert.unread} unread` : info?.alert?.enabled ? ", watching" : ""}`} onClick={() => ctx.open(tileId, "alerts")}>
+    </button>}
+    {ctx.preferences.alerts && <button type="button" className={info?.alert?.unread ? "has-alert" : info?.alert?.enabled ? "is-watching" : ""} title="Chart alerts" aria-label={`Chart alerts${info?.alert?.unread ? `, ${info.alert.unread} unread` : info?.alert?.enabled ? ", watching" : ""}`} onClick={() => ctx.open(tileId, "alerts")}>
       <ActivityIcon kind="alerts" />{Boolean(info?.alert?.unread) && <span className="activity-dot" />}
-    </button>
+    </button>}
   </span>;
 }
-export function ChartActivityProvider({ dashboardId, document: book, revision, dirty, onSave, model, children }: {
+export function ChartActivityProvider({ dashboardId, document: book, revision, dirty, onSave, model, children, preferences }: {
   dashboardId: string | null; document: DashboardSpec; revision: number; dirty: boolean;
-  onSave: () => Promise<void>; model: Model; children: ReactNode;
+  onSave: () => Promise<void>; model: Model; children: ReactNode; preferences: ChartPreferences;
 }) {
   const [summary, setSummary] = useState<ActivitySummary>({});
   const [selection, setSelection] = useState<{ tileId: string; panel: Panel } | null>(null);
   const trigger = useRef<HTMLElement | null>(null);
+  const enabled = preferences.comments || preferences.alerts;
   const refresh = useCallback(async (signal?: AbortSignal) => {
-    if (!dashboardId) return;
+    if (!dashboardId || !enabled) return;
     const data = await fetch(`/api/chart-activity/${encodeURIComponent(dashboardId)}`, { signal }).then(readResponse);
     if (!signal?.aborted) setSummary(data.summary);
-  }, [dashboardId]);
+  }, [dashboardId, enabled]);
   useEffect(() => {
     const ac = new AbortController(); setSummary({});
+    if (!enabled) return;
     const run = () => { if (!document.hidden) void refresh(ac.signal).catch(() => {}); };
     run(); const timer = setInterval(run, 30_000); document.addEventListener("visibilitychange", run);
     return () => { ac.abort(); clearInterval(timer); document.removeEventListener("visibilitychange", run); };
-  }, [refresh, revision]);
+  }, [refresh, revision, enabled]);
   const tile = book.tiles.find(t => t.id === selection?.tileId);
-  const close = () => { const button = trigger.current; setSelection(null); requestAnimationFrame(() => button?.focus()); };
-  return <Context.Provider value={{ summary, open: (tileId, panel) => { trigger.current = document.activeElement as HTMLElement; setSelection({ tileId, panel }); } }}>
+  const close = useCallback(() => { const button = trigger.current; setSelection(null); requestAnimationFrame(() => {
+    if (button?.isConnected) button.focus(); else document.querySelector<HTMLButtonElement>(".workspace-settings")?.focus();
+  }); }, []);
+  return <Context.Provider value={{ summary, preferences, open: (tileId, panel) => { if (!preferences[panel]) return; trigger.current = document.activeElement as HTMLElement; setSelection({ tileId, panel }); } }}>
     {children}
-    {selection && tile && createPortal(<ActivityDrawer key={tile.id} tile={tile} model={model} dashboardId={dashboardId} revision={revision} dirty={dirty} onSave={onSave}
+    {selection && tile && createPortal(<ActivityDrawer key={tile.id} preferences={preferences} tile={tile} model={model} dashboardId={dashboardId} revision={revision} dirty={dirty} onSave={onSave}
       initialPanel={selection.panel} close={close} refreshSummary={() => refresh().catch(() => {})} />, document.body)}
   </Context.Provider>;
 }
 const dateLabel = (date: string) => new Date(date).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, initialPanel, close, refreshSummary }: {
+function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, initialPanel, close, refreshSummary, preferences }: {
   tile: TileSpec; model: Model; dashboardId: string | null; revision: number; dirty: boolean; onSave: () => Promise<void>;
-  initialPanel: Panel; close: () => void; refreshSummary: () => Promise<void>;
+  initialPanel: Panel; close: () => void; refreshSummary: () => Promise<void>; preferences: ChartPreferences;
 }) {
   const session = useSession(), dialog = useRef<HTMLDialogElement>(null);
   const [panel, setPanel] = useState(initialPanel), [threads, setThreads] = useState<CommentThread[]>([]);
+  useEffect(() => { if (!preferences[panel]) close(); }, [preferences, panel, close]);
   const [alert, setAlert] = useState<AlertRule | null>(null), [ownerId, setOwnerId] = useState("");
   const [loading, setLoading] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [body, setBody] = useState(""), [replyTo, setReplyTo] = useState<string | null>(null), [reply, setReply] = useState("");
@@ -109,11 +115,13 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
       <header className="activity-header"><div><span className="activity-eyebrow">On this chart</span><h2 id="activity-heading">{title}</h2></div><button className="activity-close" aria-label="Close chart activity" onClick={close}>×</button></header>
       <div className="activity-tabs" role="tablist" aria-label="Chart activity" onKeyDown={e => {
         if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
-        e.preventDefault(); const next = e.key === "Home" ? "comments" : e.key === "End" ? "alerts" : panel === "comments" ? "alerts" : "comments";
+        e.preventDefault(); const panels = (["comments", "alerts"] as const).filter(p => preferences[p]);
+        const next = e.key === "Home" ? panels[0] : e.key === "End" ? panels[panels.length - 1] : panels[(panels.indexOf(panel) + 1) % panels.length];
+        if (!next) return;
         setPanel(next); dialog.current?.querySelector<HTMLButtonElement>(next === "comments" ? "#discussion-tab" : "#alerts-tab")?.focus();
       }}>
-        <button role="tab" tabIndex={panel === "comments" ? 0 : -1} aria-selected={panel === "comments"} aria-controls="chart-discussion" id="discussion-tab" onClick={() => setPanel("comments")}><ActivityIcon kind="comments" />Comments <span>{threads.filter(t => !t.resolved).length || ""}</span></button>
-        <button role="tab" tabIndex={panel === "alerts" ? 0 : -1} aria-selected={panel === "alerts"} aria-controls="chart-alerts" id="alerts-tab" onClick={() => setPanel("alerts")}><ActivityIcon kind="alerts" />Alerts {alert?.enabled && <i />}</button>
+        {preferences.comments && <button role="tab" tabIndex={panel === "comments" ? 0 : -1} aria-selected={panel === "comments"} aria-controls="chart-discussion" id="discussion-tab" onClick={() => setPanel("comments")}><ActivityIcon kind="comments" />Comments <span>{threads.filter(t => !t.resolved).length || ""}</span></button>}
+        {preferences.alerts && <button role="tab" tabIndex={panel === "alerts" ? 0 : -1} aria-selected={panel === "alerts"} aria-controls="chart-alerts" id="alerts-tab" onClick={() => setPanel("alerts")}><ActivityIcon kind="alerts" />Alerts {alert?.enabled && <i />}</button>}
       </div>
       <div className="activity-content">
         {error && <div className="activity-error" role="alert">{error}<button onClick={() => { setError(""); void action(() => load()); }}>Retry</button></div>}

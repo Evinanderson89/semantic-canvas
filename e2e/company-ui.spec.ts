@@ -1,3 +1,4 @@
+import { openStarter } from "./library-helpers.ts";
 import { test, expect } from "@playwright/test";
 
 test("company sign-in keeps data behind the sign-in screen", async ({ page }) => {
@@ -13,7 +14,7 @@ test("viewer workspace hides role simulation and editing controls", async ({ pag
   await page.goto("/");
   await expect(page.getByText("Your metrics, in focus.")).toBeVisible();
   await expect(page.getByLabel("Acting as")).toHaveCount(0);
-  await page.getByRole("button", { name: "Messy dashboard", exact: true }).click();
+  await openStarter(page, "Dashboard cleanup demo");
   await expect(page.getByRole("button", { name: "Save dashboard", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Edit dashboard", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Smart arrange", exact: true })).toHaveCount(0);

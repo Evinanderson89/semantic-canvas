@@ -1,10 +1,15 @@
+import { openStarter } from "./library-helpers.ts";
 import { expect, test } from "@playwright/test";
 
 test("chart comments survive reopening, replies resolve, and personal alerts keep a quiet history", async ({ page }) => {
   const errors: string[] = []; page.on("pageerror", e => errors.push(e.message));
   await page.goto("/");
-  await page.getByRole("button", { name: "Messy dashboard", exact: true }).click();
+  await openStarter(page, "Dashboard cleanup demo");
   await page.getByLabel("Acting as", { exact: true }).selectOption("admin");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("switch", { name: "Chart chats", exact: true }).check();
+  await page.getByRole("switch", { name: "Chart notifications", exact: true }).check();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   // The rough draft intentionally overlaps. Arrange first so the controls are usable.
   await page.getByRole("button", { name: "Smart arrange", exact: true }).click();
   await page.getByRole("button", { name: "Apply layout", exact: true }).click();
@@ -50,6 +55,15 @@ test("chart comments survive reopening, replies resolve, and personal alerts kee
   await drawer.getByRole("button", { name: "Pause", exact: true }).click();
   await expect(drawer.getByText("Paused", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("switch", { name: "Chart chats", exact: true }).uncheck();
+  await page.getByRole("switch", { name: "Chart notifications", exact: true }).uncheck();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.locator(".chart-activity-buttons")).toHaveCount(0);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("switch", { name: "Chart chats", exact: true }).check();
+  await page.getByRole("switch", { name: "Chart notifications", exact: true }).check();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   await page.getByRole("button", { name: "Chart comments, 1 open" }).click();
   await expect(drawer.locator(".activity-reply")).toContainText("compare this with retention");
   await page.setViewportSize({ width: 390, height: 844 });

@@ -1,3 +1,4 @@
+import { openStarter } from "./library-helpers.ts";
 import { expect, test, type Page } from "@playwright/test";
 
 async function scratch(page: Page) {
@@ -34,7 +35,7 @@ test("new canvases get new saved identities; saved dashboards reopen from Home",
 
 test("refresh and role changes preserve authored work and actually query again", async ({ page, request }) => {
   await page.goto("/");
-  await page.locator(".nav.cat").first().click();
+  await openStarter(page, "SaaS overview");
   await expect(page.locator(".tile figure").first()).toBeVisible();
   await note(page);
   const first = await save(page);

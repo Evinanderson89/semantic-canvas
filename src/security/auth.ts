@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { Express, Request, Response, NextFunction } from "express";
 import * as oidc from "openid-client";
 import YAML from "yaml";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
 
 const bindingSchema = z.object({ subject: z.string().min(1).optional(), group: z.string().min(1).optional(),
@@ -13,7 +14,7 @@ export type AccessConfig = z.infer<typeof accessSchema>;
 export interface Identity { id: string; name: string; role: "viewer" | "editor" | "admin"; principal: string; sources: string[] }
 interface Session { identity: Identity; csrf: string; expires: number }
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
-export interface AuthConfig { mode: "local" | "team"; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string; scopes: string; sessionSeconds: number; access?: AccessConfig }
+export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string; scopes: string; sessionSeconds: number; access?: AccessConfig }
 const token = () => randomBytes(32).toString("base64url");
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 const cookie = (req: Request, name: string) => req.headers.cookie?.split(";").map(x => x.trim()).find(x => x.startsWith(`${name}=`))?.slice(name.length + 1);
@@ -28,10 +29,19 @@ export function mapIdentity(claims: Record<string, unknown>, issuer: string, acc
 }
 export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
   const mode = env.SC_MODE ?? "local";
-  if (mode !== "local" && mode !== "team") throw new Error("SC_MODE must be local or team");
+  if (mode !== "local" && mode !== "team" && mode !== "gateway") throw new Error("SC_MODE must be local, team, or gateway");
   const config: AuthConfig = { mode, scopes: env.SC_OIDC_SCOPES ?? "openid profile email", sessionSeconds: Number(env.SC_SESSION_SECONDS ?? 3600) };
   if (!Number.isInteger(config.sessionSeconds) || config.sessionSeconds < 300 || config.sessionSeconds > 28800) throw new Error("SC_SESSION_SECONDS must be between 300 and 28800");
   if (mode === "local") return config;
+  if (mode === "gateway") {
+    for (const key of ["SC_PUBLIC_URL", "SC_OIDC_ISSUER", "SC_OIDC_CLIENT_ID", "SC_GATEWAY_JWKS_URI", "SC_GATEWAY_PORTAL_URL", "SC_ACCESS_PATH"]) if (!env[key]) throw new Error(`${key} is required in gateway mode`);
+    const url = new URL(env.SC_PUBLIC_URL!), issuer = new URL(env.SC_OIDC_ISSUER!), portal = new URL(env.SC_GATEWAY_PORTAL_URL!), jwks = new URL(env.SC_GATEWAY_JWKS_URI!);
+    const local = url.hostname.endsWith(".localhost") && portal.hostname.endsWith(".localhost") && issuer.hostname === "localhost";
+    if (!local && [url, issuer, portal, jwks].some(u => u.protocol !== "https:")) throw new Error("Gateway sign-in requires HTTPS outside the localhost development stack");
+    if ([url, issuer, portal, jwks].some(u => !["http:", "https:"].includes(u.protocol) || u.username || u.password || u.search || u.hash) || url.pathname !== "/" || portal.pathname !== "/") throw new Error("Use valid Gateway origins and identity provider URLs");
+    return { ...config, publicUrl: url.origin, issuer: env.SC_OIDC_ISSUER, clientId: env.SC_OIDC_CLIENT_ID, jwksUri: jwks.href, portalUrl: portal.origin,
+      access: accessSchema.parse(YAML.parse(await readFile(env.SC_ACCESS_PATH!, "utf8"))) };
+  }
   for (const key of ["SC_PUBLIC_URL", "SC_OIDC_ISSUER", "SC_OIDC_CLIENT_ID", "SC_OIDC_CLIENT_SECRET", "SC_ACCESS_PATH"]) if (!env[key]) throw new Error(`${key} is required in team mode`);
   const url = new URL(env.SC_PUBLIC_URL!), issuer = new URL(env.SC_OIDC_ISSUER!);
   if (url.protocol !== "https:" || issuer.protocol !== "https:") throw new Error("Team sign-in requires HTTPS for the public URL and identity provider");
@@ -46,12 +56,15 @@ export class CompanyAuth {
   readonly sessions = new Map<string, Session>();
   private attempts = new Map<string, LoginAttempt>();
   private provider?: oidc.Configuration;
+  private gatewayKeys?: ReturnType<typeof createRemoteJWKSet>;
+  private gatewayCsrfSecret = token();
   constructor(readonly config: AuthConfig, private audit: (event: string, data?: Record<string, string | number | boolean>) => void = () => {}) {}
   async start() {
+    if (this.config.mode === "gateway") this.gatewayKeys = createRemoteJWKSet(new URL(this.config.jwksUri!), { timeoutDuration: 5000 });
     if (this.config.mode === "team") this.provider = await oidc.discovery(new URL(this.config.issuer!), this.config.clientId!, this.config.clientSecret!, undefined, { timeout: 10 });
   }
   private prune() { const now = Date.now(); for (const [k, v] of this.sessions) if (v.expires < now) this.sessions.delete(k); for (const [k, v] of this.attempts) if (v.expires < now) this.attempts.delete(k); }
-  session(req: Request) { const key = cookie(req, "__Host-sc_session"); const session = key ? this.sessions.get(digest(key)) : undefined; return session && session.expires > Date.now() ? session : undefined; }
+  session(req: Request) { if (this.config.mode === "gateway") { const session = (req as any).gatewaySession as Session | undefined; return session && session.expires > Date.now() ? session : undefined; } const key = cookie(req, "__Host-sc_session"); const session = key ? this.sessions.get(digest(key)) : undefined; return session && session.expires > Date.now() ? session : undefined; }
   issue(identity: Identity, res: Response) {
     this.prune(); if (this.sessions.size >= 5000) throw new Error("Session capacity reached");
     const key = token(), session = { identity, csrf: token(), expires: Date.now() + this.config.sessionSeconds * 1000 };
@@ -60,13 +73,26 @@ export class CompanyAuth {
     return session;
   }
   mount(app: Express) {
+    if (this.config.mode === "gateway") app.use("/api", (req, _res, next) => {
+      const raw = cookie(req, "gw_session");
+      if (!raw || !this.gatewayKeys) return next();
+      void (async () => {
+        try {
+          const { payload } = await jwtVerify(decodeURIComponent(raw), this.gatewayKeys!, { issuer: this.config.issuer, audience: this.config.clientId, algorithms: ["RS256", "ES256"], requiredClaims: ["sub", "exp"] });
+          const identity = mapIdentity(payload, this.config.issuer!, this.config.access!);
+          if (identity) (req as any).gatewaySession = { identity, csrf: digest(`${this.gatewayCsrfSecret}\0${raw}`), expires: Number(payload.exp) * 1000 } satisfies Session;
+        } catch { /* An invalid token remains unauthenticated; proxy headers never confer access. */ }
+        next();
+      })();
+    });
     app.get("/api/auth/session", (req, res) => {
       res.setHeader("Cache-Control", "no-store");
       if (this.config.mode === "local") return res.json({ mode: "local", authenticated: true, canEdit: true, canAdmin: true });
       const session = this.session(req);
-      return res.json(session ? { mode: "team", authenticated: true, user: { id: session.identity.id, name: session.identity.name, role: session.identity.role }, csrf: session.csrf, canEdit: session.identity.role !== "viewer", canAdmin: session.identity.role === "admin", expiresAt: session.expires } : { mode: "team", authenticated: false });
+      return res.json(session ? { mode: "team", authenticated: true, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined, user: { id: session.identity.id, name: session.identity.name, role: session.identity.role }, csrf: session.csrf, canEdit: session.identity.role !== "viewer", canAdmin: session.identity.role === "admin", expiresAt: session.expires } : { mode: "team", authenticated: false });
     });
     app.get("/api/auth/login", async (_req, res) => {
+      if (this.config.mode === "gateway") return res.redirect(`${this.config.portalUrl}/auth/login`);
       if (!this.provider) return res.status(404).end();
       this.prune(); if (this.attempts.size >= 1000) return res.status(429).send("Sign-in is busy. Try again shortly.");
       try {
@@ -98,6 +124,7 @@ export class CompanyAuth {
     app.post("/api/auth/logout", (req, res) => {
       const session = this.session(req);
       if (session && !this.validCsrf(req, session)) return res.status(403).json({ error: "Reload the page before signing out" });
+      if (this.config.mode === "gateway") { res.clearCookie("gw_session", { domain: new URL(this.config.portalUrl!).hostname, path: "/", httpOnly: true, secure: this.config.publicUrl!.startsWith("https:"), sameSite: "lax" }); return res.json({ ok: true }); }
       const key = cookie(req, "__Host-sc_session"); if (key) this.sessions.delete(digest(key));
       res.clearCookie("__Host-sc_session", { path: "/", secure: true, httpOnly: true, sameSite: "lax" });
       this.audit("auth.signed_out", session ? { actor: session.identity.id } : {}); res.json({ ok: true });
@@ -112,13 +139,13 @@ export class CompanyAuth {
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !this.validCsrf(req, session)) return res.status(403).json({ error: "Your session needs a fresh page. Reload and try again." });
     const route = req.path.replace(/^\/api(?=\/)/, "");
     const admin = /^\/(sources\/|operations|setup)/.test(route) || route === "/sources" && req.method !== "GET" || route === "/agent/key";
-    const write = route.startsWith("/dashboards") && req.method !== "GET";
+    const write = (route.startsWith("/dashboards") || /^\/library(\/|$)/.test(route)) && !["GET", "HEAD", "OPTIONS"].includes(req.method);
     if (admin && session.identity.role !== "admin" || write && session.identity.role === "viewer") return res.status(403).json({ error: "Your workspace role does not allow this action" });
     // Headers never select a different principal in team mode.
     next();
   };
   forwarded(req: Request) {
     const session = this.session(req);
-    return session ? { cookie: `__Host-sc_session=${cookie(req, "__Host-sc_session")}`, csrf: session.csrf, host: new URL(this.config.publicUrl!).host, origin: this.config.publicUrl! } : undefined;
+    return session ? { cookie: this.config.mode === "gateway" ? `gw_session=${cookie(req, "gw_session")}` : `__Host-sc_session=${cookie(req, "__Host-sc_session")}`, csrf: session.csrf, host: new URL(this.config.publicUrl!).host, origin: this.config.publicUrl! } : undefined;
   }
 }

@@ -42,7 +42,7 @@ export function createTelemetry(env = process.env, write: (line: string) => void
       if (route === "/api/query") { counters.queries++; if (status >= 400) counters.queryFailures++; }
       const identity = identityOf(req);
       const fields = { requestId: id, actor: identity?.id, role: identity?.role, method: req.method, route, status, durationMs };
-      const mutation = !["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(dashboards|sources|agent\/key|operations)/.test(route);
+      const mutation = !["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(dashboards|library|sources|agent\/key|operations)/.test(route);
       log(mutation ? "audit.change" : "http.request", fields, status >= 500 ? "error" : status >= 400 ? "warn" : "info");
       span?.updateName(`${req.method} ${route}`); span?.setAttributes({ "http.request.method": req.method, "http.route": route, "http.response.status_code": status, "sc.request_id": id });
       if (status >= 500) span?.setStatus({ code: SpanStatusCode.ERROR }); span?.end();

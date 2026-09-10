@@ -5,11 +5,12 @@ import type { TileSpec } from "../compiler/spec.ts";
 import { boundsOf } from "../canvas/geometry.ts";
 import { applyBestLayout } from "../canvas/layouts.ts";
 
-export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify }: {
+export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify, onSettings }: {
   canvas: CanvasSpec; onCanvas: (c: CanvasSpec) => void;
   zoom: number; onZoom: (z: number) => void; onFit: () => void;
   selected: string[]; tiles: TileSpec[]; onTiles: (t: TileSpec[]) => void;
   onCompose: (t: TileSpec[], c: CanvasSpec) => void;
+  onSettings: () => void;
   /** Dashboard-level Beautify's own trigger button + popover (see
    *  DashboardBeautify.tsx) -- rendered as a slot rather than built here so
    *  its state/logic stays in one place, but still lands inside this same
@@ -66,7 +67,7 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
   return (
     <div className="editbar">
       <Popover label="Canvas settings" trigger={<>Canvas <span aria-hidden="true">⌄</span></>}>
-        {() => <div className="canvas-settings">
+        {(close) => <div className="canvas-settings">
           <h4>Canvas settings</h4>
           <label className="ctl"><span>Size</span>
             <select aria-label="Canvas size" value={canvas.preset} onChange={(e) => {
@@ -95,6 +96,7 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
             </select>
           </div>
           <p>{canvas.width} × {canvas.height} px</p>
+          <button className="chart-settings-link" onClick={() => { close(); onSettings(); }}>Chats & notifications <span aria-hidden="true">→</span></button>
         </div>}
       </Popover>
       <div className="zoom-control">

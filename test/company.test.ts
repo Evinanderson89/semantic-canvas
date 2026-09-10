@@ -107,10 +107,13 @@ it("allows editor saves, denies viewers and protects administration and CSRF", a
   expect((await call("/api/dashboards", { method: "POST", headers: { ...headers(editor), "x-sc-csrf": "é".repeat(editor.csrf.length) }, body: JSON.stringify(document) })).status).toBe(403);
   expect((await call("/api/dashboards", { method: "POST", headers: headers(editor), body: JSON.stringify(document) })).status).toBe(200);
   expect((await call("/api/dashboards/company-dashboard", { headers: headers(viewer) })).status).toBe(200);
+  for (const path of ["/api/library/folders", "/api/library/views"]) expect((await call(path, { method: "POST", headers: headers(viewer), body: "{}" })).status).toBe(403);
+  expect((await call("/api/library/items/dashboard/company-dashboard", { method: "PATCH", headers: headers(viewer), body: JSON.stringify({ revision: 1, name: "Forged" }) })).status).toBe(403);
+  expect((await call("/api/library", { headers: headers(viewer) })).status).toBe(200);
   for (const path of ["/api/setup", "/api/operations/status", "/api/operations/backup", "/api/sources/public/config"]) expect((await call(path, { headers: headers(editor) })).status).toBe(403);
   expect((await call("/api/agent/key", { method: "POST", headers: headers(editor), body: JSON.stringify({ apiKey: "must-not-log-this-key" }) })).status).toBe(403);
   expect((await call("/api/setup", { headers: headers(admin) })).status).toBe(200);
-  const backup = await (await call("/api/operations/backup", { headers: headers(admin) })).json(); expect(backup.dashboards).toHaveLength(1);
+  const backup = await (await call("/api/operations/backup", { headers: headers(admin) })).json(); expect(backup.dashboards.filter((d: any) => !d.isTemplate)).toHaveLength(1); expect(backup.dashboards.filter((d: any) => d.isTemplate)).toHaveLength(18);
   expect((await call("/api/setup", { headers: { ...headers(admin), origin: "https://evil.test" } })).status).toBe(403);
 });
 it("isolates private assistant questions between users and revokes logout", async () => {

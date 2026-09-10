@@ -1,3 +1,4 @@
+import { openStarter } from "./library-helpers.ts";
 import { expect, test } from "@playwright/test";
 
 test("studio disclosures work with the keyboard and keep save actions reachable", async ({ page }) => {
@@ -40,7 +41,7 @@ test("new canvases remain readable in a compact window and appearance persists",
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.getByRole("button", { name: "Switch to light appearance" }).click();
-  await page.locator(".nav.cat").first().click();
+  await openStarter(page, "SaaS overview");
   await expect(page.locator(".tile figure").first()).toBeVisible();
   const canvasWidth = await page.locator(".canvas-surface").evaluate((el) => el.clientWidth);
   expect(canvasWidth).toBeLessThanOrEqual(640);

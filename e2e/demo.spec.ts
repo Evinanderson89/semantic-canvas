@@ -1,13 +1,18 @@
+import { openStarter } from "./library-helpers.ts";
 import { expect, test } from "@playwright/test";
 
-test("the messy topic has real review fixes and can be arranged into a clean dashboard", async ({ page }) => {
+test("the cleanup example has real review fixes and can be arranged into a clean dashboard", async ({ page }) => {
   await page.setViewportSize({ width: 851, height: 760 });
   await page.route("**/api/agent/status", route => route.fulfill({ json: { configured: false } }));
   await page.goto("/");
-  const example = page.getByRole("button", { name: "Messy dashboard", exact: true });
+  await expect(page.getByText("Explore by topic", { exact: true })).toHaveCount(0);
+  const examples = page.getByRole("button", { name: "Expand folder Examples", exact: true });
+  await expect(examples).toHaveAttribute("aria-expanded", "false");
+  await examples.click();
+  const example = page.getByRole("button", { name: "Starter: Dashboard cleanup demo", exact: true });
   await expect(example).toHaveCount(1);
   await expect(page.getByRole("button", { name: /Try the design playground/ })).toHaveCount(0);
-  await example.click();
+  await openStarter(page, "Dashboard cleanup demo");
   await page.getByLabel("Acting as", { exact: true }).selectOption("admin");
   await expect(example).toHaveAttribute("aria-current", "page");
   await expect(page.locator(".node")).toHaveCount(6);
@@ -59,9 +64,9 @@ test("the messy topic has real review fixes and can be arranged into a clean das
   const persisted = await page.request.get(`/api/dashboards/${response.request().postDataJSON().id}`);
   expect((await persisted.json()).spec.tiles.filter((t: any) => t.kind === "heading")).toHaveLength(4);
 
-  // The topic always opens a fresh example; edits remain recoverable as a draft.
+  // The library starter always opens a fresh example; edits remain recoverable as a draft.
   await page.locator(".heading-text").last().scrollIntoViewIfNeeded();
-  await example.click();
+  await openStarter(page, "Dashboard cleanup demo");
   await expect.poll(hasOverlap).toBe(true);
   await expect.poll(() => page.locator(".canvas-scroll").evaluate(el => el.scrollTop)).toBe(0);
   await page.getByRole("button", { name: "Home", exact: true }).click();

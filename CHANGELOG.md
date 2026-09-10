@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — CoreCanvas Library and Gateway integration
+
+- Added persistent source-scoped folders, reusable view snapshots, starter dashboards and library setup/migration, replacing Explore by topic.
+- Added personal chart-chat and notification display preferences, off by default, without deleting existing activity.
+- Added verified Gateway session support and navigation back to the shared app launcher.
+- Documented one suite with two apps, standalone/full-workspace packaging choices, storage boundaries and release gates.
+
+The companion Ingest app lives in gateway-platform. Automatic data/model handoff, a version-pinned suite release bundle and integrated company deployment verification remain unfinished. Back up the Canvas library before applying additive store migrations. See [suite packaging](docs/suite-packaging.md).
+
 ## Unreleased — company workspaces and self-hosting
 
 - Added non-root Docker packaging with a persistent workspace, a built UI/API runtime, a loopback-only demo and a separate HTTPS team recipe.

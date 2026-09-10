@@ -1,3 +1,4 @@
+import { openStarter } from "./library-helpers.ts";
 import { expect, test } from "@playwright/test";
 
 test("long timelines disclose limits and show the latest sample date", async ({ page, request }) => {
@@ -8,7 +9,7 @@ test("long timelines disclose limits and show the latest sample date", async ({ 
   expect(result.window.end).toMatch(/^2026-08-31/);
   expect(result.rows.at(-1)[result.columns.indexOf("event_count")]).toBe(2769);
   await page.goto("/");
-  await page.locator(".nav.cat").filter({ hasText: "Events" }).click();
+  await openStarter(page, "Events & engagement");
   await page.getByLabel("Period", { exact: true }).selectOption("day");
   await expect(page.locator(".result-warning").first()).toContainText("500 rows");
   await expect(page.locator(".kpi-asof").first()).toContainText("2026-08-31");
@@ -17,7 +18,7 @@ test("long timelines disclose limits and show the latest sample date", async ({ 
 test("unsupported snapshot periods fail clearly while the canvas remains monthly", async ({ page, request }) => {
   const response = await request.post("/api/query", { data: { metrics: ["ending_mrr"], dimensions: ["quarter:fct_saas_monthly.month"] } });
   expect(response.status()).toBe(400); expect(JSON.stringify(await response.json())).toContain("requires month");
-  await page.goto("/"); await page.locator(".nav.cat").filter({ hasText: "SaaS Monthly" }).click();
+  await page.goto("/"); await openStarter(page, "SaaS overview");
   await page.getByLabel("Period", { exact: true }).selectOption("quarter");
   await expect(page.getByLabel("Period", { exact: true })).toHaveValue("month");
   await expect(page.getByRole("alert")).toContainText("requires month");
@@ -49,7 +50,7 @@ test("text cursor keys do not move notes and canvas keyboard resizing works", as
 });
 
 test("layout changes have a preview and one undo restores tiles and canvas", async ({ page }) => {
-  await page.goto("/"); await page.locator(".nav.cat").first().click();
+  await page.goto("/"); await openStarter(page, "SaaS overview");
   const boxes = () => page.locator(".node").evaluateAll(nodes => nodes.map(n => (n as HTMLElement).getAttribute("style")));
   await expect(page.locator(".node").first()).toBeVisible();
   const before = await boxes();
@@ -63,7 +64,7 @@ test("layout changes have a preview and one undo restores tiles and canvas", asy
 });
 
 test("review reports inaccessible charts instead of declaring success", async ({ page }) => {
-  await page.goto("/"); await page.locator(".nav.cat").first().click();
+  await page.goto("/"); await openStarter(page, "SaaS overview");
   await page.getByLabel("Acting as", { exact: true }).selectOption("emea");
   await page.getByRole("button", { name: "Design review", exact: true }).click();
   await expect(page.locator(".review-coverage")).toContainText("Review incomplete");
@@ -108,12 +109,12 @@ test("a downloaded document shape can be restored as a new dashboard", async ({ 
   await expect(page.locator(".save-status")).toHaveText("Unsaved changes");
 });
 
-test("mixed-grain topic navigation never sends a mixed grain as a query", async ({ page }) => {
-  await page.goto("/"); await page.locator(".nav.cat").filter({ hasText: "Events" }).click();
+test("starter dashboards open with their own supported reporting periods", async ({ page }) => {
+  await page.goto("/"); await openStarter(page, "Events & engagement");
   await page.getByLabel("Period", { exact: true }).selectOption("day");
-  await page.locator(".nav.cat").filter({ hasText: "SaaS Monthly" }).click();
-  await expect(page.getByLabel("Period", { exact: true })).toHaveValue("mixed");
-  await page.locator(".nav.cat").filter({ hasText: "Events" }).click();
+  await openStarter(page, "SaaS overview");
+  await expect(page.getByLabel("Period", { exact: true })).toHaveValue("month");
+  await openStarter(page, "Events & engagement");
   await expect(page.getByLabel("Period", { exact: true })).toHaveValue("month");
   await expect(page.locator(".kpi-value").first()).not.toHaveText("—");
   await expect(page.locator(".tile .err")).toHaveCount(0);

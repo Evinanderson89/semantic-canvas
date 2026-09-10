@@ -25,6 +25,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import YAML from "yaml";
 import { describe as describeSource, connectOne, expand, loadSources, type AiConfig, type Source } from "./sources/registry.ts";
 import { exportLibrary, closeStore, deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources } from "./store/store.ts";
+import { initializeCoreLibrary, listCoreLibrary, saveLibraryFolder, deleteLibraryFolder, loadLibraryView, saveLibraryView, updateLibraryItem, deleteLibraryView } from "./store/store.ts";
+import { viewSaveSchema } from "./library/model.ts";
 import { loadRls, type RlsConfig } from "./security/rls.ts";
 import { applyBestLayout, applyLayout, LAYOUTS } from "./canvas/layouts.ts";
 import { requireScope, scopedField } from "./security/queryScope.ts";
@@ -73,6 +75,7 @@ async function boot() {
 
   await openStore();
   await migrateLegacySources(sources.filter((s) => s.model).map((s) => ({ source: s.id, model: s.model!.name })));
+  await initializeLibraries();
   ready = true;
   telemetry.log("server.ready", { mode: auth.config.mode, readySources: sources.filter(s => s.status === "ready").length, totalSources: sources.length });
 }
@@ -107,7 +110,7 @@ app.use((error: any, _req: any, res: any, next: any) => {
 auth.mount(app);
 app.use("/api", auth.guard);
 app.use("/api", (_req, res, next) => {
-  if (auth.config.mode === "team") {
+  if (auth.config.mode !== "local") {
     const json = res.json.bind(res);
     res.json = (body: any) => json(res.statusCode >= 500 ? { error: "The request failed. Contact your administrator with this request ID.", requestId: res.locals.requestId } : body);
   }
@@ -137,14 +140,14 @@ const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => 
 };
 
 app.get("/api/sources", safe((req, res) => res.json({
-  sources: sources.filter(s => canUseSource(identityOf(req), s.id)).map(s => ({ ...describeSource(s), ...(auth.config.mode === "team" && identityOf(req)?.role !== "admin" && s.error ? { error: "Connection unavailable. Contact your administrator." } : {}) })),
+  sources: sources.filter(s => canUseSource(identityOf(req), s.id)).map(s => ({ ...describeSource(s), ...(auth.config.mode !== "local" && identityOf(req)?.role !== "admin" && s.error ? { error: "Connection unavailable. Contact your administrator." } : {}) })),
   active: sources.find((x) => x.status === "ready" && canUseSource(identityOf(req), x.id))?.id ?? null,
   defaultPrincipal: auth.config.mode === "local" ? defaultPrincipal : undefined,
 })));
 
 app.get("/api/setup/guide", safe((_req, res) => res.type("text/plain").sendFile(resolve("docs/self-hosting.md"))));
 app.get("/api/setup", safe((_req, res) => res.json({ mode: auth.config.mode,
-  checks: { signIn: auth.config.mode === "team", sources: sources.some(s => s.status === "ready"), catalogue: sources.some(s => Object.keys(s.model?.metrics ?? {}).length > 0), ai: Boolean(ai?.apiKey), monitoring: telemetry.enabled },
+  checks: { signIn: auth.config.mode !== "local", sources: sources.some(s => s.status === "ready"), catalogue: sources.some(s => Object.keys(s.model?.metrics ?? {}).length > 0), ai: Boolean(ai?.apiKey), monitoring: telemetry.enabled },
   sources: sources.map(describeSource), sessionSeconds: auth.config.sessionSeconds,
 })));
 app.get("/api/operations/status", safe((_req, res) => res.json({ ready, uptimeSeconds: Math.floor(process.uptime()), monitoring: telemetry.enabled, counters: telemetry.counters,
@@ -305,10 +308,15 @@ async function readExistingBlock(id: string):
   }
 }
 
+async function initializeLibraries() {
+  for (const source of sources) if (source.status === "ready" && source.model) await initializeCoreLibrary({ source: source.id, model: source.model.name }, source.model);
+}
+
 async function hotReload() {
   const loaded = await loadSources(SOURCES_PATH);
   const retired = sources;
   sources = loaded.sources;
+  await initializeLibraries();
   void Promise.allSettled(retired.map(s => s.conn?.close()));
   defaultPrincipal = loaded.defaultPrincipal;
   ai = loaded.ai;
@@ -509,6 +517,20 @@ const ISO2 = new Set(("AD AE AF AG AL AM AO AR AT AU AZ BA BD BE BG BR BW BY CA 
 const GEO_NAME = /(country|nation|region|state|province|city|market|territory|geo|iso)/i;
 
 const dashboardScope = (req: any) => ({ source: pick(req).id, model: modelOf(req).name });
+app.get("/api/library", safe(async (req, res) => res.json(await listCoreLibrary(dashboardScope(req)))));
+app.post("/api/library/folders", safe(async (req, res) => res.json(await saveLibraryFolder(req.body, dashboardScope(req)))));
+app.delete("/api/library/folders/:id", safe(async (req, res) => res.json(await deleteLibraryFolder(req.params.id, z.number().int().positive().parse(req.body?.revision), dashboardScope(req)))));
+app.get("/api/library/views/:id", safe(async (req, res) => {
+  const view = await loadLibraryView(req.params.id, dashboardScope(req));
+  return view ? res.json(view) : res.status(404).json({ error: "View not found in this source" });
+}));
+app.post("/api/library/views", safe(async (req, res) => {
+  const view = viewSaveSchema.parse(req.body), issues = validateDashboard(modelOf(req), view.spec);
+  if (issues.length) return res.status(400).json({ issues });
+  res.json(await saveLibraryView(view, dashboardScope(req)));
+}));
+app.patch("/api/library/items/:kind/:id", safe(async (req, res) => res.json(await updateLibraryItem(req.params.kind, req.params.id, req.body, dashboardScope(req)))));
+app.delete("/api/library/views/:id", safe(async (req, res) => res.json(await deleteLibraryView(req.params.id, z.number().int().positive().parse(req.body?.revision), dashboardScope(req)))));
 app.get("/api/dashboards", safe(async (req, res) =>
   res.json({ dashboards: await listDashboards(dashboardScope(req)) })));
 
@@ -826,7 +848,7 @@ app.post("/api/suggest", safe((req, res) =>
 
 /** Who is asking. A header stands in for a session in the PoC. */
 function principalOf(req: any) {
-  const id = auth.config.mode === "team" ? identityOf(req)?.principal ?? "" : String(req.header("x-sc-principal") ?? "");
+  const id = auth.config.mode !== "local" ? identityOf(req)?.principal ?? "" : String(req.header("x-sc-principal") ?? "");
   return rls.principals[id] ?? null;
 }
 
@@ -874,7 +896,7 @@ if (process.env.SC_SERVE_UI === "true") {
   app.use(express.static(dist, { index: false, maxAge: "1h" }));
   app.get("*", (req, res) => req.path.startsWith("/api/") ? res.status(404).json({ error: "Unknown endpoint" }) : res.sendFile(resolve(dist, "index.html")));
 }
-const host = process.env.SC_HOST ?? (auth.config.mode === "team" ? "0.0.0.0" : "127.0.0.1");
+const host = process.env.SC_HOST ?? (auth.config.mode !== "local" ? "0.0.0.0" : "127.0.0.1");
 boot().then(() => {
   const server = app.listen(PORT, host);
   chartActivity.start();

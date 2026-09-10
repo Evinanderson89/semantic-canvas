@@ -1,3 +1,4 @@
+import { openStarter } from "./library-helpers.ts";
 import { expect, test, type Page } from "@playwright/test";
 
 /**
@@ -23,7 +24,7 @@ function watchConsole(page: Page) {
 async function openDashboard(page: Page) {
   await page.goto("/");
   await page.getByRole("button", { name: "Home" }).waitFor();
-  await page.locator(".nav.cat").first().click();
+  await openStarter(page, "SaaS overview");
   await page.locator(".tile").first().waitFor();
   // Charts draw asynchronously after their query resolves.
   await expect

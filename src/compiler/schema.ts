@@ -66,6 +66,7 @@ export const canvasSchema = z.object({
 }).strict();
 export const saveSchema = z.object({
   id: name, name: z.string().max(1000).optional(), spec: dashboardSchema,
+  folderId: name.nullable().optional(),
   canvas: canvasSchema.default(DEFAULT_CANVAS),
   schemaVersion: z.literal(DOCUMENT_VERSION).default(DOCUMENT_VERSION),
   revision: finite.int().nonnegative().default(0),
