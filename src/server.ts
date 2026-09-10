@@ -86,6 +86,8 @@ async function writeConfig(path: string, content: string) {
   await rename(temporary, path);
 }
 const app = express();
+// Express matches routes case-insensitively by default; the role guard keys on the path.
+app.set("case sensitive routing", true);
 app.disable("x-powered-by");
 app.use(telemetry.middleware);
 app.use((req, res, next) => {
@@ -134,7 +136,7 @@ const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => 
     try { await fn(req, res); }
     catch (e: any) { telemetry.log("request.failed", { requestId: res.locals.requestId, errorType: e?.name ?? "Error" }, "error"); res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
   };
-  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(sources|agent\/key|setup\/model)(\/|$)/.test(req.path)) {
+  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(sources|agent\/key|setup\/model)(\/|$)/.test(req.path.toLowerCase())) {
     const pending = configQueue.then(run); configQueue = pending.catch(() => {}); await pending;
   } else await run();
 };
@@ -309,7 +311,10 @@ async function readExistingBlock(id: string):
 }
 
 async function initializeLibraries() {
-  for (const source of sources) if (source.status === "ready" && source.model) await initializeCoreLibrary({ source: source.id, model: source.model.name }, source.model);
+  for (const source of sources) if (source.status === "ready" && source.model) {
+    const skipped = await initializeCoreLibrary({ source: source.id, model: source.model.name }, source.model);
+    if (skipped.length) telemetry.log("library.skipped_invalid_document", { source: source.id, count: skipped.length, ids: skipped.slice(0, 20).join(",") }, "warn");
+  }
 }
 
 async function hotReload() {

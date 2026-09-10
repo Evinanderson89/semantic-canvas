@@ -55,6 +55,8 @@ export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
 export class CompanyAuth {
   readonly sessions = new Map<string, Session>();
   private attempts = new Map<string, LoginAttempt>();
+  /** Gateway mode has no server sessions; remember who last presented a valid token so background work can tell whether they still hold access. */
+  private lastVerified = new Map<string, { identity: Identity; exp: number }>();
   private provider?: oidc.Configuration;
   private gatewayKeys?: ReturnType<typeof createRemoteJWKSet>;
   private gatewayCsrfSecret = token();
@@ -63,7 +65,14 @@ export class CompanyAuth {
     if (this.config.mode === "gateway") this.gatewayKeys = createRemoteJWKSet(new URL(this.config.jwksUri!), { timeoutDuration: 5000 });
     if (this.config.mode === "team") this.provider = await oidc.discovery(new URL(this.config.issuer!), this.config.clientId!, this.config.clientSecret!, undefined, { timeout: 10 });
   }
-  private prune() { const now = Date.now(); for (const [k, v] of this.sessions) if (v.expires < now) this.sessions.delete(k); for (const [k, v] of this.attempts) if (v.expires < now) this.attempts.delete(k); }
+  private prune() { const now = Date.now(); for (const [k, v] of this.sessions) if (v.expires < now) this.sessions.delete(k); for (const [k, v] of this.attempts) if (v.expires < now) this.attempts.delete(k); for (const [k, v] of this.lastVerified) if (v.exp < now) this.lastVerified.delete(k); }
+  /** The owner's identity while they still hold access: an unexpired team session, or in gateway mode a token verified since the server started that has not expired. */
+  currentIdentity(ownerId: string): Identity | null {
+    const now = Date.now();
+    if (this.config.mode === "gateway") { const seen = this.lastVerified.get(ownerId); if (seen && seen.exp <= now) this.lastVerified.delete(ownerId); return seen && seen.exp > now ? seen.identity : null; }
+    if (this.config.mode === "team") return [...this.sessions.values()].find(s => s.expires > now && s.identity.id === ownerId)?.identity ?? null;
+    return null;
+  }
   session(req: Request) { if (this.config.mode === "gateway") { const session = (req as any).gatewaySession as Session | undefined; return session && session.expires > Date.now() ? session : undefined; } const key = cookie(req, "__Host-sc_session"); const session = key ? this.sessions.get(digest(key)) : undefined; return session && session.expires > Date.now() ? session : undefined; }
   issue(identity: Identity, res: Response) {
     this.prune(); if (this.sessions.size >= 5000) throw new Error("Session capacity reached");
@@ -80,7 +89,11 @@ export class CompanyAuth {
         try {
           const { payload } = await jwtVerify(decodeURIComponent(raw), this.gatewayKeys!, { issuer: this.config.issuer, audience: this.config.clientId, algorithms: ["RS256", "ES256"], requiredClaims: ["sub", "exp"] });
           const identity = mapIdentity(payload, this.config.issuer!, this.config.access!);
-          if (identity) (req as any).gatewaySession = { identity, csrf: digest(`${this.gatewayCsrfSecret}\0${raw}`), expires: Number(payload.exp) * 1000 } satisfies Session;
+          if (identity) {
+            (req as any).gatewaySession = { identity, csrf: digest(`${this.gatewayCsrfSecret}\0${raw}`), expires: Number(payload.exp) * 1000 } satisfies Session;
+            if (this.lastVerified.size >= 5000) this.prune();
+            this.lastVerified.set(identity.id, { identity, exp: Number(payload.exp) * 1000 });
+          }
         } catch { /* An invalid token remains unauthenticated; proxy headers never confer access. */ }
         next();
       })();
@@ -94,11 +107,12 @@ export class CompanyAuth {
     app.get("/api/auth/login", async (_req, res) => {
       if (this.config.mode === "gateway") return res.redirect(`${this.config.portalUrl}/auth/login`);
       if (!this.provider) return res.status(404).end();
-      this.prune(); if (this.attempts.size >= 1000) return res.status(429).send("Sign-in is busy. Try again shortly.");
+      // Unauthenticated callers must not be able to exhaust sign-in: at capacity the oldest pending attempt is evicted.
+      this.prune(); while (this.attempts.size >= 1000) this.attempts.delete(this.attempts.keys().next().value!);
       try {
         const key = token(), verifier = oidc.randomPKCECodeVerifier(), nonce = oidc.randomNonce(), state = oidc.randomState();
-        this.attempts.set(digest(key), { verifier, nonce, state, expires: Date.now() + 10 * 60_000 });
-        res.cookie("__Host-sc_login", key, { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 10 * 60_000 });
+        this.attempts.set(digest(key), { verifier, nonce, state, expires: Date.now() + 5 * 60_000 });
+        res.cookie("__Host-sc_login", key, { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 5 * 60_000 });
         const destination = oidc.buildAuthorizationUrl(this.provider, { redirect_uri: `${this.config.publicUrl}/api/auth/callback`, scope: this.config.scopes, state, nonce,
           code_challenge: await oidc.calculatePKCECodeChallenge(verifier), code_challenge_method: "S256" });
         res.setHeader("Cache-Control", "no-store"); res.redirect(destination.href);
@@ -137,7 +151,7 @@ export class CompanyAuth {
     (req as any).identity = session.identity;
     res.setHeader("x-sc-user-id", session.identity.id);
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !this.validCsrf(req, session)) return res.status(403).json({ error: "Your session needs a fresh page. Reload and try again." });
-    const route = req.path.replace(/^\/api(?=\/)/, "");
+    const route = req.path.toLowerCase().replace(/^\/api(?=\/)/, "");
     const admin = /^\/(sources\/|operations|setup)/.test(route) || route === "/sources" && req.method !== "GET" || route === "/agent/key";
     const write = (route.startsWith("/dashboards") || /^\/library(\/|$)/.test(route)) && !["GET", "HEAD", "OPTIONS"].includes(req.method);
     if (admin && session.identity.role !== "admin" || write && session.identity.role === "viewer") return res.status(403).json({ error: "Your workspace role does not allow this action" });

@@ -8,7 +8,8 @@ it("restores revisions and source isolation and refuses destructive or malformed
   const backup = await exportLibrary(); expect(backup.dashboards).toHaveLength(2);
   await expect(restoreLibrary(backup)).rejects.toThrow(/empty/);
   await closeStore(); await openStore(":memory:");
-  await expect(restoreLibrary({ ...backup, dashboards: [...backup.dashboards, { ...backup.dashboards[0], spec: {} }] })).rejects.toThrow();
+  await expect(restoreLibrary({ ...backup, dashboards: [...backup.dashboards, { ...backup.dashboards[0], spec: {} }] })).rejects.toThrow(/Backup contains 1 document that do not match the current schema: one\. Export again/);
+  await expect(restoreLibrary({ ...backup, dashboards: backup.dashboards.map(d => ({ ...d, spec: { ...d.spec, notes: "legacy" } })) })).rejects.toThrow(/2 documents that do not match the current schema: one, two\./);
   expect((await exportLibrary()).dashboards).toEqual([]);
   expect(await restoreLibrary(backup)).toEqual({ restored: 2 });
   expect((await loadDashboard("one", { source: "a", model: "Model A" }))?.revision).toBe(2);

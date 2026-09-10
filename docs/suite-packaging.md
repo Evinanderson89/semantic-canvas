@@ -20,7 +20,7 @@ Ingest is not a third repository. Gateway remains shared infrastructure and can 
 - **Canvas only:** use this repository's existing Docker or local development recipe. Teams can keep their existing pipelines and semantic models.
 - **Ingest only:** its local development recipe exists. A polished standalone distribution and company-auth recipe remain future work.
 
-These are intended distribution choices, not three finished installer commands. The full workspace still needs version-pinned images, a compatibility manifest, first-run setup, verified upgrades and a tested release bundle. The [canonical suite packaging plan](https://github.com/Evinanderson89/gateway-platform/blob/main/docs/suite-packaging.md) owns the shared release gates. Until the companion PRs merge, use the linked PR versions of these guides.
+These are intended distribution choices, not three finished installer commands. The full workspace still needs version-pinned images, a compatibility manifest, first-run setup, verified upgrades and a tested release bundle. The [canonical suite packaging plan](https://github.com/Evinanderson89/gateway-platform/blob/main/docs/suite-packaging.md) owns the shared release gates.
 
 ## Current integration
 
