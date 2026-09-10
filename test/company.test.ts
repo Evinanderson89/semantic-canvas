@@ -177,6 +177,56 @@ it("scopes chart discussions to data permissions and watches to their authentica
   await call(path + "/alerts/check", { method: "POST", headers: headers(viewer) });
   expect((await (await call(path, { headers: headers(viewer) })).json()).alert.evaluation.state).toBe("needs_review");
 });
+it("lets editors register and disconnect ingested tables, admins publish them, and hides unreviewed ones from viewers", async () => {
+  const viewer = await login("ingest-viewer", ["viewers"]), editor = await login("ingest-editor", ["editors"]), other = await login("ingest-other", ["editors"]), admin = await login("ingest-admin", ["admins"]);
+  const registration = { dataset: "ingest_orders", importId: "imp-1",
+    table: { description: "Orders", grain: "one row per order", primary_key: "id", default_date_column: "created_at", columns: [{ name: "id", type: "string" }, { name: "amount", type: "double" }, { name: "created_at", type: "timestamp" }] },
+    metrics: { ingest_orders_rows: { label: "Orders", expression: "count(*)" }, ingest_orders_amount_total: { label: "Order amount", expression: "sum(amount)" } },
+    provenance: { source: "Shop orders", loadedAt: "2026-09-10T15:00:00Z", loadedBy: "ingest-editor", rows: 12 } };
+  const register = (s: Login, body: unknown = registration) => call("/api/sources/public/connected", { method: "POST", headers: headers(s), body: JSON.stringify(body) });
+  const publish = (s: Login, body: unknown) => call("/api/sources/public/connected/ingest_orders/publish", { method: "POST", headers: headers(s), body: JSON.stringify(body) });
+  const disconnect = (s: Login) => call("/api/sources/public/connected/ingest_orders", { method: "DELETE", headers: headers(s) });
+  expect((await register(viewer)).status).toBe(403);
+  expect((await call("/api/sources/private/connected", { method: "POST", headers: headers(editor), body: JSON.stringify(registration) })).status).toBe(403);
+  expect((await register(editor, { ...registration, dataset: "fct_events" })).status).toBe(409);
+  expect((await register(editor, { ...registration, unexpected: 1 })).status).toBe(400);
+  const registered = await register(editor); expect(registered.status, await registered.clone().text()).toBe(200);
+  const summary = await registered.json(); expect(summary).toMatchObject({ status: "unreviewed", registeredBy: editor.user.id, table: { connected: { status: "unreviewed" } } });
+  expect(summary.table.columns.map((c: any) => c.name)).toContain("_import_id");
+  expect(YAML.parse(await readFile(join(root, "data", "models", "connected", "public.yaml"), "utf8")).tables.ingest_orders.status).toBe("unreviewed");
+  expect((await register(other)).status).toBe(403);
+  expect((await register(admin, { ...registration, importId: "imp-2" })).status).toBe(200);
+  // Editors and admins see the draft, badged; viewers do not see it anywhere, and the compiler says why.
+  const editorModel = await (await call("/api/model", { headers: headers(editor) })).json();
+  expect(editorModel.tables.ingest_orders.connected.status).toBe("unreviewed"); expect(editorModel.metrics.ingest_orders_rows.reviewed).toBe(false);
+  const viewerModel = await (await call("/api/model", { headers: headers(viewer) })).json();
+  expect(viewerModel.tables.ingest_orders).toBeUndefined(); expect(viewerModel.metrics.ingest_orders_rows).toBeUndefined();
+  expect((await (await call("/api/sources/public/connected", { headers: headers(viewer) })).json()).tables).toEqual([]);
+  expect((await (await call("/api/sources/public/connected", { headers: headers(editor) })).json()).tables.map((t: any) => t.dataset)).toEqual(["ingest_orders"]);
+  const refused = await call("/api/query", { method: "POST", headers: headers(viewer), body: JSON.stringify({ metrics: ["ingest_orders_rows"], dimensions: [] }) });
+  expect(refused.status).toBe(400); expect((await refused.json()).issues[0].problem).toMatch(/not yet published/);
+  const suggested = await (await call("/api/suggest?table=ingest_orders", { headers: headers(editor) })).json();
+  expect(suggested.tiles.flatMap((t: any) => t.metrics)).not.toContain("ingest_orders_rows");
+  expect((await (await call("/api/sources", { headers: headers(editor) })).json()).sources.find((s: any) => s.id === "public")).toMatchObject({ connected: 1, unreviewed: 1 });
+  // Publishing is an administrator's call, and it validates like a base model would.
+  const review = { metrics: { ingest_orders_rows: { reviewed: true, time_grains: ["month"], time_dimension: "ingest_orders.created_at", direction: "higher" } }, table: { grain: "one row per order placed" } };
+  expect((await publish(editor, review)).status).toBe(403);
+  expect((await publish(admin, { metrics: { ingest_orders_rows: { reviewed: true, time_grains: ["month"], time_dimension: "ingest_orders.amount" } } })).status).toBe(400);
+  expect((await publish(admin, { metrics: { nope: { reviewed: true } } })).status).toBe(400);
+  expect((await call("/api/sources/public/connected/missing/publish", { method: "POST", headers: headers(admin), body: JSON.stringify(review) })).status).toBe(404);
+  const published = await publish(admin, review); expect(published.status, await published.clone().text()).toBe(200);
+  expect(await published.json()).toMatchObject({ status: "published", metrics: [{ name: "ingest_orders_rows", reviewed: true }, { name: "ingest_orders_amount_total", reviewed: false }] });
+  const viewerAfter = await (await call("/api/model", { headers: headers(viewer) })).json();
+  expect(viewerAfter.tables.ingest_orders.grain).toBe("one row per order placed"); expect(viewerAfter.metrics.ingest_orders_rows.timeGrains).toEqual(["month"]); expect(viewerAfter.metrics.ingest_orders_amount_total).toBeUndefined();
+  expect((await (await call("/api/sources/public/connected", { headers: headers(viewer) })).json()).tables).toHaveLength(1);
+  // Disconnect removes the entry only: the registrant may, another editor may not, the operator keeps the lake.
+  expect((await disconnect(other)).status).toBe(403);
+  expect((await disconnect(viewer)).status).toBe(403);
+  expect((await disconnect(editor)).status).toBe(200);
+  expect((await disconnect(editor)).status).toBe(404);
+  expect((await (await call("/api/model", { headers: headers(editor) })).json()).tables.ingest_orders).toBeUndefined();
+  expect(output).toContain('"event":"audit.connected_disconnected"');
+});
 it("provisions the first source from an empty registry and keeps its uploaded model", async () => {
   const s = await login("setup-admin", ["admins"]);
   const upload = await call("/api/setup/model", { method: "POST", headers: headers(s), body: JSON.stringify({ adapter: "duckglue", content: await readFile("sample-data/warehouse.yaml", "utf8") }) });

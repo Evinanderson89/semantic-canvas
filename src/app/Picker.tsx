@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { semanticHints, type Model } from "../semantic/model.ts";
+import { isUnreviewed, semanticHints, type Model } from "../semantic/model.ts";
 import type { ChartKind, FilterSpec, TileSpec } from "../compiler/spec.ts";
 import { recommend, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
 
@@ -139,7 +139,7 @@ export function Picker({ model, onAdd, onClose }: {
                   className={"opt" + (metrics.includes(m.name) ? " on" : "")}
                   style={disabled ? { opacity: 0.35 } : undefined} disabled={disabled}
                   onClick={() => toggle(metrics, m.name, (v) => { setMetrics(v); setDims([]); setWhere([]); })}>
-                  {m.label}<small>{m.name} · {m.baseTable}</small>
+                  {m.label}<small>{m.name} · {m.baseTable}{isUnreviewed(model, m) ? " · Ingested, unreviewed" : ""}</small>
                 </button>
               );
             })}

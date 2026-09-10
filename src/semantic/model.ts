@@ -21,7 +21,19 @@ export interface Table {
   partitionKeys: string[];
   primaryKey?: string | null;
   relation?: { database?: string; schema?: string; table: string };
+  /** Set on tables registered by Ingest (docs/connected-canvas.md); absent on base-model tables. */
+  connected?: ConnectedInfo;
 }
+
+export interface ConnectedProvenance { source: string; loadedAt: string; loadedBy: string; rows: number }
+export interface ConnectedInfo { status: "unreviewed" | "published"; provenance: ConnectedProvenance; loadedAt: string }
+/** Lineage columns Ingest stamps on every connected table; declared, never proposed as dimensions. */
+export const LINEAGE_COLUMNS: Column[] = [
+  { name: "_import_id", type: "varchar", description: "Ingest import that loaded this row" },
+  { name: "_loaded_at", type: "timestamptz", description: "When Ingest loaded this row" },
+  { name: "_source", type: "varchar", description: "Ingest source object" },
+];
+export const isLineage = (c: Column) => LINEAGE_COLUMNS.some((l) => l.name === c.name);
 
 export type TimeGrain = "day" | "week" | "month" | "quarter" | "year";
 
@@ -39,6 +51,8 @@ export interface Metric {
   /** Always-on filter, e.g. status = 'active'. */
   filter?: string | null;
   synonyms: string[];
+  /** false on a connected draft metric no admin has published yet; undefined (base model) counts as reviewed. */
+  reviewed?: boolean;
 }
 
 export interface Join {
@@ -68,6 +82,19 @@ export interface SemanticAdapter {
 }
 
 // ---------------------------------------------------------------- helpers --
+
+export const isUnreviewedTable = (t: Table | undefined) => t?.connected?.status === "unreviewed";
+export const isUnreviewed = (model: Model, m: Metric) => m.reviewed === false || isUnreviewedTable(model.tables[m.baseTable]);
+
+/** The governed catalogue only: connected tables and draft metrics no admin has published are dropped.
+ *  Suggestions, the agent's catalogue and viewer sessions all see this; editors and admins see the full model. */
+export function reviewedModel(model: Model): Model {
+  if (!Object.values(model.tables).some((t) => t.connected) && !Object.values(model.metrics).some((m) => m.reviewed === false)) return model;
+  const tables = Object.fromEntries(Object.entries(model.tables).filter(([, t]) => !isUnreviewedTable(t)));
+  const metrics = Object.fromEntries(Object.entries(model.metrics).filter(([, m]) => m.reviewed !== false && tables[m.baseTable]));
+  return { ...model, tables, metrics, joins: model.joins.filter((j) => tables[j.left] && tables[j.right]) };
+}
+export const visibleModel = (model: Model, role: string | undefined) => role === "viewer" ? reviewedModel(model) : model;
 
 export function metricsByTable(model: Model): Record<string, Metric[]> {
   const out: Record<string, Metric[]> = {};
@@ -108,7 +135,7 @@ export function semanticHints(model: Model, measures: string[]): string {
 
 /** Columns of a table that make sensible group-by keys. */
 export function dimensionsOf(t: Table): Column[] {
-  return t.columns.filter((c) => !/^(id|.*_id)$/.test(c.name) || t.partitionKeys.includes(c.name));
+  return t.columns.filter((c) => !isLineage(c) && (!/^(id|.*_id)$/.test(c.name) || t.partitionKeys.includes(c.name)));
 }
 
 /** "sample_warehouse" -> "Sample Warehouse". model.name is whatever

@@ -1,7 +1,14 @@
 import { readFile } from "node:fs/promises";
 import YAML from "yaml";
 import { z } from "zod";
-import type { Model, SemanticAdapter } from "./model.ts";
+import type { Model, SemanticAdapter, Table, TimeGrain } from "./model.ts";
+
+/** Restricted grains only make sense on a date column of the metric's own base table. Shared with the connected overlay. */
+export function timeDimensionIssue(name: string, base: string, table: Table | undefined, timeGrains: TimeGrain[] | undefined, timeDimension: unknown): string | null {
+  if (!timeGrains) return null;
+  return typeof timeDimension === "string" && timeDimension.startsWith(`${base}.`) && table?.columns.some(c => `${base}.${c.name}` === timeDimension && /date|timestamp/i.test(c.type))
+    ? null : `Metric ${name}: time_grains requires a date time_dimension on its base table`;
+}
 
 /**
  * duckglue: a single YAML file describing tables, joins and metrics.
@@ -40,8 +47,8 @@ export const duckglueAdapter: SemanticAdapter = {
     for (const [name, m] of Object.entries<any>(d.metrics)) {
       const timeGrains = m.time_grains === undefined ? undefined : z.array(z.enum(["day", "week", "month", "quarter", "year"])).min(1).parse(m.time_grains);
       const timeDimension = m.time_dimension;
-      if (timeGrains && (typeof timeDimension !== "string" || !timeDimension.startsWith(`${m.base_table}.`) || !tables[m.base_table]?.columns.some(c => `${m.base_table}.${c.name}` === timeDimension && /date|timestamp/i.test(c.type))))
-        throw new Error(`Metric ${name}: time_grains requires a date time_dimension on its base table`);
+      const issue = timeDimensionIssue(name, m.base_table, tables[m.base_table], timeGrains, timeDimension);
+      if (issue) throw new Error(issue);
       metrics[name] = {
         name,
         label: m.label ?? name,
