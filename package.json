@@ -38,7 +38,7 @@
     "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@types/topojson-client": "^3.1.5",
     "d3": "^7.9.0",
-    "express": "^4.21.1",
+    "express": "^5.2.1",
     "html-to-image": "^1.11.13",
     "openid-client": "^6.8.8",
     "pdf-lib": "^1.17.1",
