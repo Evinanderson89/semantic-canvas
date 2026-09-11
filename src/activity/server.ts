@@ -140,8 +140,9 @@ export function mountChartActivity(app: Express, deps: {
       try {
         const source = deps.sources().find(s => s.id === row.source && s.status === "ready");
         const who = deps.rls().principals[rule.principalId] ?? null;
-        const identity = [...deps.auth.sessions.values()].find(s => s.expires > Date.now() && s.identity.id === row.ownerId && s.identity.principal === rule.principalId)?.identity;
-        if (deps.auth.config.mode === "team" && (!identity || !canUseSource(identity, row.source))) evaluation = { state: "waiting", reason: "Sign in to resume checks with your current data permissions.", checkedAt };
+        // Company modes: the owner must still hold access (team session, or a Gateway token verified since start) and the source under the current access policy.
+        const identity = deps.auth.currentIdentity(row.ownerId);
+        if (deps.auth.config.mode !== "local" && (!identity || identity.principal !== rule.principalId || !canUseSource(identity, row.source))) evaluation = { state: "waiting", reason: "Sign in to resume checks with your current data permissions.", checkedAt };
         else if (audience(who) !== row.audience) evaluation = { state: "needs_review", reason: "Data permissions changed. Recreate this alert with your current access.", checkedAt };
         else if (!source) evaluation = { state: "error", reason: "The data source is unavailable. No alert was inferred.", checkedAt };
         else {

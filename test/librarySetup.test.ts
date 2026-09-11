@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DuckDBInstance } from "@duckdb/node-api";
 import { duckglueAdapter } from "../src/semantic/duckglue.ts";
 import { openStore, closeStore, initializeCoreLibrary, saveDashboard, loadDashboard, listCoreLibrary, updateLibraryItem, saveLibraryFolder, deleteLibraryFolder, deleteDashboard, exportLibrary, restoreLibrary, listDashboards } from "../src/store/store.ts";
 import { libraryStarters } from "../src/library/setup.ts";
@@ -17,7 +21,8 @@ it("files existing work without changing content, creates validated starters, an
   const library = await listCoreLibrary(scope);
   expect(library.folders.filter(f => !f.parentId).map(f => f.name)).toEqual(["Company overview", "Revenue & retention", "Growth & customers", "Shared views", "Examples", "Already organized"]);
   const mine = (await loadDashboard("mine", scope))!;
-  expect(mine.spec).toEqual(spec); expect(mine.revision).toBe(2);
+  // Filing is metadata: the revision must not move, or every open draft and MCP client conflicts after an upgrade.
+  expect(mine.spec).toEqual(spec); expect(mine.revision).toBe(1);
   expect(mine.folderId).toBe(library.folders.find(f => f.name === "Company overview")?.id);
   expect((await loadDashboard("filed", scope))?.folderId).toBe("custom");
   expect((await listDashboards(scope)).map(d => d.id).sort()).toEqual(["filed", "mine"]);
@@ -47,6 +52,25 @@ it("preserves organization and removals through initialization, backup, and rest
   expect(restored.dashboards).toEqual(backup.dashboards); expect(restored.folders).toEqual(backup.folders);
   expect(restored.initializedSources).toEqual([scope.source]);
   expect((await listCoreLibrary(scope)).folders.some(f => f.name === "Examples")).toBe(false);
+});
+it("skips legacy documents that no longer parse instead of failing initialization", async () => {
+  const model = await sample(), spec = { ...libraryStarters(model)[0].spec, title: "Still valid" };
+  await closeStore();
+  const dir = await mkdtemp(join(tmpdir(), "sc-library-legacy-")), file = join(dir, "legacy.duckdb");
+  try {
+    const instance = await DuckDBInstance.create(file), db = await instance.connect();
+    await db.run("CREATE TABLE dashboards (id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL, model VARCHAR NOT NULL, spec VARCHAR NOT NULL, canvas VARCHAR NOT NULL, updated_at TIMESTAMP NOT NULL, source_id VARCHAR)");
+    // The previous release stored specs unvalidated; an unknown key fails the strict schema today.
+    await db.run("INSERT INTO dashboards VALUES ('legacy','Agent','sample',?,'{}',now(),'sample'), ('valid','Still valid','sample',?,'{}',now(),'sample')", [JSON.stringify({ title: "Agent", tiles: [], notes: "x" }), JSON.stringify(spec)]);
+    db.closeSync(); instance.closeSync();
+    await openStore(file);
+    expect(await initializeCoreLibrary(scope, model)).toEqual(["legacy"]);
+    const library = await listCoreLibrary(scope);
+    expect(library.items.find(i => i.id === "valid")).toMatchObject({ folderId: library.folders.find(f => f.name === "Company overview")?.id, revision: 1 });
+    expect(library.items.find(i => i.id === "legacy")).toMatchObject({ folderId: null, revision: 1 });
+    await expect(loadDashboard("legacy", scope)).rejects.toMatchObject({ status: 422, message: expect.stringMatching(/"legacy".*notes/) });
+    expect(await initializeCoreLibrary(scope, model)).toEqual([]);
+  } finally { await closeStore(); await rm(dir, { recursive: true, force: true }); await openStore(":memory:"); }
 });
 it("does not fabricate sample dashboards for an unrelated semantic catalogue", async () => {
   await initializeCoreLibrary(scope, otherModel);

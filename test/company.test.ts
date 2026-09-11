@@ -115,6 +115,11 @@ it("allows editor saves, denies viewers and protects administration and CSRF", a
   expect((await call("/api/setup", { headers: headers(admin) })).status).toBe(200);
   const backup = await (await call("/api/operations/backup", { headers: headers(admin) })).json(); expect(backup.dashboards.filter((d: any) => !d.isTemplate)).toHaveLength(1); expect(backup.dashboards.filter((d: any) => d.isTemplate)).toHaveLength(18);
   expect((await call("/api/setup", { headers: { ...headers(admin), origin: "https://evil.test" } })).status).toBe(403);
+  // Express routes are case-insensitive by default; a differently cased path must not bypass the role guard.
+  expect([403, 404]).toContain((await call("/api/Dashboards", { method: "POST", headers: headers(viewer), body: JSON.stringify(document) })).status);
+  expect([403, 404]).toContain((await call("/api/DASHBOARDS/company-dashboard", { method: "DELETE", headers: headers(viewer) })).status);
+  for (const path of ["/api/Sources/public/config", "/api/Operations/backup", "/api/SETUP"]) expect([403, 404]).toContain((await call(path, { headers: headers(editor) })).status);
+  expect((await call("/api/dashboards/company-dashboard", { headers: headers(viewer) })).status).toBe(200);
 });
 it("isolates private assistant questions between users and revokes logout", async () => {
   const a = await login("a", ["editors"]), b = await login("b", ["editors"]);

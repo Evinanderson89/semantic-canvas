@@ -102,7 +102,9 @@ export const loadDashboard = (id: string, scope: DashboardScope) => serialized(a
   const row = r.getRows()[0];
   if (!row) return null;
   if (Number(row[4]) !== 1) throw new Error("This dashboard requires a newer version of Semantic Canvas");
-  return { id, name: String(row[0]), spec: dashboardSchema.parse(JSON.parse(String(row[1]))),
+  const spec = dashboardSchema.safeParse(JSON.parse(String(row[1])));
+  if (!spec.success) { const issue = spec.error.issues[0]; throw Object.assign(new Error(`Dashboard "${id}" does not match the current schema (${issue?.path.join(".") || "spec"}: ${issue?.message ?? "invalid"}). Fix or remove it from a library backup, then restore.`), { status: 422 }); }
+  return { id, name: String(row[0]), spec: spec.data,
     canvas: canvasSchema.parse({ ...DEFAULT_CANVAS, ...JSON.parse(String(row[2])) }), revision: Number(row[3]), schemaVersion: 1, folderId: row[5] == null ? null : String(row[5]), isTemplate: Boolean(row[6]) };
 });
 export const deleteDashboard = (id: string, scope: DashboardScope, revision: number) => serialized(async () => {
@@ -112,11 +114,13 @@ export const deleteDashboard = (id: string, scope: DashboardScope, revision: num
   return { ok: true };
 });
 
-const librarySchema = z.object({ format: z.literal("semantic-canvas-library"), version: z.literal(1), createdAt: z.string(), dashboards: z.array(z.object({
+const backupDashboardSchema = z.object({
   id: z.string().min(1), name: z.string(), source: z.string().nullable(), model: z.string(), spec: dashboardSchema, canvas: canvasSchema,
   folderId: z.string().nullable().default(null), isTemplate: z.boolean().default(false),
   revision: z.number().int().min(1), schemaVersion: z.literal(1), updatedAt: z.string().datetime(),
-})), initializedSources: z.array(z.string().min(1)).max(10000).default([]), activity: z.array(activityRecordSchema).max(100000).default([]),
+});
+// Documents are validated one by one so a legacy record names itself instead of failing the whole archive with a Zod dump.
+const librarySchema = z.object({ format: z.literal("semantic-canvas-library"), version: z.literal(1), createdAt: z.string(), dashboards: z.array(z.unknown()).max(100000), initializedSources: z.array(z.string().min(1)).max(10000).default([]), activity: z.array(activityRecordSchema).max(100000).default([]),
   folders: z.array(folderSchema.extend({ source: z.string().min(1) })).max(10000).default([]),
   views: z.array(viewSaveSchema.safeExtend({ source: z.string().min(1), model: z.string(), updatedAt: z.string().datetime() })).max(10000).default([]),
 }).strict();
@@ -130,7 +134,10 @@ export const exportLibrary = () => serialized(async () => {
 });
 /** Restore is offline and only into an empty store. Never silently replaces company work. */
 export const restoreLibrary = (input: unknown) => serialized(async () => {
-  const backup = librarySchema.parse(input);
+  const shell = librarySchema.parse(input), invalid: string[] = [];
+  const dashboards = shell.dashboards.flatMap(d => { const parsed = backupDashboardSchema.safeParse(d); if (parsed.success) return [parsed.data]; invalid.push(String((d as any)?.id ?? "(missing id)")); return []; });
+  if (invalid.length) throw Object.assign(new Error(`Backup contains ${invalid.length} document${invalid.length === 1 ? "" : "s"} that do not match the current schema: ${invalid.slice(0, 20).join(", ")}. Export again after fixing them, or remove them from the backup.`), { status: 400 });
+  const backup = { ...shell, dashboards };
   if (new Set(backup.dashboards.map(d => d.id)).size !== backup.dashboards.length) throw new Error("Backup contains duplicate dashboard IDs");
   if (new Set(backup.folders.map(f => f.id)).size !== backup.folders.length || new Set(backup.views.map(v => v.id)).size !== backup.views.length) throw new Error("Backup contains duplicate library IDs");
   for (const f of backup.folders) validateFolderTree(backup.folders.filter(x => x.source === f.source), f);
@@ -286,7 +293,8 @@ export const mutateActivity = (scope: ActivityScope, tileId: string, change: (ro
 
 /** One transaction per source. Renames, moves and deletions survive future boots and backups. */
 export const initializeCoreLibrary = (scope: DashboardScope, model: Model) => serialized(async () => {
-  if ((await conn().runAndReadAll("SELECT source_id FROM library_initializations WHERE source_id = ?", [scope.source])).getRows().length) return;
+  const skipped: string[] = [];
+  if ((await conn().runAndReadAll("SELECT source_id FROM library_initializations WHERE source_id = ?", [scope.source])).getRows().length) return skipped;
   const starters = libraryStarters(model), folders = await readFolders(scope.source);
   const ids = new Map<string, string>();
   await conn().run("BEGIN TRANSACTION");
@@ -297,15 +305,18 @@ export const initializeCoreLibrary = (scope: DashboardScope, model: Model) => se
       const id = existing?.id ?? randomUUID(); ids.set(definition.key, id);
       if (!existing) await conn().run("INSERT INTO library_folders VALUES (?, ?, ?, ?, ?)", [id, scope.source, definition.name, parentId, 1]);
     }
-    // Move unfiled dashboards only; preserve titles, tiles, activity, and any deliberate folder choices.
+    // Move unfiled dashboards only; preserve titles, tiles, activity, revisions, and any deliberate folder choices.
+    // A legacy document that no longer parses stays unfiled; boot must never fail because of it.
     const unfiled = (await conn().runAndReadAll("SELECT id, spec FROM dashboards WHERE source_id = ? AND folder_id IS NULL", [scope.source])).getRows();
     for (const row of unfiled) {
-      const key = folderForDashboard(model, dashboardSchema.parse(JSON.parse(String(row[1]))));
-      if (key) await conn().run("UPDATE dashboards SET folder_id = ?, revision = revision + 1 WHERE id = ? AND source_id = ?", [ids.get(key)!, String(row[0]), scope.source]);
+      const spec = dashboardSchema.safeParse(JSON.parse(String(row[1])));
+      if (!spec.success) { skipped.push(String(row[0])); continue; }
+      const key = folderForDashboard(model, spec.data);
+      if (key) await conn().run("UPDATE dashboards SET folder_id = ? WHERE id = ? AND source_id = ?", [ids.get(key)!, String(row[0]), scope.source]);
     }
     for (const d of starters) await conn().run(`INSERT INTO dashboards (id, name, model, spec, canvas, updated_at, source_id, schema_version, revision, folder_id, is_template)
       VALUES (?, ?, ?, ?, ?, now(), ?, 1, 1, ?, true)`, [randomUUID(), d.name, scope.model, JSON.stringify(d.spec), JSON.stringify(d.canvas), scope.source, ids.get(d.folder)!]);
     await conn().run("INSERT INTO library_initializations VALUES (?)", [scope.source]);
-    await conn().run("COMMIT");
+    await conn().run("COMMIT"); return skipped;
   } catch (error) { await conn().run("ROLLBACK"); throw error; }
 });
