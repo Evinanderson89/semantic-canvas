@@ -75,12 +75,12 @@ Tables that Ingest registers through "Connected to Semantic Canvas" (`docs/conne
 
 | Action | Viewer | Editor | Administrator |
 | --- | --- | --- | --- |
-| `GET /api/sources/:id/connected` (viewers receive published entries only) | Yes | Yes | Yes |
+| `GET /api/sources/:id/connected` and `GET /api/sources/:id/connected/:dataset` (viewers receive published entries only) | Yes | Yes | Yes |
 | `POST /api/sources/:id/connected` register or replace (replace only by the original registrant or an administrator) | No | Yes | Yes |
 | `DELETE /api/sources/:id/connected/:dataset` disconnect (original registrant or an administrator) | No | Yes | Yes |
 | `POST /api/sources/:id/connected/:dataset/publish` | No | No | Yes |
 
-Until an administrator publishes a connected table it is unreviewed: editors and administrators see it badged "Ingested, unreviewed"; viewers do not see it in the model, catalogue or query results; dashboard suggestions and the assistant's catalogue exclude it. Metrics not listed at publish time stay unreviewed. Every connected table is a snapshot; the source and each tile that uses the table show "Data as of" the load time. Local mode performs these actions as the simulated administrator.
+Until an administrator publishes a connected table it is unreviewed: editors and administrators see it badged "Ingested, unreviewed"; viewers do not see it in the model, catalogue or query results; dashboard suggestions and the assistant's catalogue exclude it. Administrators publish from **Connections → Review and publish** on the table, choosing the metrics to publish and their label, direction, time grains and importance; metrics not ticked stay unreviewed. Every connected table is a snapshot; the source and each tile that uses the table show "Data as of" the load time. Local mode performs these actions as the simulated administrator.
 
 ## Connect logging and monitoring
 
@@ -152,5 +152,7 @@ Implementation references: `src/security/auth.ts`, `src/operations/telemetry.ts`
 ## Gateway suite deployment
 
 The instructions above cover standalone Canvas. For the intended full workspace with Ingest, follow [suite packaging](suite-packaging.md) and the [Gateway integration guide](https://github.com/Evinanderson89/gateway-platform/blob/main/docs/data-apps.md). Canvas can use `SC_MODE=gateway` to verify Gateway sessions while retaining its own source, role, row-policy and anti-forgery checks. Configure the public URL, issuer, JWT audience, JWKS, portal URL and access file together; keep internal backend ports private.
+
+`SC_SHARED_LAKE` (optional) names the directory Ingest and Canvas share, mounted as one Compose volume in both containers. When it is set, the entrypoint creates `$SC_SHARED_LAKE/tables`, copies the sample lake into it if it is empty, and, when `SC_MODE=gateway` and no `sources.yaml` exists yet, seeds the workspace with `deploy/gateway-sources.yaml`, whose `duckglue-local` source reads `${SC_SHARED_LAKE}/tables`. Without it the entrypoint behaves as before. See `connected-canvas.md` for the lake layout.
 
 The bundled cross-repository Compose example is local development configuration with fixture users. A production suite bundle, first-run setup and end-to-end identity-provider verification are still release work. Before rollout, pin compatible releases of both repositories and verify storage upgrades and restore. Keep Canvas, Gateway and Ingest backups distinct and complete; do not combine their databases just because they share an entry point.

@@ -16,7 +16,7 @@ Ingest is not a third repository. Gateway remains shared infrastructure and can 
 
 ## Installation choices
 
-- **Full workspace:** the intended default bundle includes Gateway, Ingest and Canvas. A local launcher and integrated Compose configuration exist in Gateway; full company sign-in deployment remains unverified.
+- **Full workspace:** the intended default bundle includes Gateway, Ingest and Canvas. A local launcher and integrated Compose configuration exist in Gateway; the integrated stack has been verified from a fresh clone with company sign-in and an Ingest load appearing in Canvas (10 September 2026); pinned images, first-run setup and a tested upgrade remain.
 - **Canvas only:** use this repository's existing Docker or local development recipe. Teams can keep their existing pipelines and semantic models.
 - **Ingest only:** its local development recipe exists. A polished standalone distribution and company-auth recipe remain future work.
 

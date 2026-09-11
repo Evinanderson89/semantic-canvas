@@ -533,6 +533,13 @@ app.post("/api/sources/:sourceId/connected", safe(async (req, res) => {
   res.json({ ...summarize(entry), table: merged ?? null });
 }));
 
+/** The draft an admin reviews before publishing: columns and expressions, which the list leaves out. Same visibility rule as the list. */
+app.get("/api/sources/:sourceId/connected/:dataset", safe(async (req, res) => {
+  const source = connectedSource(req), overlay = await readOverlay(source.id), existing = overlay.tables[String(req.params.dataset)];
+  if (!existing || (roleOf(req) === "viewer" && existing.status !== "published")) return res.status(404).json({ error: `no connected table "${req.params.dataset}" on ${source.id}` });
+  res.json({ dataset: existing.dataset, status: existing.status, table: existing.table, metrics: existing.metrics });
+}));
+
 app.post("/api/sources/:sourceId/connected/:dataset/publish", safe(async (req, res) => {
   const source = connectedSource(req), body = publishSchema.parse(req.body);
   const overlay = await readOverlay(source.id), existing = overlay.tables[String(req.params.dataset)];

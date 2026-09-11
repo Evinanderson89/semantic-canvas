@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { readResponse } from "./http.ts";
 import type { ConnectedProvenance } from "../semantic/model.ts";
 import { UnreviewedBadge, dataAsOf } from "./connected.tsx";
+import { PublishDialog } from "./PublishDialog.tsx";
 
 export interface SourceInfo {
   id: string; label: string; adapter: string;
@@ -165,10 +166,11 @@ interface AiStatus { configured: boolean; provider: string; model: string }
  * only receive published entries; the server decides who may disconnect.
  */
 function ConnectedTables({ sourceId, onChange }: { sourceId: string; onChange: () => void }) {
-  const { canEdit, user } = useSession();
+  const { canEdit, canAdmin, user } = useSession();
   const [tables, setTables] = useState<ConnectedTable[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState<string | null>(null);
   const load = () => fetch(`/api/sources/${encodeURIComponent(sourceId)}/connected`).then(readResponse).then((d) => setTables(d.tables)).catch((e) => setError(e.message));
   useEffect(() => { load(); }, [sourceId]);
   const disconnect = async (dataset: string) => {
@@ -183,12 +185,15 @@ function ConnectedTables({ sourceId, onChange }: { sourceId: string; onChange: (
         <b className="mono">{t.dataset}</b>
         {t.status === "unreviewed" ? <UnreviewedBadge /> : <span className="active-badge">Published</span>}
         <span className="conn-meta">{t.columns} cols · {t.metrics.length} metrics{t.status === "published" ? ` (${t.metrics.filter((m) => m.reviewed).length} reviewed)` : ""}</span>
+        {canAdmin && <button className="link conn-action" disabled={busy === t.dataset} onClick={() => setReviewing(t.dataset)}>Review and publish</button>}
         {canEdit && (user == null || user.id === t.registeredBy || user.role === "admin") &&
           <button className="link conn-action" disabled={busy === t.dataset} onClick={() => disconnect(t.dataset)}>{busy === t.dataset ? "Disconnecting…" : "Disconnect"}</button>}
       </div>
       <p className="mono conn-meta">{t.provenance.source} · {t.provenance.rows.toLocaleString()} rows · loaded by {t.provenance.loadedBy} · {dataAsOf(t)}</p>
+      {t.metrics.length > 0 && <div className="syns">{t.metrics.map((m) => <i key={m.name} title={m.name} className={m.reviewed ? "reviewed" : undefined}>{m.label} · {m.reviewed ? "published" : "draft"}</i>)}</div>}
     </div>)}
     {error && <div className="cform-err">{error}</div>}
+    {reviewing && <PublishDialog sourceId={sourceId} dataset={reviewing} onClose={() => setReviewing(null)} onPublished={() => { setReviewing(null); onChange(); load(); }} />}
   </div>;
 }
 

@@ -1,0 +1,17 @@
+# First-run sources for the Gateway suite (SC_MODE=gateway): the sample
+# warehouse, read from the lake Ingest writes to. ${SC_SHARED_LAKE} is the
+# shared volume (docs/self-hosting.md); deploy/entrypoint.sh seeds it with the
+# sample data when it is empty.
+ai:
+  provider: anthropic
+  model: claude-opus-5
+  apiKey: ${ANTHROPIC_API_KEY}
+sources:
+  - id: duckglue-local
+    label: duckglue on DuckDB
+    adapter: duckglue
+    model: ./sample-data/warehouse.yaml
+    connector:
+      type: duckdb
+      lakeRoot: ${SC_SHARED_LAKE}/tables
+      poolSize: 4
