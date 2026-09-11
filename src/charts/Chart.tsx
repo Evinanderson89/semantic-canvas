@@ -563,9 +563,54 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
     case "scatter":
       return Plot.plot({ ...common,
         marks: [Plot.dot(data, { x: measures[0], y: measures[1] ?? measures[0], r: 3, fillOpacity: 0.6 })] });
-    case "heatmap":
-      return Plot.plot({ ...common, color: { scheme: "YlGnBu", legend },
-        marks: [Plot.cell(data, { x: dims[0], y: dims[1], fill: measures[0] })] });
+    case "heatmap": {
+      // Cells need discrete positions on both axes. A temporal dimension
+      // arrives as Date objects, which Plot would put on a continuous
+      // utc scale and then refuse ("utc !== band"), so each temporal
+      // dimension is relabelled with the same grain-aware labeler the
+      // combo chart uses, and the axis keeps date order rather than
+      // sorting the labels alphabetically. With only one dimension the
+      // second axis is the measure name, so a tile with one dimension
+      // and several measures still draws instead of erroring.
+      const isTemporalCol = (col: string) =>
+        data.length > 0 && data.every((d) => d[col] instanceof Date || d[col] == null);
+      const label = (col: string) => {
+        const f = dateLabeler(data.map((d) => d[col]));
+        const order = [...new Set(data.map((d) => d[col]).filter((v) => v instanceof Date))]
+          .sort((a: any, b: any) => +a - +b).map(f);
+        return { f, domain: [...new Set(order)] };
+      };
+      const xDim = dims[0], yDim = dims[1];
+      const xl = xDim && isTemporalCol(xDim) ? label(xDim) : null;
+      const yl = yDim && isTemporalCol(yDim) ? label(yDim) : null;
+      // Several measures on one dimension share no scale (events in the
+      // thousands next to a rate under one), so each measure's row is
+      // coloured by its own range and the tooltip keeps the real value.
+      const range = (m: string) => {
+        const vs = data.map((d) => Number(d[m])).filter(Number.isFinite);
+        const lo = Math.min(...vs), hi = Math.max(...vs); return { lo, span: hi - lo || 1 };
+      };
+      const ranges = new Map(measures.map((m) => [m, range(m)]));
+      const cells = yDim
+        ? data.map((d) => ({ x: xl ? xl.f(d[xDim]) : d[xDim], y: yl ? yl.f(d[yDim]) : d[yDim], v: d[measures[0]], title: `${d[measures[0]]}` }))
+        : data.flatMap((d) => measures.map((m) => {
+            const r = ranges.get(m)!, raw = Number(d[m]);
+            return { x: xl ? xl.f(d[xDim]) : d[xDim], y: labels[m] ?? m, v: (raw - r.lo) / r.span, title: `${labels[m] ?? m}: ${raw}` };
+          }));
+      // Both axes are bands here, so the shared options' utc x-scale and
+      // numeric y tick formatter must not carry over.
+      const { type: _xt, ticks: _xk, ...xBase } = common.x;
+      const { tickFormat: _yf, nice: _yn, grid: _yg, ...yBase } = common.y;
+      return Plot.plot({ ...common, color: { scheme: "YlGnBu", legend: legend && Boolean(yDim), label: yDim ? measures[0] : "relative to each row" },
+        // A daily axis can hold hundreds of buckets; show about one label
+        // per 60px and let the cells carry the rest.
+        x: { ...xBase, tickRotate: xl ? -35 : xBase.tickRotate, ...(xl ? { domain: xl.domain,
+             ticks: xl.domain.filter((_, i) => i % Math.max(1, Math.ceil(xl.domain.length / Math.max(2, Math.floor(box.w / 60)))) === 0) } : {}) },
+        y: { ...yBase, ...(yl ? { domain: yl.domain } : {}) },
+        marginBottom: xl ? 58 : common.marginBottom,
+        marginLeft: Math.max(common.marginLeft, Math.min(140, 8 + 6.5 * Math.max(0, ...cells.map((c) => String(c.y).length)))),
+        marks: [Plot.cell(cells, { x: "x", y: "y", fill: "v", title: "title" })] });
+    }
     case "smallMultiples": {
       // Same temporal + categorical shape a multi-series line uses, but
       // POSITION separates categories instead of colour: one mini time
