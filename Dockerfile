@@ -17,8 +17,8 @@ COPY docs ./docs
 COPY sample-data ./sample-data
 COPY sources.yaml ./sources.yaml
 COPY security/policies.yaml ./security/policies.yaml
-COPY deploy/entrypoint.sh deploy/empty-sources.yaml ./deploy/
-RUN mkdir -p /data/config && chown -R node:node /data && chmod +x /app/deploy/entrypoint.sh
+COPY deploy/entrypoint.sh deploy/empty-sources.yaml deploy/gateway-sources.yaml ./deploy/
+RUN mkdir -p /data/config /lake && chown -R node:node /data /lake && chmod +x /app/deploy/entrypoint.sh
 USER node
 VOLUME ["/data"]
 EXPOSE 5174

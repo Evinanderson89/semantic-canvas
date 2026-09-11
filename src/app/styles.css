@@ -1240,3 +1240,13 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .gateway-return:focus-visible { outline:2px solid var(--accent);outline-offset:2px; }
 .sidebar.collapsed .gateway-return { margin:0 5px 12px;padding:8px;justify-content:center; }
 .sidebar.collapsed .gateway-return span { display:none; }
+.connected-table .syns i.reviewed{color:var(--pos);border-color:color-mix(in srgb,var(--pos) 40%,transparent)}
+.publish-form input{background:var(--surface);border:1px solid var(--line);border-radius:7px;color:var(--ink);padding:7px 10px;font:inherit;font-size:12.5px}
+.publish-form input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:transparent}
+.publish-form input:disabled,.publish-form select:disabled{opacity:.5}
+.publish-metric{border:1px solid var(--line);border-radius:9px;padding:12px 14px;margin:0 0 10px}
+.publish-metric legend{display:flex;align-items:center;gap:10px;padding:0 6px}
+.publish-metric legend .active-badge{margin-left:0}
+.publish-meaning{margin:2px 0 12px;font-size:12.5px;color:var(--ink-2)}
+.publish-meaning code{margin-left:6px;font-size:11px;color:var(--ink-3)}
+.publish-grains{display:flex;gap:12px;flex-wrap:wrap;padding-top:4px}

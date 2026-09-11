@@ -33,6 +33,8 @@ Operator configures one shared directory, mounted by both apps: `INGEST_CANVAS_L
 
 Canvas's DuckDB connector reads `<lakeRoot>/<table>/**/*.parquet` with `union_by_name`, so only `tables/` may contain current data, and each dataset folder holds exactly one version. `staging/`, `archive/` and `datasets/` sit outside `lakeRoot` and are invisible to Canvas.
 
+In the Gateway Compose deployment the directory is one shared volume: Ingest mounts it as `INGEST_CANVAS_LAKE_DIR`, Canvas as `SC_SHARED_LAKE`. Canvas's entrypoint creates `<lake>/tables`, seeds it with the sample lake when it is empty, and on first run writes a `sources.yaml` whose `duckglue-local` source reads `${SC_SHARED_LAKE}/tables`, so the sample warehouse and connected tables come from the same place.
+
 Writes go to a temporary directory under `staging/` and are renamed into place. Promote is two renames: current to `archive/<dataset>/<previous_import_id>`, then staged to `tables/<dataset>`. POSIX has no atomic directory exchange, so Canvas may see the folder missing for a few milliseconds; its query cache and the ordering above make that harmless. Rollback is the same swap in reverse.
 
 **Snowflake flavour (phase 4):** the same dataset record and the same promote and rollback semantics over tables in a dedicated landing schema. Ingest's role can create only in that schema. Canvas has a read-only role on it. Ingest never writes to a schema that holds modeled tables.
@@ -112,7 +114,7 @@ Ingest calls Canvas with the user's own Gateway session cookie and the Canvas an
 
 Canvas stores connected tables in a per-source overlay, `SC_DATA_DIR/models/connected/<sourceId>.yaml`, merged over the base model when the source loads. Base model files are never edited. Each overlay table carries `status: unreviewed | published`, `provenance`, and `loadedAt`. Registering an existing dataset again replaces its overlay entry only if the caller is the owner or an admin, and only after the drift rules above.
 
-`POST /api/sources/:sourceId/connected/:dataset/publish` (admin) marks the table and chosen metrics reviewed and may set `time_grains`, `direction`, `importance` and a row-level policy. `DELETE /api/sources/:sourceId/connected/:dataset` (owner or admin) removes the overlay entry; data stays in the lake.
+`GET /api/sources/:sourceId/connected/:dataset` returns the draft in full (columns, expressions, review fields) for the review screen. `POST /api/sources/:sourceId/connected/:dataset/publish` (admin) marks the table and chosen metrics reviewed and may set `time_grains`, `direction`, `importance` and a row-level policy. `DELETE /api/sources/:sourceId/connected/:dataset` (owner or admin) removes the overlay entry; data stays in the lake.
 
 Canvas behaviour for unreviewed tables: visible to editors and admins with an "Ingested, unreviewed" badge; hidden from viewers; excluded from dashboard suggestions and from the agent's catalogue; provenance and "data as of" shown on the source and on every tile that uses the table.
 
@@ -124,7 +126,7 @@ A second import into an existing dataset name lands in `staging/`. Nothing Canva
 
 1. **Ingest lake destination (done).** Layout, dataset records, lineage columns, naming, flags, quotas, staged load, promote and roll back with the drift check, draft model generation, minimal UI. Fully testable locally against a temporary lake directory. No Canvas call yet.
 2. **Canvas overlay and registration (done).** The overlay loader, the three endpoints, role rules, unreviewed visibility, provenance and "data as of" in the UI. Testable with fixtures.
-3. **Wire them together (done).** Ingest calls the registration endpoint, shows the Canvas status on the dataset, deep-links "Open in Semantic Canvas", and disconnects. Verified through the local launcher with both apps running.
+3. **Wire them together (done).** Ingest calls the registration endpoint, shows the Canvas status on the dataset, deep-links "Open in Semantic Canvas" (`<canvas>/?source=<sourceId>&table=<dataset>`: Canvas switches to that source if the caller may use it, opens the Metric Registry filtered to the table, and strips both parameters; an unknown source or table is ignored), and disconnects. Verified through the local launcher with both apps running.
 4. **Snowflake landing schema.** Same record and semantics over Snowflake tables.
 5. **Live acceptance and docs.** Fresh Compose run, a real Salesforce or Stripe account, the operator guide, and the release-gate updates in `suite-packaging.md`.
 

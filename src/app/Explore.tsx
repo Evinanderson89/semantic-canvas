@@ -9,11 +9,11 @@ import { Provenance, UnreviewedBadge } from "./connected.tsx";
  * carries everything they show. They existed as dead sidebar links, which is
  * worse than not existing: a promise the tool doesn't keep.
  */
-export function MetricRegistry({ model, onUse }: {
-  model: Model; onUse: (metric: string) => void;
+export function MetricRegistry({ model, onUse, initialTable = null }: {
+  model: Model; onUse: (metric: string) => void; initialTable?: string | null;
 }) {
   const [q, setQ] = useState("");
-  const [table, setTable] = useState<string | null>(null);
+  const [table, setTable] = useState<string | null>(initialTable);
   const all = Object.values(model.metrics);
   const tables = Object.keys(metricsByTable(model));
 

@@ -8,3 +8,11 @@ export function Provenance({ connected }: { connected: ConnectedInfo }) {
   const p = connected.provenance;
   return <p className="mono conn-meta">{p.source} · {p.rows.toLocaleString()} rows · loaded by {p.loadedBy} · {dataAsOf(connected)}</p>;
 }
+/** The plain-language line Ingest shows next to a draft metric ("Count of rows"), derived from the expression so the review screen can show the same. */
+export function describeExpression(expression: string): string {
+  const m = /^\s*(count|sum|avg|min|max)\s*\(\s*(distinct\s+)?([^()]*?)\s*\)\s*$/i.exec(expression);
+  if (!m) return expression;
+  const [, fn, distinct, arg] = m, f = fn.toLowerCase();
+  if (f === "count") return arg === "*" ? "Count of rows" : `${distinct ? "Distinct count" : "Count"} of ${arg}`;
+  return `${{ sum: "Total", avg: "Average", min: "Smallest", max: "Largest" }[f]} of ${arg}`;
+}

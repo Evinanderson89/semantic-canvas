@@ -101,3 +101,41 @@ it("leaves a model without an overlay untouched", () => {
   const model: Model = { ...fixture };
   expect(mergeOverlay(model, { tables: {} }, "t")).toBe(model);
 });
+
+it("explains a draft metric in plain language and sends the review exactly as publishSchema expects", async () => {
+  const { describeExpression } = await import("../src/app/connected.tsx");
+  const { publishBody, reviewOf } = await import("../src/app/PublishDialog.tsx");
+  const { publishSchema } = await import("../src/sources/connected.ts");
+  expect(describeExpression("count(*)")).toBe("Count of rows");
+  expect(describeExpression("sum(amount)")).toBe("Total of amount");
+  expect(describeExpression("AVG( employees )")).toBe("Average of employees");
+  expect(describeExpression("count(distinct id)")).toBe("Distinct count of id");
+  expect(describeExpression("max(created_date)")).toBe("Largest of created_date");
+  expect(describeExpression("sum(amount) / count(*)")).toBe("sum(amount) / count(*)");
+  const draft = { dataset: "salesforce_account", status: "unreviewed" as const, table: { default_date_column: "created_date", columns: [{ name: "created_date", type: "date" }] },
+    metrics: { salesforce_account_rows: { label: "Accounts", expression: "count(*)", reviewed: false }, salesforce_account_employees_total: { label: "Employees", expression: "sum(employees)", reviewed: true, direction: "higher" as const, importance: 40 } } };
+  const reviews = Object.fromEntries(Object.entries(draft.metrics).map(([n, m]) => [n, reviewOf(draft, m)]));
+  // The draft's default date column is offered as the time dimension; unticked metrics never travel; blanks are dropped, a blank description clears.
+  expect(reviews.salesforce_account_rows).toMatchObject({ publish: false, timeDimension: "salesforce_account.created_date", importance: "" });
+  expect(reviews.salesforce_account_employees_total).toMatchObject({ publish: true, direction: "higher", importance: "40" });
+  const body = publishBody({ grain: " one row per account ", description: "", dateColumn: "created_date" },
+    { ...reviews, salesforce_account_rows: { ...reviews.salesforce_account_rows, publish: true, label: "Accounts ", grains: ["month", "quarter"], direction: "", importance: " " } });
+  expect(body).toEqual({ table: { description: "", grain: "one row per account", default_date_column: "created_date" }, metrics: {
+    salesforce_account_rows: { reviewed: true, description: "", label: "Accounts", time_grains: ["month", "quarter"], time_dimension: "salesforce_account.created_date" },
+    salesforce_account_employees_total: { reviewed: true, description: "", label: "Employees", direction: "higher", importance: 40 } } });
+  expect(publishSchema.safeParse(body).success).toBe(true);
+  expect(publishSchema.safeParse(publishBody({ grain: "", description: "", dateColumn: "" }, reviews)).data).toEqual({ table: { description: "" }, metrics: { salesforce_account_employees_total: { reviewed: true, description: "", label: "Employees", direction: "higher", importance: 40 } } });
+});
+
+it("reads ?source= and &table= from an Open in Semantic Canvas link and ignores what it cannot use", async () => {
+  const { linkedSource, parseLink, stripLink } = await import("../src/app/link.ts");
+  const sources = [{ id: "duckglue-local", status: "ready" }, { id: "warehouse", status: "error" }];
+  expect(parseLink("?source=duckglue-local&table=salesforce_account")).toEqual({ source: "duckglue-local", table: "salesforce_account" });
+  expect(parseLink("?source=&table=")).toEqual({ source: null, table: null });
+  expect(linkedSource(parseLink("?source=duckglue-local"), sources)).toBe("duckglue-local");
+  expect(linkedSource(parseLink("?source=warehouse"), sources)).toBeNull();
+  expect(linkedSource(parseLink("?source=nope"), sources)).toBeNull();
+  expect(linkedSource(parseLink(""), sources)).toBeNull();
+  expect(stripLink("http://canvas.test/?source=duckglue-local&table=x&keep=1#h")).toBe("http://canvas.test/?keep=1#h");
+  expect(stripLink("http://canvas.test/?source=duckglue-local")).toBe("http://canvas.test/");
+});

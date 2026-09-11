@@ -203,6 +203,9 @@ it("lets editors register and disconnect ingested tables, admins publish them, a
   expect(viewerModel.tables.ingest_orders).toBeUndefined(); expect(viewerModel.metrics.ingest_orders_rows).toBeUndefined();
   expect((await (await call("/api/sources/public/connected", { headers: headers(viewer) })).json()).tables).toEqual([]);
   expect((await (await call("/api/sources/public/connected", { headers: headers(editor) })).json()).tables.map((t: any) => t.dataset)).toEqual(["ingest_orders"]);
+  // The review screen reads the draft in full; a viewer cannot see an unreviewed one at all.
+  expect((await call("/api/sources/public/connected/ingest_orders", { headers: headers(viewer) })).status).toBe(404);
+  expect(await (await call("/api/sources/public/connected/ingest_orders", { headers: headers(admin) })).json()).toMatchObject({ dataset: "ingest_orders", status: "unreviewed", table: { columns: [{ name: "id" }, { name: "amount" }, { name: "created_at" }] }, metrics: { ingest_orders_rows: { expression: "count(*)", reviewed: false } } });
   const refused = await call("/api/query", { method: "POST", headers: headers(viewer), body: JSON.stringify({ metrics: ["ingest_orders_rows"], dimensions: [] }) });
   expect(refused.status).toBe(400); expect((await refused.json()).issues[0].problem).toMatch(/not yet published/);
   const suggested = await (await call("/api/suggest?table=ingest_orders", { headers: headers(editor) })).json();

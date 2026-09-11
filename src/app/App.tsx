@@ -44,6 +44,7 @@ import { DistributeDialog } from "./DistributeDialog.tsx";
 import { ReferenceImport } from "./ReferenceImport.tsx";
 import { TabStrip } from "./TabStrip.tsx";
 import { FilterControl, FilterDesigner } from "./FilterControls.tsx";
+import { linkedSource, parseLink, stripLink } from "./link.ts";
 
 const GRAINS = ["day", "week", "month", "quarter", "year"];
 
@@ -85,6 +86,11 @@ export function App() {
   const [selected, setSelected] = useState<string[]>([]);
   const [interview, setInterview] = useState(false);
   const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library">("home");
+  // ?source=&table= from an "Open in Semantic Canvas" link: read once, applied when the sources (then the model) are known, and stripped.
+  const link = React.useRef<ReturnType<typeof parseLink> | null>(parseLink(location.search));
+  const [sourcesLoaded, setSourcesLoaded] = useState(false);
+  const [linkedTable, setLinkedTable] = useState<string | null>(null);
+  const [registryTable, setRegistryTable] = useState<string | null>(null);
   const [libraryFolder, setLibraryFolder] = useState<string | null>(null);
   const [viewPicker, setViewPicker] = useState(false), [saveViewOpen, setSaveViewOpen] = useState(false);
   const [viewPreview, setViewPreview] = useState<LibraryItem | null>(null);
@@ -132,7 +138,7 @@ export function App() {
 
   const refreshSources = useCallback(() =>
     fetch("/api/sources").then((r) => r.json())
-      .then((d) => { setSources(d.sources ?? []); setAutoSourceId(d.active ?? null);
+      .then((d) => { setSources(d.sources ?? []); setAutoSourceId(d.active ?? null); setSourcesLoaded(true);
         if (!sourceRef.current) sourceRef.current = d.active ?? "";
         if (localStorage.getItem("sc:principal") === null && d.defaultPrincipal) {
           asWhoRef.current = d.defaultPrincipal; setAsWho(d.defaultPrincipal);
@@ -285,6 +291,21 @@ export function App() {
     }).catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
     refreshSaved();
   }, [refreshSaved, beginDocument]);
+
+  useEffect(() => {
+    if (!sourcesLoaded || !link.current) return;
+    const pending = link.current; link.current = null;
+    history.replaceState(history.state, "", stripLink(location.href));
+    const next = linkedSource(pending, sources);
+    if (next && next !== activeSourceId) switchSource(next);
+    else if (next) { sourceRef.current = next; setSourceId(next); try { storage.setItem(sourceStorageKey, next); } catch {} }
+    setLinkedTable(pending.table);
+  }, [sourcesLoaded, sources, activeSourceId, switchSource]);
+  useEffect(() => {
+    if (!model || !linkedTable) return;
+    setLinkedTable(null);
+    if (model.tables[linkedTable]) { setRegistryTable(linkedTable); setView("registry"); }
+  }, [model, linkedTable]);
 
   const [exportingPng, setExportingPng] = useState(false);
   const exportDashboardPng = async () => {
@@ -506,7 +527,11 @@ export function App() {
     el.scrollTo({ left: Math.max(0, scrollLeft), top: Math.max(0, scrollTop), behavior: "auto" });
   }, [dash, zoom]);
 
-  useEffect(() => { fetch("/api/model").then(readResponse).then((m) => { setModel(m); setBootError(""); }).catch((e) => setBootError(e.message)); }, []);
+  useEffect(() => {
+    const epoch = documentEpoch.current;
+    fetch("/api/model").then(readResponse).then((m) => { if (documentEpoch.current === epoch) { setModel(m); setBootError(""); } })
+      .catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
+  }, []);
 
   const build = useCallback((brief: Brief) => {
     setInterview(false);
@@ -578,7 +603,7 @@ export function App() {
       )}
       <Sidebar model={model} view={dash ? "" : view}
                library={<LibraryNavigation key={activeSourceId} data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} activeId={dashId ?? templateId} onBrowse={browseLibrary} onOpen={openLibraryItem} />}
-               onView={(v) => { if (beginDocument(null)) setView(v); }}
+               onView={(v) => { if (beginDocument(null)) { setRegistryTable(null); setView(v); } }}
                collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}
                onSettings={() => setSettingsOpen(true)}
                principals={principals} principal={asWho}
@@ -616,7 +641,7 @@ export function App() {
           <Connections sources={sources} activeId={activeSourceId} onSelect={switchSource}
                        onRefresh={() => { refreshSources(); fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message)); }} principals={principals} policies={policies} />
         ) : !dash && view === "registry" ? (
-          <MetricRegistry model={model} onUse={(m) => {
+          <MetricRegistry model={model} initialTable={registryTable} onUse={(m) => {
             const t = model.metrics[m].baseTable;
             setView("home"); build({ table: t, metrics: [m], audience: "operator", grain });
           }} />
