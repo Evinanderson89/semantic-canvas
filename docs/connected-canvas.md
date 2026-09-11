@@ -128,7 +128,7 @@ A second import into an existing dataset name lands in `staging/`. Nothing Canva
 2. **Canvas overlay and registration (done).** The overlay loader, the three endpoints, role rules, unreviewed visibility, provenance and "data as of" in the UI. Testable with fixtures.
 3. **Wire them together (done).** Ingest calls the registration endpoint, shows the Canvas status on the dataset, deep-links "Open in Semantic Canvas" (`<canvas>/?source=<sourceId>&table=<dataset>`: Canvas switches to that source if the caller may use it, opens the Metric Registry filtered to the table, and strips both parameters; an unknown source or table is ignored), and disconnects. Verified through the local launcher with both apps running.
 4. **Snowflake landing schema.** Same record and semantics over Snowflake tables.
-5. **Live acceptance and docs.** Fresh Compose run, a real Salesforce or Stripe account, the operator guide, and the release-gate updates in `suite-packaging.md`.
+5. **Live acceptance and docs.** (Compose walkthrough done 10 September 2026; live provider runs and the operator guide remain.) Fresh Compose run, a real Salesforce or Stripe account, the operator guide, and the release-gate updates in `suite-packaging.md`.
 
 ## Out of scope for now
 
