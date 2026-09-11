@@ -5,6 +5,16 @@ const local: WorkspaceSession = { mode: "local", authenticated: true, canEdit: t
 const Context = createContext(local);
 export const useSession = () => useContext(Context);
 
+/** Where "Continue with company sign-in" goes. Behind Gateway the portal
+ *  owns sessions: its refresh route renews an expired token when it can and
+ *  otherwise starts sign-in, then returns here. Standalone team mode signs
+ *  in locally. */
+export function signInHref(session: { gatewayUrl?: string } | null): string {
+  const portal = session?.gatewayUrl;
+  if (!portal) return "/api/auth/login";
+  return `${portal.replace(/\/$/, "")}/auth/refresh?next=${encodeURIComponent(location.href)}`;
+}
+
 export function SessionBoundary({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<WorkspaceSession | null>(null);
   const [error, setError] = useState("");
@@ -25,14 +35,20 @@ export function SessionBoundary({ children }: { children: ReactNode }) {
       }
       return response;
     };
-    original("/api/auth/session").then(async r => { if (!r.ok) throw new Error("Workspace is unavailable"); return r.json(); })
+    // Behind Gateway, Envoy answers 401 itself when the session token is
+    // missing or expired, before Canvas sees the request. That is an
+    // unauthenticated session, not an outage: show the sign-in, whose link
+    // goes through the portal so an expired token can be renewed.
+    original("/api/auth/session").then(async r => {
+      if (r.status === 401) return { mode: "team", authenticated: false, gatewayUrl: (import.meta as any).env?.VITE_GATEWAY_PORTAL_URL || undefined };
+      if (!r.ok) throw new Error("Workspace is unavailable"); return r.json(); })
       .then(s => { current = s; if (alive) setSession(s); }).catch(() => { if (alive) setError("We couldn’t reach your workspace. Check the connection and try again."); });
     return () => { alive = false; window.fetch = original; };
   }, []);
   if (!session || !session.authenticated) return <main className="workspace-welcome">
     <span className="eyebrow">Semantic Canvas</span><h1>{session ? "Your company’s metrics.\nA clearer story." : "Opening your workspace"}</h1>
     <p>{error || (session ? "Sign in with your company account to explore, build, and share dashboards." : "Connecting to Semantic Canvas…")}</p>
-    {session && <a className="save-button" href="/api/auth/login">Continue with company sign-in →</a>}
+    {session && <a className="save-button" href={signInHref(session)}>Continue with company sign-in →</a>}
     {error && <button onClick={() => location.reload()}>Try again</button>}
   </main>;
   return <Context.Provider value={session}>{children}</Context.Provider>;
