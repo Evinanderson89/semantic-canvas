@@ -5,6 +5,7 @@
 - Added persistent source-scoped folders, reusable view snapshots, starter dashboards and library setup/migration, replacing Explore by topic.
 - Added personal chart-chat and notification display preferences, off by default, without deleting existing activity.
 - Added verified Gateway session support and navigation back to the shared app launcher.
+- Added an optional `default` grant to the access file so self-service Gateway users outside every bound group receive a configured role (viewer recommended) instead of a 403; bindings still win, and the default's principal is validated at startup.
 - Documented one suite with two apps, standalone/full-workspace packaging choices, storage boundaries and release gates.
 
 The companion Ingest app lives in gateway-platform. Automatic data/model handoff, a version-pinned suite release bundle and integrated company deployment verification remain unfinished. Back up the Canvas library before applying additive store migrations. See [suite packaging](docs/suite-packaging.md).
