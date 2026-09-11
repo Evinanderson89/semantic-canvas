@@ -1,7 +1,7 @@
 import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { CompanyAuth, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
+import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
 import { createTelemetry } from "./operations/telemetry.ts";
 import { resolve } from "node:path";
 import { analyzeReference, validateReferenceUpload } from "./reference/analyze.ts";
@@ -73,8 +73,12 @@ async function boot() {
   ai = loaded.ai;
   rls = await loadRls(process.env.RLS_PATH ?? "./security/policies.yaml");
 
-  for (const binding of auth.config.access?.bindings ?? []) {
-    if (!rls.principals[binding.principal]) throw new Error("An access binding references an unknown RLS principal");
+  checkAccessPrincipals(auth.config.access, rls.principals);
+  if (auth.config.access?.default) {
+    // The structured log allowlist keeps only the role; the event name says what it means. A write-capable default means every verified user gets editor access.
+    const { role } = auth.config.access.default;
+    if (role === "viewer") telemetry.log("access.default_configured", { role, mode: auth.config.mode });
+    else telemetry.log("access.default_grants_every_verified_user_write_access", { role, mode: auth.config.mode }, "warn");
   }
   await auth.start();
 

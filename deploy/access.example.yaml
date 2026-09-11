@@ -1,6 +1,14 @@
 # First matching rule wins. IDs must match the verified ID token from your IdP.
 # Grant '*' sources only to workspace administrators unless you intend broader access.
 groupsClaim: groups
+# Optional: applied when no binding matches a verified identity, for example a
+# person who added Canvas through Gateway's self-service apps but is in none of
+# the groups below. Without it, unmatched accounts are refused. Use viewer:
+# editor or admin would let every verified account change the workspace.
+# default:
+#   role: viewer
+#   principal: emea
+#   sources: ["sales"]
 bindings:
   - group: semantic-canvas-admins
     role: admin

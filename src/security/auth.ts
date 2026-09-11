@@ -9,8 +9,15 @@ import { z } from "zod";
 const bindingSchema = z.object({ subject: z.string().min(1).optional(), group: z.string().min(1).optional(),
   role: z.enum(["viewer", "editor", "admin"]), principal: z.string().min(1), sources: z.array(z.string().min(1)).min(1),
 }).strict().refine(b => Boolean(b.subject) !== Boolean(b.group), "Use exactly one subject or group per binding");
-export const accessSchema = z.object({ groupsClaim: z.string().min(1).default("groups"), bindings: z.array(bindingSchema).min(1).max(1000) }).strict();
+/** Applied to any verified identity that matches no binding, so self-service Gateway users outside every bound group can still open Canvas. */
+const defaultGrantSchema = z.object({ role: z.enum(["viewer", "editor", "admin"]), principal: z.string().min(1), sources: z.array(z.string().min(1)).min(1) }).strict();
+export const accessSchema = z.object({ groupsClaim: z.string().min(1).default("groups"), default: defaultGrantSchema.optional(), bindings: z.array(bindingSchema).min(1).max(1000) }).strict();
 export type AccessConfig = z.infer<typeof accessSchema>;
+/** Every binding and the optional default must name a principal the RLS policy file defines; called at startup before any request is served. */
+export function checkAccessPrincipals(access: AccessConfig | undefined, principals: Record<string, unknown>) {
+  for (const binding of access?.bindings ?? []) if (!principals[binding.principal]) throw new Error("An access binding references an unknown RLS principal");
+  if (access?.default && !principals[access.default.principal]) throw new Error("The access default references an unknown RLS principal");
+}
 export interface Identity { id: string; name: string; role: "viewer" | "editor" | "admin"; principal: string; sources: string[] }
 interface Session { identity: Identity; csrf: string; expires: number }
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
@@ -23,9 +30,9 @@ export const canUseSource = (identity: Identity | undefined, source: string) => 
 export function mapIdentity(claims: Record<string, unknown>, issuer: string, access: AccessConfig): Identity | null {
   if (typeof claims.sub !== "string" || !claims.sub) return null;
   const groups = Array.isArray(claims[access.groupsClaim]) ? claims[access.groupsClaim] as unknown[] : [];
-  // Explicit ordered policy. No implicit administrator or domain-wide access.
-  const binding = access.bindings.find(b => b.subject ? b.subject === claims.sub : groups.includes(b.group));
-  return binding ? { id: digest(`${issuer}\0${claims.sub}`), name: String(claims.name ?? "Team member").slice(0, 150), role: binding.role, principal: binding.principal, sources: binding.sources } : null;
+  // Explicit ordered policy: the first matching binding wins, then the optional default. No implicit administrator or domain-wide access.
+  const grant = access.bindings.find(b => b.subject ? b.subject === claims.sub : groups.includes(b.group)) ?? access.default;
+  return grant ? { id: digest(`${issuer}\0${claims.sub}`), name: String(claims.name ?? "Team member").slice(0, 150), role: grant.role, principal: grant.principal, sources: grant.sources } : null;
 }
 export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
   const mode = env.SC_MODE ?? "local";

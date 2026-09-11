@@ -76,6 +76,12 @@ it("fails closed for missing team configuration, unmapped users and ambiguous ru
   await expect(loadAuthConfig({ SC_MODE: "team" })).rejects.toThrow(/required/);
   expect(mapIdentity({ sub: "nobody", groups: ["unassigned"] }, issuer, policy)).toBeNull();
   expect(accessSchema.safeParse({ bindings: [{ subject: "a", group: "b", role: "admin", principal: "admin", sources: ["*"] }] }).success).toBe(false);
+  // An optional default applies only after every binding has failed to match, and is validated like a binding.
+  const withDefault = accessSchema.parse({ ...policy, default: { role: "viewer", principal: "emea", sources: ["public"] } });
+  expect(mapIdentity({ sub: "nobody", groups: ["unassigned"] }, issuer, withDefault)).toMatchObject({ role: "viewer", principal: "emea", sources: ["public"] });
+  expect(mapIdentity({ sub: "someone", groups: ["admins"] }, issuer, withDefault)).toMatchObject({ role: "admin", principal: "admin", sources: ["*"] });
+  expect(mapIdentity({ groups: ["unassigned"] }, issuer, withDefault)).toBeNull();
+  for (const bad of [{ role: "owner", principal: "emea", sources: ["public"] }, { role: "viewer", sources: ["public"] }, { role: "viewer", principal: "emea", sources: [] }, { role: "viewer", principal: "emea", sources: ["public"], group: "x" }]) expect(accessSchema.safeParse({ ...policy, default: bad }).success).toBe(false);
   expect((await call("/api/model")).status).toBe(401);
   expect((await call("/api/model", { headers: { "x-sc-principal": "admin" } })).status).toBe(401);
   expect((await call("/healthz")).status).toBe(200);
