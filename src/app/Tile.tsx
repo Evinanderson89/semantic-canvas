@@ -12,6 +12,7 @@ import { inferChart } from "../suggest/chartRules.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
 import { semanticHints, timeColumnOf } from "../semantic/model.ts";
+import { dataAsOf } from "./connected.tsx";
 import type { FilterSpec } from "../compiler/spec.ts";
 import { drillInto, type DrillEntry, type DrillGrain } from "./drill.ts";
 import { downloadCsv, downloadPng, slugForFilename } from "./export.ts";
@@ -72,6 +73,8 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   // missing before, so changing a filter left the tile showing the previous
   // result with no sign it was stale.
   const base = model.metrics[spec.metrics[0]]?.baseTable ?? null;
+  // A connected table is a snapshot; every tile on it says how old (docs/connected-canvas.md).
+  const connected = base ? model.tables[base]?.connected : undefined;
   const activeDrill = drill?.at(-1) ?? null;
   const timeDimIndex = spec.dimensions.findIndex(d => d.includes(":"));
   const query = visibleQuery(model, spec, crossFilters, drill);
@@ -313,6 +316,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
           <h4 title={title}>{title}</h4>
           {state.status === "ok" &&
             <span className="ms mono">{state.ms}ms</span>}
+          {connected && <span className="ms mono data-as-of" title={`${connected.provenance.source}, loaded by ${connected.provenance.loadedBy}${connected.status === "unreviewed" ? ". Ingested, unreviewed." : ""}`}>{dataAsOf(connected)}</span>}
           {state.status === "ok" && state.coverage === "unknown" && <span className="ms mono" title="The source has not declared period completeness. These dates describe returned rows, not a verified complete reporting period.">Coverage unverified</span>}
           {state.status === "ok" && (state.partial?.start || state.partial?.end) && (
             <span className="ms mono partial-note"
@@ -331,6 +335,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         </header>
       )}
       {kind === "kpi" && timeDimIndex < 0 && <div className="kpi-activity"><ChartActivityButtons tileId={spec.id} /></div>}
+      {kind === "kpi" && connected && <span className="ms mono data-as-of kpi-as-of" title={`${connected.provenance.source}, loaded by ${connected.provenance.loadedBy}`}>{dataAsOf(connected)}</span>}
       {state.status === "ok" && state.truncated && <div className="result-warning" role="status" title={state.warnings?.join(" ")}>{state.window ? "Latest window" : "Limited results"} · {state.limit} rows · export is limited</div>}
       {beautifyOpen && (
         <div className="explain-pop beautify-pop">

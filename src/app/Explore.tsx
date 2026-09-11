@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import type { Model } from "../semantic/model.ts";
-import { metricsByTable } from "../semantic/model.ts";
+import { isUnreviewed, isUnreviewedTable, metricsByTable } from "../semantic/model.ts";
 import { prettyTable } from "./Sidebar.tsx";
+import { Provenance, UnreviewedBadge } from "./connected.tsx";
 
 /**
  * Metric Registry and Data Model are not new features — the model already
@@ -45,7 +46,7 @@ export function MetricRegistry({ model, onUse }: {
           <div key={m.name} className="mrow">
             <div className="mrow-top">
               <b>{m.label}</b>
-
+              {isUnreviewed(model, m) && <UnreviewedBadge />}
               <button className="use" onClick={() => onUse(m.name)}>Chart it →</button>
             </div>
             {m.description && <p>{m.description}</p>}
@@ -92,11 +93,13 @@ export function DataModel({ model }: { model: Model }) {
         <details key={t.name} className="tbl-card">
           <summary>
             <b className="mono">{t.name}</b>
+            {isUnreviewedTable(t) && <UnreviewedBadge />}
             <span className="grain">{t.grain}</span>
             <span className="cnt mono">{t.columns.length} cols · {(byTable[t.name] ?? []).length} metrics</span>
           </summary>
           <div className="tbl-body">
             {t.description && <p>{t.description}</p>}
+            {t.connected && <Provenance connected={t.connected} />}
             {t.synonyms.length > 0 && (
               <div className="syns">{t.synonyms.map((s) => <i key={s}>{s}</i>)}</div>
             )}

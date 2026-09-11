@@ -1,12 +1,17 @@
 import { useSession } from "./Session.tsx";
 import { WorkspaceSetup } from "./WorkspaceSetup.tsx";
 import { useEffect, useState, type FormEvent } from "react";
+import { readResponse } from "./http.ts";
+import type { ConnectedProvenance } from "../semantic/model.ts";
+import { UnreviewedBadge, dataAsOf } from "./connected.tsx";
 
 export interface SourceInfo {
   id: string; label: string; adapter: string;
   status: "ready" | "error"; error?: string; connectMs?: number;
   connector: string | null; tables: number; metrics: number;
+  connected?: number; unreviewed?: number;
 }
+interface ConnectedTable { dataset: string; status: "unreviewed" | "published"; importId: string; provenance: ConnectedProvenance; loadedAt: string; registeredBy: string; columns: number; metrics: { name: string; label: string; reviewed: boolean }[] }
 export interface RlsPolicy { id: string; field: string; claim: string }
 export interface Principal { id: string; name: string }
 
@@ -73,11 +78,12 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
             </div>
             {s.status === "ready" ? (
               <p className="mono conn-meta">
-                {s.tables} tables · {s.metrics} metrics · connected in {s.connectMs}ms
+                {s.tables} tables · {s.metrics} metrics{s.connected ? ` · ${s.connected} connected by Ingest${s.unreviewed ? ` (${s.unreviewed} unreviewed)` : ""}` : ""} · connected in {s.connectMs}ms
               </p>
             ) : (
               <p className="conn-err">{s.error}</p>
             )}
+            {s.status === "ready" && s.connected ? <ConnectedTables sourceId={s.id} onChange={onRefresh} /> : null}
             {confirmRemove === s.id && (
               <div className="conn-confirm">
                 <span>Remove "{s.label}"? This edits <code className="mono">sources.yaml</code>
@@ -152,6 +158,39 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
 }
 
 interface AiStatus { configured: boolean; provider: string; model: string }
+
+/**
+ * Tables Ingest registered on this source (docs/connected-canvas.md): each is a
+ * snapshot, so provenance and "data as of" sit right on the source. Viewers
+ * only receive published entries; the server decides who may disconnect.
+ */
+function ConnectedTables({ sourceId, onChange }: { sourceId: string; onChange: () => void }) {
+  const { canEdit, user } = useSession();
+  const [tables, setTables] = useState<ConnectedTable[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const load = () => fetch(`/api/sources/${encodeURIComponent(sourceId)}/connected`).then(readResponse).then((d) => setTables(d.tables)).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, [sourceId]);
+  const disconnect = async (dataset: string) => {
+    setBusy(dataset); setError(null);
+    try { await fetch(`/api/sources/${encodeURIComponent(sourceId)}/connected/${encodeURIComponent(dataset)}`, { method: "DELETE" }).then(readResponse); onChange(); load(); }
+    catch (e: any) { setError(e.message); } finally { setBusy(null); }
+  };
+  if (!tables?.length) return error ? <div className="cform-err">{error}</div> : null;
+  return <div className="connected-tables">
+    {tables.map((t) => <div key={t.dataset} className="connected-table">
+      <div className="mrow-top">
+        <b className="mono">{t.dataset}</b>
+        {t.status === "unreviewed" ? <UnreviewedBadge /> : <span className="active-badge">Published</span>}
+        <span className="conn-meta">{t.columns} cols · {t.metrics.length} metrics{t.status === "published" ? ` (${t.metrics.filter((m) => m.reviewed).length} reviewed)` : ""}</span>
+        {canEdit && (user == null || user.id === t.registeredBy || user.role === "admin") &&
+          <button className="link conn-action" disabled={busy === t.dataset} onClick={() => disconnect(t.dataset)}>{busy === t.dataset ? "Disconnecting…" : "Disconnect"}</button>}
+      </div>
+      <p className="mono conn-meta">{t.provenance.source} · {t.provenance.rows.toLocaleString()} rows · loaded by {t.provenance.loadedBy} · {dataAsOf(t)}</p>
+    </div>)}
+    {error && <div className="cform-err">{error}</div>}
+  </div>;
+}
 
 /**
  * Same shape as adding a source: nothing is saved until the server has

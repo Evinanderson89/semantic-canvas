@@ -79,6 +79,8 @@ Connectors: local Parquet through DuckDB, and Snowflake. The sample is tested ag
 
 For Snowflake, copy `.env.example` to `.env`, fill in the required settings, then configure a source. Use a read-only warehouse role. Connection credentials stay on the local server and are referenced by environment variables in `sources.yaml`.
 
+Tables registered by Ingest ("Connected to Semantic Canvas", see `docs/connected-canvas.md`) appear as ingested and unreviewed, visible to editors and administrators only, until an administrator publishes them; they are kept in a per-source overlay under `SC_DATA_DIR/models/connected/`, never in your model file.
+
 ## AI and MCP
 
 AI is optional. The embedded agent currently supports **Anthropic only**. Set `ANTHROPIC_API_KEY` in `.env` and configure an available model in the `ai` block of `sources.yaml`. The canvas and rule-based suggestions work without a key.

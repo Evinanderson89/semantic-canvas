@@ -1,13 +1,15 @@
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
-import { timeColumnOf, metricsByTable, prettifyModelName, type Model, type Metric, type Table } from "../semantic/model.ts";
+import { timeColumnOf, metricsByTable, prettifyModelName, reviewedModel, isLineage, type Model, type Metric, type Table } from "../semantic/model.ts";
 import type { Brief } from "./match.ts";
 
 function categoricalDims(t: Table | undefined): string[] {
-  return (t?.columns ?? []).filter(c => /^(string|varchar|text|bool)/i.test(c.type) && !/(_id$|^id$)/.test(c.name)).map(c => c.name);
+  return (t?.columns ?? []).filter(c => /^(string|varchar|text|bool)/i.test(c.type) && !/(_id$|^id$)/.test(c.name) && !isLineage(c)).map(c => c.name);
 }
 
 /** A useful first draft has a subject, a focal point and supporting sections. */
-export function suggestDashboard(model: Model, opts: { table?: string | null; grain?: string; width?: number } & Brief = {}): DashboardSpec {
+export function suggestDashboard(full: Model, opts: { table?: string | null; grain?: string; width?: number } & Brief = {}): DashboardSpec {
+  // Ingested-but-unreviewed tables never make it into a proposal, whoever asks.
+  const model = reviewedModel(full);
   const width = opts.width ?? 1440, available = width - 48, gap = 16;
   const byTable = metricsByTable(model);
   const subject = opts.table && byTable[opts.table] ? opts.table : Object.entries(byTable).sort((a,b) => b[1].length - a[1].length)[0]?.[0];

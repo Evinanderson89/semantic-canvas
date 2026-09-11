@@ -69,6 +69,19 @@ Connections pairs a supported adapter with DuckDB or Snowflake. YAML semantic mo
 
 Adapters still import supported semantics and compile SQL; this is not native execution of every vendor's semantic engine. See `alpha-contract.md` for supported metric types and rejected semantics.
 
+### Connected tables (phase 2)
+
+Tables that Ingest registers through "Connected to Semantic Canvas" (`docs/connected-canvas.md`) are stored in a per-source overlay, `SC_DATA_DIR/models/connected/<sourceId>.yaml`, written atomically with owner-only permissions. The overlay is merged over the base model when the source loads; base model files are never edited, and a base table with the same name wins over an overlay entry. The full installation backup of the `/data` volume includes the overlay; the dashboard library export does not. Disconnecting removes only the overlay entry and is written to the audit log; the data stays in the lake for the operator.
+
+| Action | Viewer | Editor | Administrator |
+| --- | --- | --- | --- |
+| `GET /api/sources/:id/connected` (viewers receive published entries only) | Yes | Yes | Yes |
+| `POST /api/sources/:id/connected` register or replace (replace only by the original registrant or an administrator) | No | Yes | Yes |
+| `DELETE /api/sources/:id/connected/:dataset` disconnect (original registrant or an administrator) | No | Yes | Yes |
+| `POST /api/sources/:id/connected/:dataset/publish` | No | No | Yes |
+
+Until an administrator publishes a connected table it is unreviewed: editors and administrators see it badged "Ingested, unreviewed"; viewers do not see it in the model, catalogue or query results; dashboard suggestions and the assistant's catalogue exclude it. Metrics not listed at publish time stay unreviewed. Every connected table is a snapshot; the source and each tile that uses the table show "Data as of" the load time. Local mode performs these actions as the simulated administrator.
+
 ## Connect logging and monitoring
 
 Every application request produces a structured JSON stdout record with a generated request ID, route template, status, duration and, when authenticated, a pseudonymous actor ID and role. Dashboard/source changes and library exports create audit events. Failure records include an error type, not stack traces or payloads. Bodies, raw query strings, SQL, result rows, uploaded content, credentials and cookies are excluded by an allowlist. Semantic source labels, authored content and warehouse errors may appear in administrator UI responses, so treat admin access as privileged.

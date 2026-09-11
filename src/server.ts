@@ -19,7 +19,8 @@ if (typeof process.loadEnvFile === "function") {
 import { compileTile, splitPartialPeriods, validateTile } from "./compiler/compile.ts";
 import { suggestDashboard } from "./suggest/suggest.ts";
 import type { Connector } from "./connectors/types.ts";
-import type { Model } from "./semantic/model.ts";
+import { reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
+import { metricIssues, publishSchema, readOverlay, registerSchema, summarize, writeOverlay, type ConnectedEntry } from "./sources/connected.ts";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import YAML from "yaml";
@@ -58,7 +59,11 @@ function pick(req: any): Source {
   if (!ready) throw new Error("no data source is available");
   return ready;
 }
-const modelOf = (req: any): Model => pick(req).model!;
+/** Local mode simulates an administrator; in company mode the role comes from the verified session. */
+const roleOf = (req: any): "viewer" | "editor" | "admin" => auth.config.mode === "local" ? "admin" : identityOf(req)?.role ?? "viewer";
+const actorOf = (req: any) => identityOf(req)?.id ?? "local";
+/** Viewers never see ingested-but-unreviewed tables; editors and admins see the full model. */
+const modelOf = (req: any): Model => visibleModel(pick(req).model!, roleOf(req));
 const connOf = (req: any): Connector => pick(req).conn!;
 
 async function boot() {
@@ -136,6 +141,7 @@ const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => 
     try { await fn(req, res); }
     catch (e: any) { telemetry.log("request.failed", { requestId: res.locals.requestId, errorType: e?.name ?? "Error" }, "error"); res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
   };
+  // Covers /api/sources/:id/connected* too: overlay writes share the queue with sources.yaml edits.
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(sources|agent\/key|setup\/model)(\/|$)/.test(req.path.toLowerCase())) {
     const pending = configQueue.then(run); configQueue = pending.catch(() => {}); await pending;
   } else await run();
@@ -483,6 +489,79 @@ app.delete("/api/sources/:id", safe(async (req, res) => {
   res.json(await hotReload());
 }));
 
+/**
+ * Connected tables (docs/connected-canvas.md): Ingest registers a loaded
+ * table and a draft model entry into a per-source overlay. Editors register
+ * and disconnect their own entries; only an admin publishes one into the
+ * governed catalogue. The lake itself is never touched from here.
+ */
+function connectedSource(req: any): Source {
+  const id = String(req.params.sourceId);
+  if (!canUseSource(identityOf(req), id)) throw Object.assign(new Error("This source is not available to your account"), { status: 403 });
+  const source = sources.find((s) => s.id === id);
+  if (!source) throw Object.assign(new Error(`no source named "${id}"`), { status: 404 });
+  return source;
+}
+const ownsEntry = (req: any, entry: ConnectedEntry) => roleOf(req) === "admin" || entry.registeredBy === actorOf(req);
+
+app.get("/api/sources/:sourceId/connected", safe(async (req, res) => {
+  const source = connectedSource(req), overlay = await readOverlay(source.id);
+  const entries = Object.values(overlay.tables).filter((e) => roleOf(req) !== "viewer" || e.status === "published");
+  res.json({ source: source.id, tables: entries.map(summarize) });
+}));
+
+app.post("/api/sources/:sourceId/connected", safe(async (req, res) => {
+  const source = connectedSource(req), body = registerSchema.parse(req.body);
+  const overlay = await readOverlay(source.id), existing = overlay.tables[body.dataset];
+  if (existing && !ownsEntry(req, existing)) return res.status(403).json({ error: `${body.dataset} was connected by someone else; only they or an administrator can replace it` });
+  if (source.model?.tables[body.dataset] && !source.model.tables[body.dataset].connected) return res.status(409).json({ error: `"${body.dataset}" is already a table of the base model` });
+  // Draft metrics are regenerated unreviewed; a published metric of the same name keeps its review as long as it still validates.
+  const metrics: ConnectedEntry["metrics"] = {};
+  for (const [name, m] of Object.entries(body.metrics)) {
+    const kept = existing?.metrics[name];
+    metrics[name] = kept?.reviewed ? { ...kept, ...m, reviewed: true } : { ...m, reviewed: false };
+  }
+  const entry: ConnectedEntry = { status: existing?.status ?? "unreviewed", dataset: body.dataset, importId: body.importId, provenance: body.provenance,
+    registeredBy: existing?.registeredBy ?? actorOf(req), table: body.table, metrics };
+  const issue = metricIssues(entry);
+  if (issue) return res.status(400).json({ error: issue });
+  overlay.tables[body.dataset] = entry;
+  await writeOverlay(source.id, overlay);
+  telemetry.log("audit.connected_registered", { actor: actorOf(req), source: source.id, dataset: body.dataset, importId: body.importId, replaced: Boolean(existing) });
+  await hotReload();
+  const merged = sources.find((s) => s.id === source.id)?.model?.tables[body.dataset];
+  res.json({ ...summarize(entry), table: merged ?? null });
+}));
+
+app.post("/api/sources/:sourceId/connected/:dataset/publish", safe(async (req, res) => {
+  const source = connectedSource(req), body = publishSchema.parse(req.body);
+  const overlay = await readOverlay(source.id), existing = overlay.tables[String(req.params.dataset)];
+  if (!existing) return res.status(404).json({ error: `no connected table "${req.params.dataset}" on ${source.id}` });
+  const unknown = Object.keys(body.metrics).find((name) => !existing.metrics[name]);
+  if (unknown) return res.status(400).json({ error: `"${unknown}" is not a metric of ${existing.dataset}` });
+  const entry: ConnectedEntry = { ...existing, status: "published", table: { ...existing.table, ...body.table },
+    metrics: Object.fromEntries(Object.entries(existing.metrics).map(([name, m]) => [name, body.metrics[name] ? { ...m, ...body.metrics[name] } : m])) };
+  const issue = metricIssues(entry);
+  if (issue) return res.status(400).json({ error: issue });
+  overlay.tables[existing.dataset] = entry;
+  await writeOverlay(source.id, overlay);
+  telemetry.log("audit.connected_published", { actor: actorOf(req), source: source.id, dataset: existing.dataset, metrics: Object.keys(body.metrics).length });
+  await hotReload();
+  res.json(summarize(entry));
+}));
+
+app.delete("/api/sources/:sourceId/connected/:dataset", safe(async (req, res) => {
+  const source = connectedSource(req), overlay = await readOverlay(source.id), existing = overlay.tables[String(req.params.dataset)];
+  if (!existing) return res.status(404).json({ error: `no connected table "${req.params.dataset}" on ${source.id}` });
+  if (!ownsEntry(req, existing)) return res.status(403).json({ error: `${existing.dataset} was connected by someone else; only they or an administrator can disconnect it` });
+  delete overlay.tables[existing.dataset];
+  await writeOverlay(source.id, overlay);
+  // Disconnect archives; the data stays in the lake for the operator.
+  telemetry.log("audit.connected_disconnected", { actor: actorOf(req), source: source.id, dataset: existing.dataset, importId: existing.importId });
+  await hotReload();
+  res.json({ ok: true, dataset: existing.dataset });
+}));
+
 app.get("/api/model", safe((req, res) => res.json(modelOf(req))));
 /** Schema introspection, for "the warehouse schema is fully readable". */
 app.get("/api/schema", safe(async (req, res) => {
@@ -490,7 +569,7 @@ app.get("/api/schema", safe(async (req, res) => {
   const c: any = src.conn;
   if (typeof c.schema !== "function")
     return res.json({
-      tables: Object.values(src.model!.tables).map((t) => ({
+      tables: Object.values(modelOf(req).tables).map((t) => ({
         name: t.name, columns: t.columns.map((x) => ({ name: x.name, type: x.type })) })),
       source: `${src.label} (from the semantic model)`,
     });
@@ -767,7 +846,7 @@ app.post("/api/agent/dashboard-story", safe(async (req, res) => {
   // rather than trusted from the client -- what "additions" is allowed to
   // propose is exactly what this model actually has, the same governance
   // every other agent-facing surface in this app already enforces.
-  const catalog = Object.values(modelOf(req).metrics).map((m) => ({
+  const catalog = Object.values(reviewedModel(modelOf(req)).metrics).map((m) => ({
     name: m.name, label: m.label, description: m.description, baseTable: m.baseTable,
   }));
   const result = await suggestDashboardStory(ai, { source, principal, auth: auth.forwarded(req) }, tiles, catalog);
@@ -869,16 +948,18 @@ app.get("/api/principals", safe((req, res) =>
 app.post("/api/query", safe(async (req, res) => {
   const query = querySchema.parse(req.body);
   const tile = { ...query, id: query.id ?? "query", layout: { x: 0, y: 0, w: 1, h: 1 } };
-  const issues = validateTile(modelOf(req), tile);
+  // The full model with the caller's role: a viewer asking for an unreviewed table gets told why, not "unknown metric".
+  const model = pick(req).model!, role = roleOf(req);
+  const issues = validateTile(model, tile, { role });
   if (issues.length) return res.status(400).json({ issues });
   try {
-    const base = modelOf(req).metrics[tile.metrics[0]].baseTable;
+    const base = model.metrics[tile.metrics[0]].baseTable;
     const who = principalOf(req);
     // RLS is applied here, server-side, on top of whatever the client sent. A
     // client that strips its filters still gets a scoped query.
-    const scope = requireScope(modelOf(req), base, rls, who);
+    const scope = requireScope(model, base, rls, who);
     const scoped = { ...tile, where: [...(tile.where ?? []), ...scope.filters] };
-    const sql = compileTile(modelOf(req), connOf(req), scoped, { probe: true });
+    const sql = compileTile(model, connOf(req), scoped, { probe: true, role });
     const out = await connOf(req).execute(sql, resultLimit(tile) + 1, `${who?.id ?? "anon"}:${req.header("x-sc-refresh") ?? ""}`);
     // A coarsened time dimension's first/last bucket, if it doesn't span a
     // full period, comes back flagged rather than silently dropped -- split

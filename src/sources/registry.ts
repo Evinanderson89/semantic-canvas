@@ -8,6 +8,7 @@ import { dbtAdapter } from "../semantic/dbt.ts";
 import { snowflakeSemanticAdapter } from "../semantic/snowflakeSemantic.ts";
 import { pooledDuckdb } from "../connectors/pool.ts";
 import { snowflakeConnector } from "../connectors/snowflake.ts";
+import { mergeOverlay, readOverlay } from "./connected.ts";
 
 /**
  * The source registry.
@@ -70,8 +71,10 @@ export async function connectOne(s: SourceConfig): Promise<Source> {
   try {
     const adapter = ADAPTERS[s.adapter];
     if (!adapter) throw new Error(`unknown adapter "${s.adapter}"`);
-    const model = await adapter.load(expand(s.model));
-    if (!model) throw new Error(`adapter "${s.adapter}" did not recognise ${s.model}`);
+    const loaded = await adapter.load(expand(s.model));
+    if (!loaded) throw new Error(`adapter "${s.adapter}" did not recognise ${s.model}`);
+    // Tables Ingest registered sit in a per-source overlay, never in the base model file.
+    const model = mergeOverlay(loaded, await readOverlay(s.id), s.id);
     const conn = await connect(s.connector);
     return { ...base, status: "ready", model, conn,
              connectMs: Math.round(performance.now() - t0) };
@@ -117,4 +120,6 @@ export const describe = (s: Source) => ({
   connector: s.conn?.id ?? null,
   tables: s.model ? Object.keys(s.model.tables).length : 0,
   metrics: s.model ? Object.keys(s.model.metrics).length : 0,
+  connected: s.model ? Object.values(s.model.tables).reduce((n, t) => n + (t.connected ? 1 : 0), 0) : 0,
+  unreviewed: s.model ? Object.values(s.model.tables).reduce((n, t) => n + (t.connected?.status === "unreviewed" ? 1 : 0), 0) : 0,
 });

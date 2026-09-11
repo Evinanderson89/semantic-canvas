@@ -10,7 +10,7 @@ const GRAINS = new Set(["day", "week", "month", "quarter", "year"]);
  * an agent-authored dashboard safe: a hallucinated metric is a rejected tile,
  * not a plausible-looking wrong number.
  */
-export function validateTile(model: Model, tile: TileSpec): ValidationIssue[] {
+export function validateTile(model: Model, tile: TileSpec, options: { role?: string } = {}): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const id = tile.id;
   // Non-data tiles carry no metrics and nothing to validate.
@@ -21,6 +21,9 @@ export function validateTile(model: Model, tile: TileSpec): ValidationIssue[] {
   for (const name of tile.metrics ?? []) {
     const m = model.metrics[name];
     if (!m) { issues.push({ tile: id, problem: `unknown metric "${name}"` }); continue; }
+    // Ingested tables stay out of viewers' reach until an admin publishes them (docs/connected-canvas.md).
+    if (options.role === "viewer" && (m.reviewed === false || model.tables[m.baseTable]?.connected?.status === "unreviewed"))
+      issues.push({ tile: id, problem: `"${name}" is ingested but not yet published; an administrator must review ${m.baseTable} before viewers can query it` });
     bases.add(m.baseTable);
     const grainIssue = metricGrainIssue(m, tile.dimensions ?? []);
     if (grainIssue) issues.push({ tile: id, problem: grainIssue });
@@ -72,8 +75,8 @@ export function parseDimension(dim: string) {
   return { grain, table: null as string | null, column: rest };
 }
 
-export function compileTile(model: Model, conn: Connector, tile: TileSpec, options: { probe?: boolean } = {}): string {
-  const issues = validateTile(model, tile);
+export function compileTile(model: Model, conn: Connector, tile: TileSpec, options: { probe?: boolean; role?: string } = {}): string {
+  const issues = validateTile(model, tile, options);
   if (issues.length) throw new Error(issues.map((i) => i.problem).join("; "));
   const metrics = tile.metrics.map((n) => model.metrics[n]);
   if (metrics.some((m) => !m)) throw new Error("compileTile called with an unvalidated tile");

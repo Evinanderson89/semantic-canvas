@@ -617,6 +617,13 @@ button.img-empty:hover{border-color:var(--accent);color:var(--accent)}
 .active-badge{margin-left:auto;font-size:11px;color:var(--pos);background:color-mix(in srgb,var(--pos) 16%,transparent);
   border-radius:4px;padding:2px 8px}
 .active-badge.err{color:var(--neg);background:color-mix(in srgb,var(--neg) 16%,transparent)}
+.active-badge.warn{margin-left:0;color:#9a6b00;background:color-mix(in srgb,#e0a800 18%,transparent)}
+.connected-tables{margin-top:10px;display:grid;gap:6px}
+.connected-table{padding:8px 10px;border:1px dashed var(--line);border-radius:7px}
+.connected-table .mrow-top{align-items:baseline}
+.connected-table .conn-meta{margin:0}
+.tile .data-as-of{color:var(--ink-3)}
+.tile .kpi-as-of{position:absolute;left:12px;bottom:8px;font-size:10px}
 .conn-meta{margin:7px 0 0;color:var(--ink-3);font-size:11.5px}
 .conn-err{margin:7px 0 0;color:var(--neg);font-size:12px;line-height:1.5}
 .tbl-body-p{margin:0 0 4px;color:var(--ink-2);font-size:12.5px;max-width:76ch;line-height:1.6}

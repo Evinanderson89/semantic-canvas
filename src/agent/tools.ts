@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { dashboardSchema, canvasSchema, filterSchema } from "../compiler/schema.ts";
 import { z } from "zod";
 import { LAYOUTS } from "../canvas/layouts.ts";
+import { reviewedModel } from "../semantic/model.ts";
 
 /**
  * The tool surface any agent gets -- an MCP client attached over stdio
@@ -69,7 +70,8 @@ export const TOOLS: ToolSpec[] = [
     name: "describe_model",
     description: "The full semantic model for a source: every table (columns, grain, joins) and every governed metric (name, expression, description, synonyms). Read this before proposing anything -- only what's in here can be charted, nothing outside it exists as far as query_metric is concerned.",
     inputSchema: { source: z.string().optional().describe("Source id from list_sources; omit for the active one") },
-    handler: async ({ source }) => api("/api/model", { source }),
+    // Ingested-but-unreviewed tables are not part of the governed catalogue an agent may draw on, whoever the caller is.
+    handler: async ({ source }) => reviewedModel(await api("/api/model", { source })),
   },
   {
     name: "profile_field",

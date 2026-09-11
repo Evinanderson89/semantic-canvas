@@ -152,8 +152,10 @@ export class CompanyAuth {
     res.setHeader("x-sc-user-id", session.identity.id);
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !this.validCsrf(req, session)) return res.status(403).json({ error: "Your session needs a fresh page. Reload and try again." });
     const route = req.path.toLowerCase().replace(/^\/api(?=\/)/, "");
-    const admin = /^\/(sources\/|operations|setup)/.test(route) || route === "/sources" && req.method !== "GET" || route === "/agent/key";
-    const write = (route.startsWith("/dashboards") || /^\/library(\/|$)/.test(route)) && !["GET", "HEAD", "OPTIONS"].includes(req.method);
+    // Tables Ingest registers (/sources/:id/connected) are an editor surface; publishing them into the governed catalogue stays admin-only, as does everything else under /sources/.
+    const connected = /^\/sources\/[^/]+\/connected(\/|$)/.test(route), publish = /^\/sources\/[^/]+\/connected\/[^/]+\/publish$/.test(route);
+    const admin = /^\/(sources\/|operations|setup)/.test(route) && (!connected || publish) || route === "/sources" && req.method !== "GET" || route === "/agent/key";
+    const write = (route.startsWith("/dashboards") || /^\/library(\/|$)/.test(route) || connected) && !["GET", "HEAD", "OPTIONS"].includes(req.method);
     if (admin && session.identity.role !== "admin" || write && session.identity.role === "viewer") return res.status(403).json({ error: "Your workspace role does not allow this action" });
     // Headers never select a different principal in team mode.
     next();
