@@ -90,7 +90,11 @@ export class CompanyAuth {
   }
   mount(app: Express) {
     if (this.config.mode === "gateway") app.use("/api", (req, _res, next) => {
-      const raw = cookie(req, "gw_session");
+      // The portal sends the Gateway token as a cookie; the gateway CLI and other
+      // non-browser clients send the same token as a bearer. Envoy has already
+      // verified either form; we verify again here and never trust proxy headers.
+      const bearer = /^Bearer\s+(\S+)$/i.exec(req.header("authorization") ?? "")?.[1];
+      const raw = cookie(req, "gw_session") ?? bearer;
       if (!raw || !this.gatewayKeys) return next();
       void (async () => {
         try {
