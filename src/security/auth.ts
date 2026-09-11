@@ -113,10 +113,12 @@ export class CompanyAuth {
       res.setHeader("Cache-Control", "no-store");
       if (this.config.mode === "local") return res.json({ mode: "local", authenticated: true, canEdit: true, canAdmin: true });
       const session = this.session(req);
-      return res.json(session ? { mode: "team", authenticated: true, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined, user: { id: session.identity.id, name: session.identity.name, role: session.identity.role }, csrf: session.csrf, canEdit: session.identity.role !== "viewer", canAdmin: session.identity.role === "admin", expiresAt: session.expires } : { mode: "team", authenticated: false });
+      return res.json(session ? { mode: "team", authenticated: true, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined, user: { id: session.identity.id, name: session.identity.name, role: session.identity.role }, csrf: session.csrf, canEdit: session.identity.role !== "viewer", canAdmin: session.identity.role === "admin", expiresAt: session.expires } : { mode: "team", authenticated: false, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined });
     });
     app.get("/api/auth/login", async (_req, res) => {
-      if (this.config.mode === "gateway") return res.redirect(`${this.config.portalUrl}/auth/login`);
+      // The portal owns the session: its refresh route renews an expired token
+      // when it can, otherwise starts sign-in, and either way returns here.
+      if (this.config.mode === "gateway") return res.redirect(`${this.config.portalUrl}/auth/refresh?next=${encodeURIComponent(this.config.publicUrl ?? "/")}`);
       if (!this.provider) return res.status(404).end();
       // Unauthenticated callers must not be able to exhaust sign-in: at capacity the oldest pending attempt is evicted.
       this.prune(); while (this.attempts.size >= 1000) this.attempts.delete(this.attempts.keys().next().value!);
