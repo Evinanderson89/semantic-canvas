@@ -665,7 +665,23 @@ export function App() {
           <>
             <div className="topbar">
               <button className="link back-link" onClick={() => beginDocument(null)}>← <span>Workspace</span></button>
+              <div className="dashboard-identity">
+                <h1 className="dash-title">{dash.title}</h1>
+                <div className="dashboard-meta">
+                  <span>{dash.tiles.length} tiles</span><span aria-hidden="true">·</span>
+                  <span>{prettifyModelName(model.name)}</span>
+                  {templateId && <span title="This starter opens as a new dashboard. Save to keep your version.">· Starter copy</span>}
+                  {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
+                </div>
+              </div>
               <span className="spacer" />
+              <label className="period-control">
+                <span>Period</span>
+                <select aria-label="Period" value={documentGrain(dash)} onChange={(e) => { const next = withGrain(dash, e.target.value); const issues = next.tiles.flatMap(t => validateTile(model, t)); if (issues.length) { setNotice(issues[0].problem); return; } setNotice(""); setGrain(e.target.value); setDrills({}); commit(next); }}>
+                  {documentGrain(dash) === "mixed" && <option value="mixed" disabled>Mixed periods</option>}
+                  {GRAINS.map((g) => <option key={g} value={g}>{g === "day" ? "Daily" : g[0].toUpperCase() + g.slice(1) + "ly"}</option>)}
+                </select>
+              </label>
               <span className={"save-status" + (dirty ? " dirty" : "")} role="status">{!session.canEdit ? "Viewer access" : saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
               <button className="icon quiet" title="Refresh" aria-label="Refresh" onClick={refreshData}>
                 <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6">
@@ -687,26 +703,6 @@ export function App() {
                   <button onClick={() => { close(); navigator.clipboard?.writeText(JSON.stringify(book, null, 2)); }}>Copy dashboard spec</button>
                 </>}
               </Popover>
-            </div>
-
-            <div className="dashboard-heading">
-              <div className="dashboard-identity">
-                <span className="eyebrow">Dashboard</span>
-                <h1 className="dash-title">{dash.title}</h1>
-                <div className="dashboard-meta">
-                  <span>{dash.tiles.length} tiles</span><span aria-hidden="true">·</span>
-                  <span>{prettifyModelName(model.name)}</span>
-                  {templateId && <span title="This starter opens as a new dashboard. Save to keep your version.">· Starter copy</span>}
-                  {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
-                </div>
-              </div>
-              <label className="period-control">
-                <span>Period</span>
-                <select aria-label="Period" value={documentGrain(dash)} onChange={(e) => { const next = withGrain(dash, e.target.value); const issues = next.tiles.flatMap(t => validateTile(model, t)); if (issues.length) { setNotice(issues[0].problem); return; } setNotice(""); setGrain(e.target.value); setDrills({}); commit(next); }}>
-                  {documentGrain(dash) === "mixed" && <option value="mixed" disabled>Mixed periods</option>}
-                  {GRAINS.map((g) => <option key={g} value={g}>{g === "day" ? "Daily" : g[0].toUpperCase() + g.slice(1) + "ly"}</option>)}
-                </select>
-              </label>
             </div>
 
             <TabStrip spec={book!} active={activeTabId} locked={canvas.locked} onChange={commitBook} onSelect={id => {
