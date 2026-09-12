@@ -320,9 +320,9 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
           {state.status === "ok" && state.coverage === "unknown" && <span className="ms mono" title="The source has not declared period completeness. These dates describe returned rows, not a verified complete reporting period.">Coverage unverified</span>}
           {state.status === "ok" && (state.partial?.start || state.partial?.end) && (
             <span className="ms mono partial-note"
-                  title={`This ${grain ?? "period"}'s data doesn't cover the whole ${grain ?? "period"} yet, ` +
-                         `so it's left out rather than shown as a misleading low point.`}>
-              partial {state.partial.start && state.partial.end ? "start & end" : state.partial.start ? "start" : "end"} excluded
+                  title={`The data does not cover the whole first or last ${grain ?? "period"}, so that ${grain ?? "period"} is left out ` +
+                         `rather than drawn as a full one, which would read as a collapse. Add a date filter to choose the exact window instead.`}>
+              partial {state.partial.start && state.partial.end ? "first & last" : state.partial.start ? "first" : "last"} {grain ?? "period"} left out
             </span>
           )}
           <span className="spacer" />

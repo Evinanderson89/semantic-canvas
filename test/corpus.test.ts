@@ -147,14 +147,18 @@ describe.skipIf(!available)("demoDashboard (the checked-in Beautify/Smart-Arrang
   });
 });
 
-describe.skipIf(!available)("observed periods remain visible without completeness metadata", () => {
-  it("keeps both edge weeks and preserves their actual counts", async () => {
+describe.skipIf(!available)("edge periods the data does not cover are reported and left out", () => {
+  // The sample's sessions run Sunday 2024-09-01 to Monday 2026-08-31, so the
+  // first and last Monday-based weeks each hold one day. Drawn as full weeks
+  // they read as a collapse at both ends. They are flagged and left out; the
+  // 104 complete weeks keep their exact counts.
+  it("flags and excludes the one-day edge weeks and keeps every complete week intact", async () => {
     const t = tile({ metrics: ["web_sessions"], dimensions: ["week:fct_web_sessions.session_date"] });
     const result = splitPartialPeriods(await conn.execute(compileTile(model, conn, t), 2000));
-    expect(result.rows).toHaveLength(106);
-    expect(result.rows[0]).toEqual(["2024-08-26", 365]);
-    expect(result.rows.at(-1)).toEqual(["2026-08-31", 602]);
-    expect(result.rows.find((r) => r[0] === "2024-09-02")).toEqual(["2024-09-02", 2399]);
+    expect(result.partial).toEqual({ start: true, end: true });
+    expect(result.rows).toHaveLength(104);
+    expect(result.rows[0]).toEqual(["2024-09-02", 2399]);
+    expect(result.rows.at(-1)?.[0]).toBe("2026-08-24");
   });
   it("keeps a filtered window within one month instead of discarding all its rows", async () => {
     const t = tile({ metrics: ["web_sessions"], dimensions: ["month:fct_web_sessions.session_date"],

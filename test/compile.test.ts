@@ -86,10 +86,14 @@ describe("compileTile", () => {
     expect(() => compileTile(model, conn, tile({ metrics: ["nope"] }) as TileSpec)).toThrow();
   });
 
-  it("does not infer completeness from the first and last observed events", () => {
+  it("checks edge buckets against the dates observed inside them, and skips a side bounded by a range filter", () => {
     const sql = compileTile(model, conn, tile({ dimensions: ["month:sold_on"] }));
-    expect(sql).not.toContain("__bounds");
-    expect(sql).not.toContain("MIN(fct_sales");
+    expect(sql).toContain('"__partial_start"');
+    expect(sql).toContain('"__partial_end"');
+    const bounded = compileTile(model, conn, tile({ dimensions: ["month:sold_on"],
+      where: [{ id: "w", field: "sold_on", source: "dimension", mode: "range", min: "2024-01-05", max: "2024-01-20" }] }));
+    expect(bounded).toContain('FALSE AS "__partial_start"');
+    expect(bounded).toContain('FALSE AS "__partial_end"');
   });
 
 });
@@ -100,18 +104,19 @@ describe("splitPartialPeriods", () => {
     expect(splitPartialPeriods(result)).toEqual({ ...result, partial: { start: false, end: false } });
   });
 
-  it("strips the flag columns and reports which edges were seen", () => {
+  it("strips the flag columns, reports the flagged edges, and leaves flagged rows out", () => {
     const result = {
       columns: ["week", "web_sessions", "__partial_start", "__partial_end"],
       rows: [
+        ["2024-08-26", 365, true, false],
         ["2024-09-02", 2399, false, false],
-        ["2024-09-09", 2227, false, false],
+        ["2024-09-09", 2227, false, true],
       ],
     };
     const out = splitPartialPeriods(result);
     expect(out.columns).toEqual(["week", "web_sessions"]);
-    expect(out.rows).toEqual([["2024-09-02", 2399], ["2024-09-09", 2227]]);
-    expect(out.partial).toEqual({ start: false, end: false });
+    expect(out.rows).toEqual([["2024-09-02", 2399]]);
+    expect(out.partial).toEqual({ start: true, end: true });
   });
 
   it("drops the LEFT-JOIN sentinel row (every real column null) but keeps its flags", () => {
@@ -124,24 +129,21 @@ describe("splitPartialPeriods", () => {
     expect(out.partial).toEqual({ start: true, end: true });
   });
 
-  it("keeps every real row regardless of the flag -- the flag describes the WHOLE result, not one row each", () => {
-    // compileTile()'s flags are constant across every row in a real
-    // response (computed once from bounds, not per-row) -- the partial
-    // rows they describe were ALREADY excluded upstream, in compileTile()'s
-    // own WHERE clause, before these columns are even attached. This never
-    // re-filters a row based on its own flag value; OR-accumulating across
-    // rows is defensive robustness (still correct if every row agrees, as
-    // they always do in practice), not a per-row inclusion test.
+  it("treats the flags per row: only the flagged edge buckets are left out", () => {
+    // compileTile() marks each row with whether IT is a partial edge bucket.
+    // Interior rows are never flagged, so a series keeps every complete
+    // period and loses only the incomplete ends the tile's note reports.
     const result = {
       columns: ["week", "n", "__partial_start", "__partial_end"],
       rows: [
-        ["2024-09-02", 2399, true, true],
-        ["2024-09-09", 2227, true, true],
+        ["2024-09-02", 2399, true, false],
+        ["2024-09-09", 2227, false, false],
+        ["2024-09-16", 2300, false, false],
       ],
     };
     const out = splitPartialPeriods(result);
-    expect(out.rows).toEqual([["2024-09-02", 2399], ["2024-09-09", 2227]]);
-    expect(out.partial).toEqual({ start: true, end: true });
+    expect(out.rows).toEqual([["2024-09-09", 2227], ["2024-09-16", 2300]]);
+    expect(out.partial).toEqual({ start: true, end: false });
   });
 });
 
