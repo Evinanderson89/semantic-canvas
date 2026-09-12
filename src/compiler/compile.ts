@@ -89,6 +89,10 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
   const groupCols: string[] = [];
   const needed = new Set<string>();
 
+  // The coarsened time dimension, if any: its edge buckets are checked for
+  // completeness below, so the raw min and max date inside each bucket ride
+  // along as hidden aggregates.
+  let edge: { alias: string; ref: string; grain: string } | null = null;
   for (const dim of tile.dimensions ?? []) {
     const { grain, table, column } = parseDimension(dim);
     const owner = table ?? base;
@@ -98,7 +102,22 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
     const alias = grain ? `${column}_${grain}` : column;
     dimSelect.push(`${grain ? conn.dateTrunc(grain, ref) : ref} AS ${q(alias)}`);
     groupCols.push(q(alias));
+    if (grain && grain !== "day" && !edge) edge = { alias: q(alias), ref, grain };
   }
+  // A snapshot table has nothing to be partial about at its own grain: one
+  // row per month dated the first IS the whole month. Two declarations say
+  // so, either is enough: a metric's time_grains naming this grain as its
+  // native reporting grain, or the table's date-typed primary key (one row
+  // per period). Only finer-grained data, events inside the bucket, can
+  // reveal an incomplete edge.
+  if (edge) {
+    const native = metrics.some((m) => m.timeGrains?.includes(edge!.grain as any));
+    const table = model.tables[base];
+    const pk = table?.primaryKey ? table.columns.find((c) => c.name === table.primaryKey) : undefined;
+    const periodKeyed = !!pk && isTemporal(pk) && edge.ref.endsWith(q(pk.name));
+    if (native || periodKeyed) edge = null;
+  }
+  const edgeSelect = edge ? [`MIN(${edge.ref}) AS "__edge_min"`, `MAX(${edge.ref}) AS "__edge_max"`] : [];
 
   // ---- filters --------------------------------------------------------------
   const where: string[] = [];
@@ -139,7 +158,7 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
   let sql: string;
   if (groups.size <= 1) {
     const only = [...groups.keys()][0] ?? null;
-    sql = `SELECT ${[...dimSelect, ...sel(metrics)].join(",\n       ")}\nFROM ${from}` +
+    sql = `SELECT ${[...dimSelect, ...sel(metrics), ...edgeSelect].join(",\n       ")}\nFROM ${from}` +
           clause("WHERE", only ? [...where, `(${only})`] : where) +
           (groupCols.length ? `\nGROUP BY ${groupCols.join(", ")}` : "") +
           clause("HAVING", having.map((h) => `(${h.sql})`));
@@ -151,7 +170,7 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
       // A HAVING belongs only in the CTE that actually computes its metric.
       const h = having.filter((x) => ms.some((m) => m.name === x.metric)).map((x) => `(${x.sql})`);
       const body =
-        `SELECT ${[...dimSelect, ...sel(ms)].join(",\n         ")}\n  FROM ${from}` +
+        `SELECT ${[...dimSelect, ...sel(ms), ...(i === 0 ? edgeSelect : [])].join(",\n         ")}\n  FROM ${from}` +
         clause("  WHERE", filter ? [...where, `(${filter})`] : where) +
         (groupCols.length ? `\n  GROUP BY ${groupCols.join(", ")}` : "") +
         clause("  HAVING", h);
@@ -166,13 +185,39 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
       const owner = [...groups.values()].findIndex((ms) => ms.includes(m));
       return `${names[owner]}.${q(m.name)} AS ${q(m.name)}`;
     });
+    const edgeCols = edge ? [`${names[0]}."__edge_min" AS "__edge_min"`, `${names[0]}."__edge_max" AS "__edge_max"`] : [];
     sql = `WITH ${ctes.join(",\n")}\n` +
-      `SELECT ${[...groupCols.map((c) => `${key(c, names)} AS ${c}`), ...metricCols].join(", ")}\nFROM ${names[0]}${join}`;
+      `SELECT ${[...groupCols.map((c) => `${key(c, names)} AS ${c}`), ...metricCols, ...edgeCols].join(", ")}\nFROM ${names[0]}${join}`;
   }
 
-  // Observed MIN/MAX dates do not establish data completeness: a monthly
-  // snapshot can have only the first day, and event data can be sparse.
-  // Keep all observed periods. Completeness is unknown until declared upstream.
+  // Edge completeness. Observed dates cannot prove a bucket is complete (a
+  // monthly snapshot legitimately has one row on the first), but they can
+  // prove one is incomplete: if the earliest bucket's first observed date
+  // is after the bucket's start, or the latest bucket's last observed date
+  // is before the bucket's end, that bucket does not cover its whole period
+  // and a chart that draws it as a full one lies at the edge. The flags are
+  // carried as columns and stripped by splitPartialPeriods(); rows are kept.
+  //
+  // A range filter on the same date column is the exception: the person
+  // asked for that window, so a bucket clipped by it is not incomplete, it
+  // is what they asked to see. Where the filter bounds the edge, the check
+  // is skipped on that side.
+  if (edge) {
+    const unit: Record<string, ["day" | "month" | "year", number]> = { week: ["day", 7], month: ["month", 1], quarter: ["month", 3], year: ["year", 1] };
+    const [u, n] = unit[edge.grain] ?? ["day", 1];
+    const bucketEnd = conn.dateAdd("day", conn.dateAdd(u, `__e.${edge.alias}`, n), -1);
+    const timeField = (tile.dimensions ?? []).find((d) => d.includes(":"))!.split(":")[1];
+    const bounded = (tile.where ?? []).some((f) => f.source === "dimension" && f.mode === "range" && (f.field === timeField || f.field === timeField.split(".").pop()));
+    const boundedMin = bounded && (tile.where ?? []).some((f) => f.source === "dimension" && f.mode === "range" && f.min != null && f.min !== "");
+    const boundedMax = bounded && (tile.where ?? []).some((f) => f.source === "dimension" && f.mode === "range" && f.max != null && f.max !== "");
+    const startFlag = boundedMin ? "FALSE" : `(${edge.alias} = (SELECT MIN(${edge.alias}) FROM __e) AND CAST("__edge_min" AS DATE) > ${edge.alias})`;
+    const endFlag = boundedMax ? "FALSE" : `(${edge.alias} = (SELECT MAX(${edge.alias}) FROM __e) AND CAST("__edge_max" AS DATE) < ${bucketEnd})`;
+    sql = `WITH __e AS (\n${sql}\n)\n` +
+      `SELECT * EXCLUDE ("__edge_min", "__edge_max"),\n` +
+      `       ${startFlag} AS "__partial_start",\n` +
+      `       ${endFlag} AS "__partial_end"\n` +
+      `FROM __e`;
+  }
 
   // ---- period-over-period --------------------------------------------------
   const cmp = tile.compare && tile.compare !== "none" ? tile.compare : null;
@@ -198,7 +243,7 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
         `(${cur} - ${prev}) / NULLIF(ABS(${prev}), 0) AS ${q(`${m.name}__pct`)}`];
     });
     sql = `WITH __base AS (\n${sql}\n)\n` +
-      `SELECT ${[...groupCols, ...metrics.map((m) => q(m.name))].map((c) => `cur.${c} AS ${c}`).concat(cols).join(",\n       ")}\n` +
+      `SELECT ${[...groupCols, ...metrics.map((m) => q(m.name)), ...(edge ? ['"__partial_start"', '"__partial_end"'] : [])].map((c) => `cur.${c} AS ${c}`).concat(cols).join(",\n       ")}\n` +
       `FROM __base cur LEFT JOIN __base prev ON ${on.join(" AND ")}`;
   }
 
@@ -246,8 +291,13 @@ export function splitPartialPeriods(
   let partial: PartialEdges = { start: false, end: false };
   const rows: unknown[][] = [];
   for (const row of result.rows) {
-    if (startIdx !== -1 && row[startIdx]) partial = { ...partial, start: true };
-    if (endIdx !== -1 && row[endIdx]) partial = { ...partial, end: true };
+    const flaggedStart = startIdx !== -1 && Boolean(row[startIdx]), flaggedEnd = endIdx !== -1 && Boolean(row[endIdx]);
+    if (flaggedStart) partial = { ...partial, start: true };
+    if (flaggedEnd) partial = { ...partial, end: true };
+    // A flagged edge bucket is left out, as the tile's note says: drawn as a
+    // full period it reads as a collapse, and as the newest period it would
+    // feed a false period-over-period change. The flags report it instead.
+    if (flaggedStart || flaggedEnd) continue;
     const rest = row.filter((_, i) => !flagIdx.has(i));
     if (rest.some((v) => v !== null && v !== undefined)) rows.push(rest);
   }
