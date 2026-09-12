@@ -1285,3 +1285,14 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 
 .sidebar-library{flex:1 1 auto;min-height:0;overflow-y:auto}
 .sidebar .who{flex-shrink:0}
+
+/* Design review: say which layers ran. The button carries a tag when only
+   the rule-based checks are available, so nobody mistakes them for the
+   editorial review that needs an AI provider. */
+.review-scope{margin-left:6px;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:1px 6px}
+.review-scope-list{list-style:none;margin:0 0 12px;padding:0;display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--ink-2)}
+.review-scope-list li{padding-left:16px;position:relative}
+.review-scope-list li::before{content:"";position:absolute;left:2px;top:6px;width:7px;height:7px;border-radius:50%;background:var(--pos)}
+.review-scope-list li.off::before{background:var(--line-2);border:1px solid var(--ink-3)}
+.review-scope-list li.off{color:var(--ink-3)}
+.review-scope-list .link{padding:0;font-size:inherit}

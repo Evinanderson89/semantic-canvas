@@ -717,7 +717,7 @@ export function App() {
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
                        beautify={<DashboardBeautify dash={dash} canvas={canvas} model={model}
-                                                     aiAvailable={aiAvailable} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues)]))} />} />
+                                                     aiAvailable={aiAvailable} canConfigureAi={session.canAdmin} onConnections={() => setView("connections")} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues)]))} />} />
             )}
             {canvas.locked && session.canEdit && (
               <div className="editbar slim">
