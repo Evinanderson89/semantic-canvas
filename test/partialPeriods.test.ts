@@ -45,6 +45,30 @@ describe("partial edge periods", () => {
     expect(partial).toEqual({ start: false, end: false });
     expect(String(rows[rows.length - 1][0])).toBe("2026-08-01");
   });
+  it("judges the bucket, not each segment: a quiet segment does not make a complete month partial", async () => {
+    // Every site has sessions on the first and last day of the data, except
+    // one that is quiet for the first four days and the last three. The
+    // months are still whole months of data; only that site's rows are thin.
+    const t = tile("month:fct_web_sessions.session_date", { dimensions: ["month:fct_web_sessions.session_date", "fct_web_sessions.source_site"] });
+    const sql = compileTile(model, conn, t).replace(/AS fct_web_sessions\n/,
+      "AS fct_web_sessions\nWHERE NOT (source_site = (SELECT MIN(source_site) FROM read_parquet('sample-data/lake/fct_web_sessions/**/*.parquet')) AND (session_date < DATE '2024-09-05' OR session_date > DATE '2026-08-28'))\n");
+    expect(sql).toContain("OVER (PARTITION BY");
+    const { rows, partial } = splitPartialPeriods(await conn.execute(sql, 5000));
+    expect(partial).toEqual({ start: false, end: false });
+    expect(rows.length).toBe(72);
+    // And when the whole bucket is short, every segment's row goes with it.
+    const weekly = await run(tile("week:fct_web_sessions.session_date", { dimensions: ["week:fct_web_sessions.session_date", "fct_web_sessions.source_site"] }));
+    expect(weekly.partial).toEqual({ start: true, end: true });
+    expect(weekly.rows.some((r) => String(r[0]) === "2024-08-26" || String(r[0]) === "2026-08-31")).toBe(false);
+  });
+  it("skips the start check only for a range filter on the time column itself", () => {
+    const time = "month:fct_web_sessions.session_date";
+    const onTime = compileTile(model, conn, tile(time, { where: [{ source: "dimension", field: "fct_web_sessions.session_date", mode: "range", min: "2025-01-01" }] }));
+    expect(onTime).toContain('FALSE AS "__partial_start"');
+    expect(onTime).not.toContain('FALSE AS "__partial_end"');
+    const onOther = compileTile(model, conn, tile(time, { where: [{ source: "dimension", field: "fct_web_sessions.pageviews", mode: "range", min: 2 }] }));
+    expect(onOther).not.toContain('FALSE AS "__partial_start"');
+  });
   it("adds no flags to a daily series or a series without a time grain", async () => {
     expect((await run(tile("day:fct_web_sessions.session_date"))).partial).toEqual({ start: false, end: false });
     expect((await run(tile("dim_users.country"))).partial).toEqual({ start: false, end: false });

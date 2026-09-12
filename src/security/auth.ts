@@ -151,7 +151,8 @@ export class CompanyAuth {
     app.post("/api/auth/logout", (req, res) => {
       const session = this.session(req);
       if (session && !this.validCsrf(req, session)) return res.status(403).json({ error: "Reload the page before signing out" });
-      if (this.config.mode === "gateway") { res.clearCookie("gw_session", { domain: new URL(this.config.portalUrl!).hostname, path: "/", httpOnly: true, secure: this.config.publicUrl!.startsWith("https:"), sameSite: "lax" }); return res.json({ ok: true }); }
+      // Behind Gateway the portal owns the session: clearing the access cookie here would leave the portal's refresh cookie, and the next click on "Continue with company sign-in" would silently issue a new token to whoever is at the keyboard. The browser is sent to the portal's sign-out, which revokes the refresh token at the identity provider and clears both cookies.
+      if (this.config.mode === "gateway") { res.clearCookie("gw_session", { domain: new URL(this.config.portalUrl!).hostname, path: "/", httpOnly: true, secure: this.config.publicUrl!.startsWith("https:"), sameSite: "lax" }); return res.json({ ok: true, redirect: `${this.config.portalUrl}/auth/logout` }); }
       const key = cookie(req, "__Host-sc_session"); if (key) this.sessions.delete(digest(key));
       res.clearCookie("__Host-sc_session", { path: "/", secure: true, httpOnly: true, sameSite: "lax" });
       this.audit("auth.signed_out", session ? { actor: session.identity.id } : {}); res.json({ ok: true });

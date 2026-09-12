@@ -198,6 +198,14 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
   // and a chart that draws it as a full one lies at the edge. The flags are
   // carried as columns and stripped by splitPartialPeriods(); rows are kept.
   //
+  // The judgement is about the bucket, not the row. With a second dimension
+  // the grouped query holds one row per (bucket, segment), each with its own
+  // first and last observed date; a segment that happened to be quiet for
+  // the first few days of the first month is not evidence that the month is
+  // incomplete when every other segment reaches its start. So the earliest
+  // and latest dates are taken across the whole bucket (a window over the
+  // bucket column), and every row of a partial bucket is flagged together.
+  //
   // A range filter on the same date column is the exception: the person
   // asked for that window, so a bucket clipped by it is not incomplete, it
   // is what they asked to see. Where the filter bounds the edge, the check
@@ -207,11 +215,13 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
     const [u, n] = unit[edge.grain] ?? ["day", 1];
     const bucketEnd = conn.dateAdd("day", conn.dateAdd(u, `__e.${edge.alias}`, n), -1);
     const timeField = (tile.dimensions ?? []).find((d) => d.includes(":"))!.split(":")[1];
-    const bounded = (tile.where ?? []).some((f) => f.source === "dimension" && f.mode === "range" && (f.field === timeField || f.field === timeField.split(".").pop()));
-    const boundedMin = bounded && (tile.where ?? []).some((f) => f.source === "dimension" && f.mode === "range" && f.min != null && f.min !== "");
-    const boundedMax = bounded && (tile.where ?? []).some((f) => f.source === "dimension" && f.mode === "range" && f.max != null && f.max !== "");
-    const startFlag = boundedMin ? "FALSE" : `(${edge.alias} = (SELECT MIN(${edge.alias}) FROM __e) AND CAST("__edge_min" AS DATE) > ${edge.alias})`;
-    const endFlag = boundedMax ? "FALSE" : `(${edge.alias} = (SELECT MAX(${edge.alias}) FROM __e) AND CAST("__edge_max" AS DATE) < ${bucketEnd})`;
+    const timeRanges = (tile.where ?? []).filter((f) => f.source === "dimension" && f.mode === "range" && (f.field === timeField || f.field === timeField.split(".").pop()));
+    const boundedMin = timeRanges.some((f) => f.min != null && f.min !== "");
+    const boundedMax = timeRanges.some((f) => f.max != null && f.max !== "");
+    const bucketMin = `MIN(CAST("__edge_min" AS DATE)) OVER (PARTITION BY ${edge.alias})`;
+    const bucketMax = `MAX(CAST("__edge_max" AS DATE)) OVER (PARTITION BY ${edge.alias})`;
+    const startFlag = boundedMin ? "FALSE" : `(${edge.alias} = (SELECT MIN(${edge.alias}) FROM __e) AND ${bucketMin} > ${edge.alias})`;
+    const endFlag = boundedMax ? "FALSE" : `(${edge.alias} = (SELECT MAX(${edge.alias}) FROM __e) AND ${bucketMax} < ${bucketEnd})`;
     sql = `WITH __e AS (\n${sql}\n)\n` +
       `SELECT * EXCLUDE ("__edge_min", "__edge_max"),\n` +
       `       ${startFlag} AS "__partial_start",\n` +
@@ -269,14 +279,6 @@ export interface PartialEdges { start: boolean; end: boolean }
  * for a coarsened time dimension, reporting what they said instead of
  * silently dropping them into the void along with the rows they flagged.
  * A no-op (both false) for any tile compileTile() didn't add them to.
- *
- * A row where every OTHER column is null is the `LEFT JOIN ... ON TRUE`
- * sentinel compileTile() emits when every period in range was partial (a
- * data set that doesn't span one full period yet) -- real rows always
- * have a non-null bucket, since it comes straight off a GROUP BY on a
- * real date. That sentinel exists purely to carry the flags out of a
- * query that would otherwise have zero rows to attach them to; it's
- * dropped here, never handed to a chart as a data point.
  */
 export function splitPartialPeriods(
   result: { columns: string[]; rows: unknown[][] },
