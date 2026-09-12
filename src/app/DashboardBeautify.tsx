@@ -41,8 +41,10 @@ interface Story {
  * reading guide without changing queries. Optional AI adds editorial judgment;
  * all changes remain explicit user actions and participate in document undo.
  */
-export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, queryContext, drills, filtersByTile = {} }: {
+export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigureAi = false, onConnections, onDash, queryContext, drills, filtersByTile = {} }: {
   dash: DashboardSpec; canvas: CanvasSpec; model: Model; aiAvailable: boolean;
+  /** Admins can add the key; everyone else is told who can. */
+  canConfigureAi?: boolean; onConnections?: () => void;
   onDash: (d: DashboardSpec) => void;
   filtersByTile?: Record<string, FilterSpec[]>;
   queryContext: string; drills: Record<string, DrillEntry[]>;
@@ -200,7 +202,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, qu
 
   return (
     <>
-      <button ref={trigger} className="tgl" onClick={run} disabled={!dash.tiles.length}
+      <button ref={trigger} className="tgl" onClick={run} disabled={!dash.tiles.length} aria-describedby={aiAvailable ? undefined : "review-scope-note"}
               title="Suggest a title and a top-to-bottom reading order for the whole dashboard, and flag any tile that's hard to read at its current grain. Review the current results and composition. Changes are applied only when you choose a suggestion.">
         <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6">
           <path d="M3 17l7-7" strokeLinecap="round" />
@@ -208,7 +210,9 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, qu
           <path d="M16.5 8.5v2M15.5 9.5h2" strokeLinecap="round" />
         </svg>
         Design review
+        {!aiAvailable && <span className="review-scope" aria-hidden="true" title="Chart checks and story structure run without AI. The editorial review needs an AI provider.">checks only</span>}
       </button>
+      {!aiAvailable && <span id="review-scope-note" hidden>Chart checks and story structure only; the editorial review needs an AI provider.</span>}
       {open && (
         <div className={"dash-beautify-pop" + (structurePreview ? " showing-structure" : "")} role="dialog" aria-label="Design review"
           onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); close(); } }}>
@@ -218,6 +222,11 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, qu
           </div>
           <div className="beautify-body">
             <div className="review-intro"><h3>Make the story easier to see.</h3><p>Refine the charts, give them a reading order, and keep every change in your hands.</p></div>
+            <ul className="review-scope-list" aria-label="What this review covers">
+              <li className="on"><b>Chart checks</b> ran: results, grain, breakdowns and layout, from the current queries.</li>
+              <li className="on"><b>Story structure</b> ran: a reading order from your headings and sections.</li>
+              <li className={aiAvailable ? "on" : "off"}><b>Editorial review</b> {aiAvailable ? "ran: an AI read of the dashboard as a story." : <>did not run: it needs an AI provider. {canConfigureAi ? <button className="link" onClick={onConnections}>Add a key in Connections</button> : "Ask a workspace admin to add a key in Connections."}</>}</li>
+            </ul>
             {hits === "checking" && <p className="explain-body loading">Checking the current charts…</p>}
             {Array.isArray(hits) && hits.length > 0 && (
               <div className="beautify-suggestion">
@@ -260,8 +269,6 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, onDash, qu
               </>}
             </section>}
             {!structure && dash.tiles.some(t => t.kind === "heading") && <p className="explain-body hint">Your section headings already establish a reading order. Smart arrange keeps those sections together.</p>}
-            {!aiAvailable &&
-              <p className="explain-body hint">Chart checks and story structure work without AI. Connect a provider in Connections for an additional editorial review.</p>}
             {story === "checking" && <p className="explain-body loading">Reading the dashboard as a story…</p>}
             {story && story !== "checking" && "error" in story && <p className="explain-body error">{story.error}</p>}
             {story && story !== "checking" && !("error" in story) && (
