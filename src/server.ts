@@ -227,6 +227,10 @@ function buildConnector(connectorType: string, body: any, existing: Record<strin
   if (connectorType === "duckdb") {
     connector.lakeRoot = resolve("lakeRoot") ?? "";
     connector.poolSize = Number(body?.poolSize ?? existing.poolSize ?? 4);
+    const awsProfile = resolve("awsProfile");
+    if (awsProfile) connector.awsProfile = awsProfile;
+    const awsRegion = resolve("awsRegion");
+    if (awsRegion) connector.awsRegion = awsRegion;
     if (!connector.lakeRoot) return { ok: false, status: 400, error: "lakeRoot is required" };
   } else if (connectorType === "snowflake") {
     for (const f of CONNECTOR_FIELDS) {
@@ -255,6 +259,8 @@ async function renderConnectorLines(id: string, label: string, connectorType: st
   const lines = [`      type: ${connectorType}`, `      poolSize: ${connector.poolSize}`];
   if (connectorType === "duckdb") {
     lines.push(`      lakeRoot: ${yamlScalar(connector.lakeRoot)}`);
+    if (connector.awsProfile) lines.push(`      awsProfile: ${yamlScalar(connector.awsProfile)}`);
+    if (connector.awsRegion) lines.push(`      awsRegion: ${yamlScalar(connector.awsRegion)}`);
     return lines;
   }
   const prefix = "SC_" + id.toUpperCase().replace(/[^A-Z0-9]/g, "_");
@@ -374,7 +380,7 @@ app.post("/api/sources", safe(async (req, res) => {
   // DuckDB's pool opens lazily (an in-memory instance; lakeRoot is only ever
   // touched by the read_parquet() a real query issues), so "it connected"
   // proves nothing about lakeRoot -- check the directory ourselves.
-  if (connectorType === "duckdb") {
+  if (connectorType === "duckdb" && !String(rawConnector.lakeRoot ?? "").startsWith("s3://")) {
     const dir = expand(rawConnector.lakeRoot);
     if (!existsSync(dir) || !statSync(dir).isDirectory())
       return res.status(422).json({ error: `lakeRoot does not exist or is not a directory: ${dir}` });
@@ -412,7 +418,7 @@ app.get("/api/sources/:id/config", safe(async (req, res) => {
   const existing = await readExistingBlock(req.params.id);
   if ("error" in existing) return res.status(404).json({ error: existing.error });
   const c = existing.parsed.connector ?? {};
-  const SAFE_FIELDS = ["type", "lakeRoot", "poolSize", "account", "username", "role", "warehouse", "database", "schema"];
+  const SAFE_FIELDS = ["type", "lakeRoot", "awsProfile", "awsRegion", "poolSize", "account", "username", "role", "warehouse", "database", "schema"];
   const connector: Record<string, any> = {};
   for (const f of SAFE_FIELDS) {
     if (c[f] === undefined) continue;
@@ -448,7 +454,7 @@ app.put("/api/sources/:id", safe(async (req, res) => {
   if (!built.ok) return res.status(built.status).json({ error: built.error });
   const rawConnector = built.connector;
 
-  if (connectorType === "duckdb") {
+  if (connectorType === "duckdb" && !String(rawConnector.lakeRoot ?? "").startsWith("s3://")) {
     const dir = expand(rawConnector.lakeRoot);
     if (!existsSync(dir) || !statSync(dir).isDirectory())
       return res.status(422).json({ error: `lakeRoot does not exist or is not a directory: ${dir}` });

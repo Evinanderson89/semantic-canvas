@@ -75,7 +75,9 @@ Open **Connections** to add, edit or select a source, or edit `sources.yaml`. A 
 
 Unsupported imports return a source error explaining what could not be represented. The dbt and Snowflake adapters import files and compile local SQL; they do not call the native dbt Semantic Layer or Snowflake semantic query service.
 
-Connectors: local Parquet through DuckDB, and Snowflake. The sample is tested against DuckDB. Snowflake execution requires your own credentials and verification against your model.
+Connectors: Parquet through DuckDB (a local directory, or an S3 lake), and Snowflake. The sample is tested against DuckDB. Snowflake execution requires your own credentials and verification against your model.
+
+For an S3 lake, set `lakeRoot` to `s3://bucket/prefix` and name an `awsProfile` from the server's `~/.aws/config` (an SSO login or a `role_arn` + `source_profile` entry) plus the bucket's `awsRegion`; the credential is resolved when the source connects and renewed before an assumed role's session expires. No access key is written to `sources.yaml`. See the commented example there.
 
 For Snowflake, copy `.env.example` to `.env`, fill in the required settings, then configure a source. Use a read-only warehouse role. Connection credentials stay on the local server and are referenced by environment variables in `sources.yaml`.
 

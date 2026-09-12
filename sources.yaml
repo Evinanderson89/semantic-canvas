@@ -36,6 +36,22 @@ sources:
       lakeRoot: ./sample-data/lake
       poolSize: 4
 
+  # A Parquet lake in S3 (the same <lakeRoot>/<table>/**/*.parquet layout).
+  # No key lives here: awsProfile names a profile in the server's
+  # ~/.aws/config (an SSO login or a role_arn + source_profile entry), and the
+  # credential is resolved when the source connects and renewed before an
+  # assumed role's session expires. awsRegion is the bucket's region.
+  # - id: warehouse-s3
+  #   label: Warehouse (Parquet in S3)
+  #   adapter: duckglue
+  #   model: ~/analytics/warehouse.yaml
+  #   connector:
+  #     type: duckdb
+  #     lakeRoot: s3://my-lake-bucket/lake
+  #     awsProfile: lake-reader
+  #     awsRegion: us-east-2
+  #     poolSize: 4
+
   # Uncomment and fill in to attach a warehouse. A source that fails to connect
   # is reported as unavailable; it does not take the others down with it.
   #

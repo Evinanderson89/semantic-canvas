@@ -47,7 +47,11 @@ export const expand = (v: string) =>
 async function connect(c: Record<string, any>): Promise<Connector> {
   const type = String(c.type ?? "duckdb");
   if (type === "duckdb")
-    return pooledDuckdb(expand(String(c.lakeRoot ?? "")), { size: Number(c.poolSize ?? 4) });
+    return pooledDuckdb(expand(String(c.lakeRoot ?? "")), {
+      size: Number(c.poolSize ?? 4),
+      awsProfile: c.awsProfile ? expand(String(c.awsProfile)) : undefined,
+      awsRegion: c.awsRegion ? expand(String(c.awsRegion)) : undefined,
+    });
   if (type === "snowflake")
     return snowflakeConnector({
       account: expand(String(c.account)), username: expand(String(c.username)),

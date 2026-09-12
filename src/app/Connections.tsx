@@ -317,14 +317,14 @@ type ConnectorType = "duckdb" | "snowflake";
 interface FormState {
   id: string; label: string; adapter: Adapter; model: string;
   connectorType: ConnectorType;
-  lakeRoot: string; poolSize: string;
+  lakeRoot: string; poolSize: string; awsProfile: string; awsRegion: string;
   account: string; username: string; authMethod: "key" | "password";
   privateKey: string; privateKeyPass: string; password: string;
   role: string; warehouse: string; database: string; schema: string;
 }
 const BLANK_FORM: FormState = {
   id: "", label: "", adapter: "duckglue", model: "",
-  connectorType: "duckdb", lakeRoot: "", poolSize: "4",
+  connectorType: "duckdb", lakeRoot: "", poolSize: "4", awsProfile: "", awsRegion: "",
   account: "", username: "", authMethod: "key",
   privateKey: "", privateKeyPass: "", password: "",
   role: "", warehouse: "COMPUTE_WH", database: "", schema: "PUBLIC",
@@ -361,6 +361,7 @@ function SourceForm({ editId, onCancel, onSaved }: {
         ...f, id: d.id ?? editId, label: d.label ?? "", adapter: d.adapter ?? f.adapter,
         model: d.model ?? "", connectorType: c.type ?? f.connectorType,
         lakeRoot: c.lakeRoot ?? "", poolSize: c.poolSize != null ? String(c.poolSize) : f.poolSize,
+        awsProfile: c.awsProfile ?? "", awsRegion: c.awsRegion ?? "",
         account: c.account ?? "", username: c.username ?? "",
         role: c.role ?? "", warehouse: c.warehouse ?? f.warehouse, database: c.database ?? "",
         schema: c.schema ?? f.schema,
@@ -376,6 +377,7 @@ function SourceForm({ editId, onCancel, onSaved }: {
     const connector: Record<string, any> = { type: form.connectorType, poolSize: Number(form.poolSize) };
     if (form.connectorType === "duckdb") {
       connector.lakeRoot = form.lakeRoot;
+      if (form.lakeRoot.startsWith("s3://") || form.awsProfile) { connector.awsProfile = form.awsProfile || undefined; connector.awsRegion = form.awsRegion || undefined; }
     } else {
       Object.assign(connector, {
         account: form.account, username: form.username,
@@ -488,6 +490,19 @@ function SourceForm({ editId, onCancel, onSaved }: {
               <input type="number" min={1} value={form.poolSize}
                      onChange={(e) => set("poolSize", e.target.value)} />
             </label>
+            {(form.lakeRoot.startsWith("s3://") || form.awsProfile) && <>
+              <p className="span2">An S3 lake signs requests with a named profile from the server's <code>~/.aws/config</code> (an SSO login or an assumed role). No key is stored here.</p>
+              <label className="ctl">
+                <span>AWS profile</span>
+                <input value={form.awsProfile} placeholder="lake-reader"
+                       onChange={(e) => set("awsProfile", e.target.value)} />
+              </label>
+              <label className="ctl">
+                <span>Bucket region</span>
+                <input value={form.awsRegion} placeholder="us-east-2"
+                       onChange={(e) => set("awsRegion", e.target.value)} />
+              </label>
+            </>}
           </>
         ) : (
           <>

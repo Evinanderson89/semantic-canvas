@@ -1,5 +1,6 @@
 import { leasePool } from "./leases.ts";
 import { DuckDBInstance } from "@duckdb/node-api";
+import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import type { Connector, QueryResult } from "./types.ts";
 
 /**
@@ -12,7 +13,16 @@ import type { Connector, QueryResult } from "./types.ts";
  * The cache matters more: a dashboard fires the same handful of queries for
  * every viewer, so under concurrency almost all of the work is duplicated.
  */
-export interface PooledOptions { size?: number; cacheTtlMs?: number; cacheMax?: number }
+export interface PooledOptions {
+  size?: number; cacheTtlMs?: number; cacheMax?: number;
+  /** For an s3:// lakeRoot: a named profile from ~/.aws/config (an SSO login
+   *  or a role_arn + source_profile entry). Resolved in Node with the AWS
+   *  SDK's provider chain; nothing static is stored. */
+  awsProfile?: string;
+  /** The bucket's region, needed alongside awsProfile: without it DuckDB
+   *  signs for us-east-1 and a bucket anywhere else refuses the request. */
+  awsRegion?: string;
+}
 
 interface Entry { at: number; value: QueryResult }
 
@@ -27,6 +37,40 @@ export async function pooledDuckdb(
   const conns = await Promise.all(Array.from({ length: size }, () => instance.connect()));
   const leases = leasePool(conns, c => c.closeSync());
   const { acquire, release } = leases;
+
+  // An S3 lake needs httpfs plus a credential. No credential lives in
+  // sources.yaml: awsProfile names a ~/.aws/config profile (an SSO login or
+  // a role_arn + source_profile entry) and the credential is resolved here,
+  // in Node, with the AWS SDK's provider chain, then handed to DuckDB as a
+  // literal secret shared by every pooled connection. Resolving in Node
+  // rather than through DuckDB's own credential_chain provider keeps one
+  // behaviour across DuckDB versions and lets the secret be refreshed: an
+  // assumed role's session expires (often after an hour), so it is renewed
+  // well inside that window.
+  let secretRefresh: ReturnType<typeof setInterval> | undefined;
+  if (lakeRoot.startsWith("s3://")) {
+    await conns[0].run("INSTALL httpfs; LOAD httpfs;");
+    if (opts.awsProfile) {
+      const creds = fromNodeProviderChain({ profile: opts.awsProfile });
+      const applySecret = async () => {
+        const c = await creds();
+        const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+        const sessionToken = c.sessionToken ? `, SESSION_TOKEN ${q(c.sessionToken)}` : "";
+        const region = opts.awsRegion ? `, REGION ${q(opts.awsRegion)}` : "";
+        await conns[0].run(
+          `CREATE OR REPLACE SECRET lake_s3 (TYPE s3, PROVIDER config, ` +
+          `KEY_ID ${q(c.accessKeyId)}, SECRET ${q(c.secretAccessKey)}${sessionToken}${region});`,
+        );
+      };
+      await applySecret();
+      secretRefresh = setInterval(() => { applySecret().catch(() => {}); }, 20 * 60_000);
+      secretRefresh.unref?.();
+    } else {
+      // No profile configured (local development with ambient credentials):
+      // DuckDB's own credential_chain provider is fine.
+      await conns[0].run("CREATE OR REPLACE SECRET lake_s3 (TYPE s3, PROVIDER credential_chain);");
+    }
+  }
   let hits = 0, misses = 0;
   let closing: Promise<void> | undefined;
 
@@ -71,7 +115,7 @@ export async function pooledDuckdb(
     stats: () => ({ ...leases.stats(),
                     cached: cache.size, hits, misses,
                     hitRate: hits + misses ? +(hits / (hits + misses)).toFixed(3) : 0 }),
-    close() { cache.clear(); return closing ??= leases.close().finally(() => { cache.clear(); instance.closeSync(); }); },
+    close() { if (secretRefresh) clearInterval(secretRefresh); cache.clear(); return closing ??= leases.close().finally(() => { cache.clear(); instance.closeSync(); }); },
   };
 }
 
