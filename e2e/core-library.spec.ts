@@ -79,7 +79,7 @@ test("the folder structure replaces topics and new dashboards keep their folder 
   await expect(page.getByText("Explore by topic", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Expand folder Examples", exact: true })).toHaveAttribute("aria-expanded", "false");
   await page.getByRole("button", { name: "CoreCanvas Library", exact: true }).click();
-  await expect(page.locator(".library-folder-card").filter({ hasText: "Shared views" })).toContainText("3 folders");
+  await expect(page.locator(".library-folder-card").filter({ hasText: "Shared views" })).toContainText("1 item");
   await page.locator(".library-folder-target").filter({ hasText: "Shared views" }).click();
   await expect(page.locator(".library-folder-target strong")).toHaveText(["KPI summaries", "Trends & comparisons", "Story sections"]);
   await page.locator(".library-folder-target").filter({ hasText: "Story sections" }).click();

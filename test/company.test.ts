@@ -119,7 +119,7 @@ it("allows editor saves, denies viewers and protects administration and CSRF", a
   for (const path of ["/api/setup", "/api/operations/status", "/api/operations/backup", "/api/sources/public/config"]) expect((await call(path, { headers: headers(editor) })).status).toBe(403);
   expect((await call("/api/agent/key", { method: "POST", headers: headers(editor), body: JSON.stringify({ apiKey: "must-not-log-this-key" }) })).status).toBe(403);
   expect((await call("/api/setup", { headers: headers(admin) })).status).toBe(200);
-  const backup = await (await call("/api/operations/backup", { headers: headers(admin) })).json(); expect(backup.dashboards.filter((d: any) => !d.isTemplate)).toHaveLength(1); expect(backup.dashboards.filter((d: any) => d.isTemplate)).toHaveLength(18);
+  const backup = await (await call("/api/operations/backup", { headers: headers(admin) })).json(); expect(backup.dashboards.filter((d: any) => !d.isTemplate)).toHaveLength(1); expect(backup.dashboards.filter((d: any) => d.isTemplate)).toHaveLength(20);
   expect((await call("/api/setup", { headers: { ...headers(admin), origin: "https://evil.test" } })).status).toBe(403);
   // Express routes are case-insensitive by default; a differently cased path must not bypass the role guard.
   expect([403, 404]).toContain((await call("/api/Dashboards", { method: "POST", headers: headers(viewer), body: JSON.stringify(document) })).status);

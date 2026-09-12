@@ -44,15 +44,23 @@ export const tileSchema = querySchema.extend({
   layout: z.object({ x: finite.min(0).max(100000), y: finite.min(0).max(100000),
     w: finite.positive().max(100000), h: finite.positive().max(100000), z: finite.int().optional() }).strict(),
 }).refine((t) => t.kind && t.kind !== "metric" || t.metrics.length > 0, "Metric tiles need a metric");
+/** Presentation decides what the person sees; control decides what the query receives. Never both. See docs/filter-presentation.md. */
+export const FILTER_PRESENTATIONS = { select: ["dropdown", "chips", "segmented"], date: ["range", "presets"], number: ["range"] } as const;
+export const DATE_PRESETS = ["last-7-days", "last-30-days", "last-90-days", "this-month", "this-quarter", "year-to-date"] as const;
 export const filterValueSchema = z.object({ values: z.array(value).max(1000).optional(),
   min: z.union([finite, z.string().max(256), z.null()]).optional(), max: z.union([finite, z.string().max(256), z.null()]).optional(),
-}).strict();
+  preset: z.enum(DATE_PRESETS).optional(),
+}).strict().refine((v) => !v.preset || v.min == null && v.max == null, "A date preset and a custom range are mutually exclusive");
 export const dashboardFilterSchema = z.object({
   id: name, label: z.string().min(1).max(100), field: name, control: z.enum(["select", "date", "number"]),
+  presentation: z.enum(["dropdown", "chips", "segmented", "range", "presets"]).optional(),
   scope: z.enum(["tab", "report"]), tabId: name.optional(),
   bindings: z.array(z.object({ tileId: name, field: name }).strict()).max(500),
   defaultValue: filterValueSchema.optional(),
-}).strict();
+}).strict().superRefine((f, ctx) => {
+  const allowed: readonly string[] = FILTER_PRESENTATIONS[f.control];
+  if (f.presentation && !allowed.includes(f.presentation)) ctx.addIssue({ code: "custom", path: ["presentation"], message: `A ${f.control} filter cannot be shown as ${f.presentation}; choose ${allowed.join(", ")}` });
+});
 export const dashboardSchema = z.object({
   title: z.string().min(1).max(1000), description: z.string().max(100000).optional(),
   tiles: z.array(tileSchema).max(500), crossFilters: z.array(filterSchema).max(100).optional(),

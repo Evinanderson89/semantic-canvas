@@ -1035,6 +1035,12 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .filter-control input{min-width:0;box-sizing:border-box;border:1px solid var(--line-2);border-radius:6px;background:var(--panel);color:var(--ink);padding:8px;font:inherit;font-size:12px}
 .filter-range{display:flex;gap:10px}.filter-range label{display:flex;flex:1;min-width:0;gap:5px;align-items:center;font-size:10px;color:var(--ink-3)}.filter-range input{width:100%}
 .filter-caption{display:flex;align-items:center;justify-content:space-between;gap:10px;color:var(--ink-3);font-size:10px;margin-top:auto}
+.filter-pills-wrap{display:flex;flex-direction:column;gap:8px;min-width:0;min-height:0;flex:1 1 auto;overflow:auto;scrollbar-width:thin}.filter-pills{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
+.filter-pills .pill{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--line-2);border-radius:999px;color:var(--ink-2);padding:6px 12px;font:inherit;font-size:12px;white-space:nowrap;cursor:pointer}
+.filter-pills .pill small{font-size:10px;color:var(--ink-3)}.filter-pills .pill:hover{border-color:var(--accent);color:var(--accent)}
+.filter-pills .pill.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}.filter-pills .pill.on small{color:inherit;opacity:.75}
+.filter-pills .link{white-space:nowrap}.filter-resolved{color:var(--ink-3);font-size:11px;white-space:nowrap;margin-left:4px}
+.filter-control.compact .filter-pills-wrap{flex-direction:row;align-items:center;gap:10px;overflow-x:auto;overflow-y:hidden}.filter-control.compact .filter-pills{flex-wrap:nowrap}.filter-control.compact:has(.filter-pills){max-width:760px}
 .filter-control .link{font-size:11px}.shared-filter-shelf{display:flex;gap:12px;padding:14px 36px;overflow:auto;background:var(--panel);border-bottom:1px solid var(--line)}.filter-control.compact{min-width:250px;max-width:350px;min-height:130px;padding:12px}
 .node:has(.filter-control .studio-popover-panel){z-index:60!important}.node:has(.filter-control){overflow:visible}.node:has(.filter-control) .node-inner{overflow:visible}
 @media(max-width:720px){.form-grid{grid-template-columns:1fr}.tab-strip,.shared-filter-shelf{padding-left:16px;padding-right:16px}.binding-row{align-items:flex-start;flex-direction:column}.binding-row select{width:100%}}
