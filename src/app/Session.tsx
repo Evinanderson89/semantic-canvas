@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
-export interface WorkspaceSession { mode: "local" | "team"; authenticated: boolean; canEdit: boolean; canAdmin: boolean; csrf?: string; gatewayUrl?: string; user?: { id: string; name: string; role: string } }
+export interface WorkspaceSession { mode: "local" | "team"; authenticated: boolean; canEdit: boolean; canAdmin: boolean; csrf?: string; gatewayUrl?: string; expiresAt?: number; user?: { id: string; name: string; role: string } }
 const local: WorkspaceSession = { mode: "local", authenticated: true, canEdit: true, canAdmin: true };
 const Context = createContext(local);
 export const useSession = () => useContext(Context);
@@ -9,6 +9,10 @@ export const useSession = () => useContext(Context);
  *  owns sessions: its refresh route renews an expired token when it can and
  *  otherwise starts sign-in, then returns here. Standalone team mode signs
  *  in locally. */
+/** Renew a minute before expiry, never sooner than five seconds from now, so a token that is already nearly out still gets one attempt. */
+export const RENEW_LEAD_MS = 60_000;
+export function renewDelay(expiresAt: number, now: number, lead = RENEW_LEAD_MS): number { return Math.max(5_000, expiresAt - now - lead); }
+
 export function signInHref(session: { gatewayUrl?: string } | null): string {
   const portal = session?.gatewayUrl;
   if (!portal) return "/api/auth/login";
@@ -45,6 +49,32 @@ export function SessionBoundary({ children }: { children: ReactNode }) {
       .then(s => { current = s; if (alive) setSession(s); }).catch(() => { if (alive) setError("We couldn’t reach your workspace. Check the connection and try again."); });
     return () => { alive = false; window.fetch = original; };
   }, []);
+  // Silent renewal behind Gateway. The portal owns the session and renews it
+  // on its own pages; a Canvas tab left open would otherwise expire mid-work.
+  // A minute before expiry, open the portal's refresh route in a hidden
+  // iframe with /auth/renewed as the landing page; it sets the renewed
+  // cookies on the shared domain and posts back. Then re-read the session so
+  // the new expiry schedules the next renewal. Only messages from the portal
+  // origin are honoured, and nothing in the message is trusted beyond "try
+  // again now"; the session endpoint remains the source of truth.
+  useEffect(() => {
+    if (!session?.authenticated || !session.gatewayUrl || !session.expiresAt) return;
+    const portal = new URL(session.gatewayUrl), lead = RENEW_LEAD_MS;
+    const delay = renewDelay(session.expiresAt, Date.now());
+    let frame: HTMLIFrameElement | null = null, done = false;
+    const reread = async () => { try { const r = await fetch("/api/auth/session"); if (r.ok) setSession(await r.json()); } catch {} };
+    const cleanup = () => { frame?.remove(); frame = null; window.removeEventListener("message", onMessage); };
+    const onMessage = (e: MessageEvent) => { if (e.origin !== portal.origin || e.data?.type !== "gateway:session" || done) return; done = true; cleanup(); void reread(); };
+    const timer = window.setTimeout(() => {
+      window.addEventListener("message", onMessage);
+      frame = document.createElement("iframe"); frame.hidden = true; frame.setAttribute("aria-hidden", "true");
+      frame.src = `${portal.origin}/auth/refresh?next=${encodeURIComponent("/auth/renewed")}`;
+      document.body.appendChild(frame);
+      // If the portal never answers, fall back to re-reading the session at expiry so the sign-in screen appears promptly rather than after a failed request.
+      window.setTimeout(() => { if (!done) { done = true; cleanup(); void reread(); } }, lead + 5_000);
+    }, delay);
+    return () => { window.clearTimeout(timer); cleanup(); };
+  }, [session?.authenticated, session?.gatewayUrl, session?.expiresAt]);
   if (!session || !session.authenticated) return <main className="workspace-welcome">
     <span className="eyebrow">Semantic Canvas</span><h1>{session ? "Your company’s metrics.\nA clearer story." : "Opening your workspace"}</h1>
     <p>{error || (session ? "Sign in with your company account to explore, build, and share dashboards." : "Connecting to Semantic Canvas…")}</p>
