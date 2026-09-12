@@ -12,6 +12,7 @@ import { timeColumnOf } from "../semantic/model.ts";
 import { coarserGrain, detectDegenerate, detectNoisy, type DegenerateFinding } from "../suggest/recommend.ts";
 import { renderInline, renderMarkdown } from "./markdown.tsx";
 import { readableChartTitle, suggestStoryStructure } from "../suggest/storyStructure.ts";
+import { labelTile, reviewDataHonesty, unsettledFilter, type HonestyFinding, type HonestyFix } from "../suggest/dataHonesty.ts";
 
 /** A KPI card's natural height -- matches the headline tiles Exec Summary
  *  already packs at this height (layouts.ts: layoutExecSummary). A chart
@@ -51,6 +52,10 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
 }) {
   const [open, setOpen] = useState(false);
   const [hits, setHits] = useState<"checking" | Hit[] | null>(null);
+  const [honesty, setHonesty] = useState<HonestyFinding[]>([]);
+  // Dismissed findings stay dismissed for this document until the data
+  // changes: the key carries the date the finding is about.
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const [story, setStory] = useState<"checking" | Story | { error: string } | null>(null);
   const [structurePreview, setStructurePreview] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -66,7 +71,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
   const current = useRef(context); current.current = context;
   const request = useRef<AbortController | null>(null);
   useEffect(() => {
-    request.current?.abort(); setHits(null); setStory(null); setScan(null); setStructurePreview(false);
+    request.current?.abort(); setHits(null); setHonesty([]); setStory(null); setScan(null); setStructurePreview(false);
     if (rescanAfterEdit.current && open) scanTiles();
     rescanAfterEdit.current = false;
     return () => request.current?.abort();
@@ -76,7 +81,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
     request.current?.abort(); const ac = new AbortController(); request.current = ac;
     const snapshot = context;
     setHits("checking"); setScan(null);
-    const found: Hit[] = [], failed: string[] = [];
+    const found: Hit[] = [], failed: string[] = [], honest: HonestyFinding[] = [];
     let reviewed = 0, limited = 0;
     for (const t of dash.tiles) {
       if ((t.kind ?? "metric") !== "metric" || !t.metrics.length) continue;
@@ -89,6 +94,8 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
           headers: { "content-type": "application/json", "x-sc-refresh": queryContext }, body: JSON.stringify(query) }).then(readResponse);
         reviewed++; if (r.truncated) limited++;
         if (timeDimIdx !== -1 && !drills[t.id]?.length) {
+          honest.push(...reviewDataHonesty({ tile: { ...t, compare: query.compare }, model, columns: r.columns ?? [], rows: r.rows ?? [],
+            partial: r.partial ?? { start: false, end: false }, timeDimension: query.dimensions[timeDimIdx], where: query.where, today: new Date() }));
           const grain = query.dimensions[timeDimIdx].split(":")[0], next = coarserGrain(grain);
           if (next && !validateTile(model, { ...t, dimensions: t.dimensions.map(d => d.includes(":") ? `${next}:${d.split(":")[1]}` : d) }).length && detectNoisy(r.rows ?? [], r.columns ?? [], t.metrics).length)
             found.push({ kind: "noise", tileId: t.id, title, grain, next });
@@ -99,7 +106,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
         }
       } catch (e: any) { if (ac.signal.aborted) return; failed.push(`${title}: ${e.message}`); }
     }
-    if (current.current === snapshot && !ac.signal.aborted) { setHits(found); setScan({ reviewed, limited, failed }); }
+    if (current.current === snapshot && !ac.signal.aborted) { setHits(found); setHonesty(honest); setScan({ reviewed, limited, failed }); }
   };
 
   const tileSummary = (t: TileSpec) => {
@@ -154,6 +161,29 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
       ...t, dimensions: [`month:${hit.timeDimension}`], chart: undefined, title: readableChartTitle(model, t, { ...t, dimensions: [`month:${hit.timeDimension}`], chart: undefined }),
       layout: { ...t.layout, h: Math.max(t.layout.h, CHART_MIN_HEIGHT) } }) });
   };
+
+  const applyHonesty = (f: HonestyFinding, fix: HonestyFix) => {
+    const today = new Date();
+    if (fix.kind === "freshness-note") {
+      const note: TileSpec = {
+        id: `t${Math.random().toString(36).slice(2, 8)}`, kind: "text", metrics: [], dimensions: [],
+        text: `Data through ${fix.date}.`, layout: { x: 24, y: 999999, w: 480, h: KPI_HEIGHT },
+      };
+      applyReviewed({ ...dash, tiles: applyLayout("grid", [...dash.tiles, note], canvas.width, false) });
+      return;
+    }
+    applyReviewed({ ...dash, tiles: dash.tiles.map((t) => {
+      if (t.id !== f.tileId) return t;
+      if (fix.kind === "exclude-unsettled") {
+        const filter = unsettledFilter(t.id, fix);
+        return { ...t, where: [...(t.where ?? []).filter((w) => w.id !== filter.id), filter] };
+      }
+      return labelTile(t, f.title, fix, today);
+    }) });
+  };
+  const fixLabel = (fix: HonestyFix) => fix.kind === "label-through" ? "Label as through that date"
+    : fix.kind === "label-as-of" ? "Label as of that date" : fix.kind === "exclude-unsettled" ? "Compare complete periods only" : "Add a freshness note";
+  const visibleHonesty = honesty.filter((f) => !dismissed.has(f.key));
 
   const applyTitle = () => {
     if (!story || story === "checking" || "error" in story) return;
@@ -224,6 +254,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
             <div className="review-intro"><h3>Make the story easier to see.</h3><p>Refine the charts, give them a reading order, and keep every change in your hands.</p></div>
             <ul className="review-scope-list" aria-label="What this review covers">
               <li className="on"><b>Chart checks</b> ran: results, grain, breakdowns and layout, from the current queries.</li>
+              <li className="on"><b>Data honesty</b> ran: partial periods, lagging comparisons and freshness, from the current results.</li>
               <li className="on"><b>Story structure</b> ran: a reading order from your headings and sections.</li>
               <li className={aiAvailable ? "on" : "off"}><b>Editorial review</b> {aiAvailable ? "ran: an AI read of the dashboard as a story." : <>did not run: it needs an AI provider. {canConfigureAi ? <button className="link" onClick={onConnections}>Add a key in Connections</button> : "Ask a workspace admin to add a key in Connections."}</>}</li>
             </ul>
@@ -248,6 +279,21 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
                   </div>
                 ))}
               </div>
+            )}
+            {visibleHonesty.length > 0 && (
+              <section className="beautify-suggestion honesty-review" aria-label="Data honesty">
+                <div className="eyebrow">Data honesty</div>
+                {visibleHonesty.map((f) => (
+                  <div key={f.key} className="review-finding">
+                    <h4>{f.title}</h4>
+                    <p>{f.text}</p>
+                    <div className="story-actions">
+                      {f.fixes.map((fix) => <button key={fix.kind} className="primary small" onClick={() => applyHonesty(f, fix)}>{fixLabel(fix)}</button>)}
+                      <button className="tgl" onClick={() => setDismissed((d) => new Set(d).add(f.key))}>Dismiss</button>
+                    </div>
+                  </div>
+                ))}
+              </section>
             )}
             {scan && <div className="review-coverage" role="status"><b>{scan.failed.length ? "Review incomplete" : "Review complete"}</b><p>{scan.reviewed} charts reviewed{scan.limited ? ` · ${scan.limited} limited result window${scan.limited === 1 ? "" : "s"}` : ""}{scan.failed.length ? ` · ${scan.failed.length} unavailable` : ""}.</p>{scan.failed.map(message => <p key={message} className="err">{message}</p>)}</div>}
             {hits === null && <p className="explain-body">The dashboard changed. <button className="link" onClick={run}>Review this version</button></p>}

@@ -37,6 +37,8 @@ export const duckglueAdapter: SemanticAdapter = {
         synonyms: t.synonyms ?? [],
         partitionKeys: t.partition_keys ?? [],
         primaryKey: t.primary_key ?? null,
+        reportingLagDays: t.reporting_lag === undefined ? undefined
+          : z.number().int().min(0).max(365, `Table ${name}: reporting_lag is days after a period ends, 0 to 365`).parse(t.reporting_lag),
         columns: (t.columns ?? []).map((c: any) => ({
           name: c.name, type: c.type, description: c.description,
         })),

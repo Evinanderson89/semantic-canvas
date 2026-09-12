@@ -1,6 +1,6 @@
 # Data-honesty review
 
-Status: **rule 1 built (PR #24); the rest designed**. A third layer of Design review, between the mechanical chart checks and the AI's editorial read.
+Status: **phase 1 built: rule 1 (PR #24), the Data honesty ledger line, rules 2 and 6 with their fixes, and `reporting_lag`; phases 2 to 4 designed**. A third layer of Design review, between the mechanical chart checks and the AI's editorial read.
 
 ## Why
 
@@ -31,7 +31,15 @@ Rules 1, 2 and 6 need only the query result and the model. Rules 3 and 4 need th
 - Native grains and snapshot tables: `time_grains` on metrics, `grain` and a date-typed primary key on tables.
 - Filter bindings and sections: the dashboard spec.
 
-Missing and worth adding to the model: an optional `reporting_lag` on a table ("orders settle after 2 days"), which turns rule 2 and rule 6 from heuristics into declarations.
+A table may declare `reporting_lag: 2` (days after a period ends before its rows are all in). Rule 2 then calls a calendar-complete period *settling* while it is inside the lag and offers to leave it out of the comparison; rule 6 allows the lag before calling data stale.
+
+## How phase 1 decides (src/suggest/dataHonesty.ts)
+
+Both rules read the reviewed query's result: the newest bucket of the time dimension (with a partial edge already left out by the compiler, that is the newest complete bucket), the `partial` flags, the filters the query ran with, the table's `reporting_lag`, and the clock.
+
+- **Lagging comparison** fires on a tile with `compare: prior|yoy` when the newest complete bucket is still inside the reporting lag ("fct_orders settles after 2 days, so the week starting Sep 7 is still filling in; its change against the week before reads low" — fixes: *Compare complete periods only*, which adds a range filter ending before that bucket, and *Label as through*), or when the newest bucket was left out as partial ("the change shown is the week through Sep 6 against the week before; say so" — fix: *Label as through*).
+- **Stale data** fires when the newest bucket ends more than one grain plus the reporting lag before today, on a tile whose end is not bounded by a range filter the person chose and whose data does not reach into the current period ("Data ends Aug 30; today is Sep 11" — fixes: *Label as of*, which suffixes the title, and *Add a freshness note*, a text tile).
+- A finding's key carries the date it is about, so **Dismiss** holds until the data moves on.
 
 ## Layout patterns (arrangements)
 
@@ -50,7 +58,7 @@ In Design review, under a new "Data honesty" ledger line beside the three that e
 
 ## Phases
 
-1. Rule 1 (done), the ledger line, rules 2 and 6 with fixes, the `reporting_lag` model field.
+1. Rule 1, the ledger line, rules 2 and 6 with fixes, the `reporting_lag` model field. **Done.**
 2. Rules 3, 4, 5 with fixes.
 3. Rules 7, 8, 9: filter suggestions, sharing the presentation work in `filter-presentation.md`.
 4. Layout patterns named and applied.

@@ -20,6 +20,8 @@ export interface Table {
   columns: Column[];
   partitionKeys: string[];
   primaryKey?: string | null;
+  /** Days after a period ends before its rows are all in ("orders settle after 2 days"). Declared as reporting_lag; drives the data-honesty review. */
+  reportingLagDays?: number;
   relation?: { database?: string; schema?: string; table: string };
   /** Set on tables registered by Ingest (docs/connected-canvas.md); absent on base-model tables. */
   connected?: ConnectedInfo;
