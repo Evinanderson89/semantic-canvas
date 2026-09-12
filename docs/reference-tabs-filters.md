@@ -11,6 +11,10 @@
 - A shared filter remains available in a compact shelf on tabs where its canvas control is absent. The control states how many charts on the current tab it affects. Changes to values are exploration state; they do not mark the authored dashboard unsaved.
 - Choose **••• → Copy charts to…** to copy selected charts (or choose from the active tab) into another tab or saved dashboard in the same source. Matching destination filters connect automatically. Each copy can be edited independently.
 
+## Show as
+
+A filter’s **control** (select, date, number) decides what the query receives; its **Show as** choice decides what the person sees. In the filter designer, pick Dropdown, Chips or Segmented for a select field, and Range or Presets for a date field. Chips toggle several values; Segmented keeps exactly one; Presets offer relative windows such as Last 30 days that resolve in the viewer’s calendar at query time, with the resolved dates shown beside the row. Every style produces the same `where` clause as the default. The **Filter styles** starter in Shared views shows one of each. Design, value shapes and the phase 2 list are in [filter presentation](filter-presentation.md).
+
 ## Current boundaries
 
 Reference import is an editable reconstruction, not pixel-perfect conversion. It recognizes a bounded set of chart types and preserves relative placement, headings and neutral labels. Chart sizes can expand for readability. Unsupported or incompatible queries remain placeholders. Native reporting periods added to a KPI are explicitly disclosed in the review. Review all matches: image recognition cannot prove that two similar metric names mean the same thing.
@@ -27,7 +31,7 @@ Chart distribution creates independent copies, not linked master components. Cop
 
 ## Document contract
 
-The document’s optional `tabs` array contains `{ id, title }`. Every tile can carry a `tabId`; legacy tiles with no `tabId` belong to the first tab (or the implicit Overview tab). Optional `filters` contains definitions with a stable ID, label, catalogue field, control type, tab/report scope and explicit `{ tileId, field }` bindings. A canvas tile of kind `filter` references a definition through `filterId`.
+The document’s optional `tabs` array contains `{ id, title }`. Every tile can carry a `tabId`; legacy tiles with no `tabId` belong to the first tab (or the implicit Overview tab). Optional `filters` contains definitions with a stable ID, label, catalogue field, control type, optional `presentation` (validated against the control type), tab/report scope and explicit `{ tileId, field }` bindings. A filter value or default carries `values`, `min`/`max`, or a date `preset` token, never a preset and a literal range together. A canvas tile of kind `filter` references a definition through `filterId`.
 
 `src/app/tabs.ts` projects the active tab and merges edits without discarding other tabs. `src/app/filters.ts` resolves runtime values and validates catalogue reachability and scope. The save endpoint validates the whole document. Reference schemas and catalogue matching live in `src/reference/blueprint.ts`; the bounded vision/PDF request lives in `src/reference/analyze.ts`.
 

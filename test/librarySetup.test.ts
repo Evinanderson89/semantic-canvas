@@ -12,7 +12,7 @@ beforeEach(() => openStore(":memory:")); afterEach(closeStore);
 const sample = async () => (await duckglueAdapter.load("sample-data/warehouse.yaml"))!;
 it("files existing work without changing content, creates validated starters, and opens copies without overwriting templates", async () => {
   const model = await sample(), starters = libraryStarters(model);
-  expect(starters).toHaveLength(9);
+  expect(starters).toHaveLength(10);
   const spec = { ...starters[0].spec, title: "My monthly report" };
   await saveDashboard({ id: "mine", spec }, scope);
   await saveLibraryFolder({ id: "custom", name: "Already organized" }, scope);

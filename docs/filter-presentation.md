@@ -1,6 +1,6 @@
 # Filter presentation
 
-Status: **phase 1 in progress**. Companion to [references, tabs and connected filters](reference-tabs-filters.md).
+Status: **phase 1 done** (`presentation`, chips, segmented, date presets, the designer choice, the Filter styles starter, tests); phase 2 not started. Companion to [references, tabs and connected filters](reference-tabs-filters.md).
 
 ## The idea
 
@@ -48,5 +48,5 @@ An action is a named bundle of filter values, rendered as a button: "EMEA enterp
 
 ## Phases
 
-1. `presentation` field, chips, segmented, date presets, the designer choice, a starter dashboard showing each, tests.
+1. Done: `presentation` field, chips, segmented, date presets, the designer choice, a starter dashboard showing each, tests.
 2. Checklist, search, period, slider, threshold, and dashboard actions.

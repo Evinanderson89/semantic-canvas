@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 export async function openStarter(page: Page, name: string) {
-  const folder = name === "SaaS overview" ? "Company overview" : name === "MRR movements" ? "Revenue & retention" : name === "Dashboard cleanup demo" ? "Examples" : "Growth & customers";
+  const folder = name === "SaaS overview" ? "Company overview" : name === "MRR movements" ? "Revenue & retention" : name === "Dashboard cleanup demo" ? "Examples" : name === "Filter styles" ? "Shared views" : "Growth & customers";
   const expand = page.getByRole("button", { name: `Expand folder ${folder}`, exact: true });
   await expect(page.getByRole("button", { name: "CoreCanvas Library", exact: true })).toBeVisible();
   await expect(page.locator(".library-folder-open").filter({ hasText: folder })).toBeVisible();

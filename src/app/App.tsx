@@ -43,7 +43,7 @@ import type { FilterValue } from "../compiler/spec.ts";
 import { DistributeDialog } from "./DistributeDialog.tsx";
 import { ReferenceImport } from "./ReferenceImport.tsx";
 import { TabStrip } from "./TabStrip.tsx";
-import { FilterControl, FilterDesigner } from "./FilterControls.tsx";
+import { FilterControl, FilterDesigner, filterTileSize } from "./FilterControls.tsx";
 import { linkedSource, parseLink, stripLink } from "./link.ts";
 
 const GRAINS = ["day", "week", "month", "quarter", "year"];
@@ -824,10 +824,10 @@ export function App() {
         const owner = currentTab(book, activeTabId).id;
         const kept = book.tiles.filter(t => t.filterId !== f.id || f.scope === "report" || (t.tabId ?? tabsOf(book)[0].id) === owner).map(t => t.filterId === f.id ? { ...t, title: f.label } : t);
         const existing = kept.some(t => t.filterId === f.id);
-        const at = dropPoint(360, 150);
-        const next = { ...book, filters: [...(book.filters ?? []).filter(x => x.id !== f.id), f], tiles: existing ? kept : [...kept, { id: nextId(), kind: "filter" as const, filterId: f.id, tabId: owner, title: f.label, metrics: [], dimensions: [], layout: { ...at, w: 360, h: 150 } }] };
+        const size = filterTileSize(f), at = { ...dropPoint(size.w, size.h), ...size };
+        const next = { ...book, filters: [...(book.filters ?? []).filter(x => x.id !== f.id), f], tiles: existing ? kept : [...kept, { id: nextId(), kind: "filter" as const, filterId: f.id, tabId: owner, title: f.label, metrics: [], dimensions: [], layout: at }] };
         const issues = validateDashboard(model, next); if (issues.length) { setNotice(issues[0].problem); return; }
-        commitBook(next); if (!existing) { growCanvasFor(at.y + 174); pendingReveal.current = { ...at, w: 360, h: 150 }; } setFilterEditing(null);
+        commitBook(next); if (!existing) { growCanvasFor(at.y + size.h + 24); pendingReveal.current = at; } setFilterEditing(null);
       }} />}
       {inspecting && (
         <Inspector model={model}

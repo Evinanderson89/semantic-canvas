@@ -2,6 +2,8 @@ import type { DashboardFilter, DashboardSpec, FilterSpec, FilterValue, TileSpec 
 import { fieldReachable, isTemporal, isNumeric, type Model } from "../semantic/model.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { tabOf, tabsOf } from "./tabs.ts";
+import { resolvePreset } from "./datePresets.ts";
+import { FILTER_PRESENTATIONS } from "../compiler/schema.ts";
 
 export function fieldKind(model: Model, field: string): DashboardFilter["control"] | null {
   const [table, column] = field.split(".");
@@ -12,11 +14,12 @@ export function suggestedBindings(spec: DashboardSpec, model: Model, field: stri
   return spec.tiles.filter(t => (t.kind ?? "metric") === "metric" && (scope === "report" || tabOf(spec, t) === tab)
     && fieldReachable(model, model.metrics[t.metrics[0]]?.baseTable ?? "", field)).map(t => ({ tileId: t.id, field }));
 }
-export const hasFilterValue = (v: FilterValue) => !!v.values?.length || v.min != null && v.min !== "" || v.max != null && v.max !== "";
-export function filtersForTile(spec: DashboardSpec, tile: TileSpec, values: Record<string, FilterValue>): FilterSpec[] {
+export const presentationOf = (f: Pick<DashboardFilter, "control" | "presentation">) => f.presentation ?? FILTER_PRESENTATIONS[f.control][0];
+export const hasFilterValue = (v: FilterValue) => !!v.preset || !!v.values?.length || v.min != null && v.min !== "" || v.max != null && v.max !== "";
+export function filtersForTile(spec: DashboardSpec, tile: TileSpec, values: Record<string, FilterValue>, now = new Date()): FilterSpec[] {
   return (spec.filters ?? []).flatMap(f => {
     const b = f.bindings.find(b => b.tileId === tile.id);
-    const v = values[f.id] ?? f.defaultValue ?? {};
+    const v = resolvePreset(values[f.id] ?? f.defaultValue ?? {}, now);
     if (!b || f.scope === "tab" && f.tabId !== tabOf(spec, tile) || !hasFilterValue(v)) return [];
     const range = f.control === "date" && typeof v.max === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v.max) && !Number.isNaN(Date.parse(v.max))
       ? { ...v, max: new Date(Date.parse(v.max) + 86400000).toISOString().slice(0, 10), maxExclusive: true } : v;
@@ -48,8 +51,10 @@ export function validateDashboard(model: Model, spec: DashboardSpec) {
       if (!t || (t.kind ?? "metric") !== "metric" || !fieldReachable(model, model.metrics[t.metrics[0]]?.baseTable ?? "", b.field)
         || fieldKind(model, b.field) !== f.control || f.scope === "tab" && tabOf(spec, t) !== f.tabId) issue(f.id, "Filter binding must match a reachable field on a chart in scope");
     }
+    if (f.presentation && !(FILTER_PRESENTATIONS[f.control] as readonly string[]).includes(f.presentation)) issue(f.id, "Filter presentation does not match its control");
     const v = f.defaultValue;
     if (v && (f.control === "select" ? v.min != null || v.max != null : !!v.values?.length)) issue(f.id, "Filter default does not match its control");
+    if (v?.preset && f.control !== "date") issue(f.id, "Only a date filter can default to a preset");
     if (v && f.control !== "select") for (const bound of [v.min, v.max]) {
       if (bound != null && (f.control === "number" ? typeof bound !== "number" || !Number.isFinite(bound) : typeof bound !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(bound) || Number.isNaN(Date.parse(bound)))) issue(f.id, "Filter default has an invalid range value");
     }

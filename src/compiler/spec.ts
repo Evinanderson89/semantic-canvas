@@ -101,16 +101,22 @@ export interface DashboardSpec {
   crossFilters?: FilterSpec[];
 }
 
+export type DatePreset = "last-7-days" | "last-30-days" | "last-90-days" | "this-month" | "this-quarter" | "year-to-date";
+export type FilterPresentation = "dropdown" | "chips" | "segmented" | "range" | "presets";
 export interface FilterValue {
   values?: (string | number | boolean | null)[];
   min?: number | string | null;
   max?: number | string | null;
+  /** Relative window, resolved in the viewer's calendar at query time. Never stored alongside min/max. */
+  preset?: DatePreset;
 }
 export interface DashboardFilter {
   id: string;
   label: string;
   field: string;
   control: "select" | "date" | "number";
+  /** How the control looks. Omitted means the control's default; it never changes the query. */
+  presentation?: FilterPresentation;
   scope: "tab" | "report";
   tabId?: string;
   bindings: { tileId: string; field: string }[];
