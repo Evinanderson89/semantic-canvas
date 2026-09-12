@@ -25,7 +25,9 @@ const tableSchema = z.object({
 const draftMetricSchema = z.object({ label: z.string().min(1).max(200), expression: z.string().min(1).max(4000), description: z.string().max(2000).optional() }).strict();
 const reviewFields = { time_grains: grains.optional(), time_dimension: z.string().max(200).optional(), direction: z.enum(["higher", "lower", "neutral"]).optional(), importance: z.number().min(0).max(100).optional() };
 const metricEntrySchema = draftMetricSchema.extend({ reviewed: z.boolean(), ...reviewFields }).strict();
-export const provenanceSchema = z.object({ source: z.string().min(1).max(200), loadedAt: z.string().datetime({ offset: true }), loadedBy: z.string().min(1).max(200), rows: z.number().int().nonnegative() }).strict();
+/** `refreshEvery`/`expectedBy` arrive when Ingest refreshes the table on a schedule: how often, and when the next load is due. */
+export const provenanceSchema = z.object({ source: z.string().min(1).max(200), loadedAt: z.string().datetime({ offset: true }), loadedBy: z.string().min(1).max(200), rows: z.number().int().nonnegative(),
+  refreshEvery: z.enum(["15m", "1h", "6h", "12h", "1d", "7d"]).optional(), expectedBy: z.string().datetime({ offset: true }).optional() }).strict();
 export const registerSchema = z.object({
   dataset: z.string().regex(DATASET, "dataset must be lowercase letters, digits and underscores, starting with a letter"),
   importId: z.string().min(1).max(200), table: tableSchema,
