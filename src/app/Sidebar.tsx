@@ -91,7 +91,8 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
                  onClick={() => onView("connections")} />
       </nav>
 
-      {library}
+      {/* The library tree is the flexible part of a short sidebar: it scrolls so the footer stays reachable. */}
+      <div className="sidebar-library">{library}</div>
       <div className="who">
         <button className="workspace-settings" onClick={onSettings}>
           <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="M3 6h14M3 14h14" /><circle cx="7" cy="6" r="2" fill="var(--panel)" /><circle cx="13" cy="14" r="2" fill="var(--panel)" /></svg>
