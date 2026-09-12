@@ -25,7 +25,7 @@ export interface Table {
   connected?: ConnectedInfo;
 }
 
-export interface ConnectedProvenance { source: string; loadedAt: string; loadedBy: string; rows: number }
+export interface ConnectedProvenance { source: string; loadedAt: string; loadedBy: string; rows: number; refreshEvery?: "15m" | "1h" | "6h" | "12h" | "1d" | "7d"; expectedBy?: string }
 export interface ConnectedInfo { status: "unreviewed" | "published"; provenance: ConnectedProvenance; loadedAt: string }
 /** Lineage columns Ingest stamps on every connected table; declared, never proposed as dimensions. */
 export const LINEAGE_COLUMNS: Column[] = [
