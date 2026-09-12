@@ -68,6 +68,8 @@ export function SessionBoundary({ children }: { children: ReactNode }) {
     const timer = window.setTimeout(() => {
       window.addEventListener("message", onMessage);
       frame = document.createElement("iframe"); frame.hidden = true; frame.setAttribute("aria-hidden", "true");
+      // The portal's landing page answers the frame's own origin, read from the referrer. This page sends no referrer by default (Referrer-Policy: no-referrer), so the frame states its origin explicitly; without it the portal would have nowhere to post and Canvas would only notice at the fallback below.
+      frame.referrerPolicy = "strict-origin";
       frame.src = `${portal.origin}/auth/refresh?next=${encodeURIComponent("/auth/renewed")}`;
       document.body.appendChild(frame);
       // If the portal never answers, fall back to re-reading the session at expiry so the sign-in screen appears promptly rather than after a failed request.
@@ -89,5 +91,7 @@ export async function signOut() {
   const response = await fetch("/api/auth/logout", { method: "POST" });
   if (!response.ok) { alert("Could not sign out. Reload and try again."); return; }
   for (const key of Object.keys(sessionStorage)) if (key.startsWith("sc:team:")) sessionStorage.removeItem(key);
-  location.reload();
+  // Behind Gateway the portal finishes the sign-out (it holds the refresh cookie); standalone team mode is done here.
+  const { redirect } = await response.json().catch(() => ({ redirect: undefined }));
+  if (typeof redirect === "string" && /^https?:\/\//.test(redirect)) location.assign(redirect); else location.reload();
 }
