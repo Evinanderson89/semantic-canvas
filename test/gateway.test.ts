@@ -81,6 +81,8 @@ it('reads the signed data policy the gateway adds, ignores a forged or foreign o
  expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':forged,'x-gateway-policy-sig':good.sig}})).json()).policy).toBeUndefined();
  const foreign=sign({v:1,sub:'someone-else',app:'semantic-canvas',iat:now,exp:now+120,rules});
  expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':foreign.body,'x-gateway-policy-sig':foreign.sig}})).json()).policy).toBeUndefined();
+ const otherApp=sign({v:1,sub:'casey',app:'ingest',iat:now,exp:now+120,rules});
+ expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':otherApp.body,'x-gateway-policy-sig':otherApp.sig}})).json()).policy).toBeUndefined();
  const expired=sign({v:1,sub:'casey',app:'semantic-canvas',iat:now-300,exp:now-100,rules});
  expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':expired.body,'x-gateway-policy-sig':expired.sig}})).json()).policy).toBeUndefined();
  expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`}})).json()).policy).toBeUndefined();

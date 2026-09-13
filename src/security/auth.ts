@@ -25,17 +25,22 @@ interface Session { identity: Identity; csrf: string; expires: number }
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
 export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string; scopes: string; sessionSeconds: number; access?: AccessConfig;
   /** Shared with the gateway's control API; verifies the data policy it signs onto each request (gateway-platform/docs/policy.md). Absent: policies are not read. */
-  policySecret?: string }
+  policySecret?: string;
+  /** This app's slug at the gateway (the first label of its public host, `semantic-canvas` at semantic-canvas.apps.example.com); a data policy signed for another app is not ours. */
+  appSlug?: string }
 /** A row-level rule the gateway delivered for this request. */
 export interface GatewayPolicyRule { field: string; mode: "only" | "not"; values: string[] }
 
 /**
  * The gateway's x-gateway-policy header (base64url JSON) and its HMAC-SHA256
  * signature, as produced by gateway-platform's control API. Returns the rules
- * only when the signature verifies, the policy is for this subject, and it
- * has not expired; anything else is no policy at all, never a partial one.
+ * only when the signature verifies, the policy is for this subject and this
+ * app, and it has not expired; anything else is no policy at all, never a
+ * partial one. A policy signed for another app carries that app's rules, not
+ * ours, so it counts as none (`app` is left undefined only by callers that
+ * have no slug, such as older tests).
  */
-export function readGatewayPolicy(body: string | undefined, sig: string | undefined, secret: string, sub: string, now = Date.now()): GatewayPolicyRule[] | null {
+export function readGatewayPolicy(body: string | undefined, sig: string | undefined, secret: string, sub: string, now = Date.now(), app?: string): GatewayPolicyRule[] | null {
   if (!body || !sig) return null;
   const want = createHmac("sha256", secret).update(body).digest();
   let got: Buffer;
@@ -44,6 +49,7 @@ export function readGatewayPolicy(body: string | undefined, sig: string | undefi
   let payload: any;
   try { payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")); } catch { return null; }
   if (payload?.v !== 1 || payload.sub !== sub || typeof payload.exp !== "number" || payload.exp * 1000 < now || !Array.isArray(payload.rules)) return null;
+  if (app !== undefined && payload.app !== app) return null;
   const rules: GatewayPolicyRule[] = [];
   for (const r of payload.rules) {
     if (!r || typeof r.field !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$/.test(r.field) || (r.mode !== "only" && r.mode !== "not") || !Array.isArray(r.values) || r.values.some((v: unknown) => typeof v !== "string")) return null;
@@ -77,6 +83,7 @@ export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
     if ([url, issuer, portal, jwks].some(u => !["http:", "https:"].includes(u.protocol) || u.username || u.password || u.search || u.hash) || url.pathname !== "/" || portal.pathname !== "/") throw new Error("Use valid Gateway origins and identity provider URLs");
     return { ...config, publicUrl: url.origin, issuer: env.SC_OIDC_ISSUER, clientId: env.SC_OIDC_CLIENT_ID, jwksUri: jwks.href, portalUrl: portal.origin,
       policySecret: env.SC_GATEWAY_POLICY_SECRET?.trim() || undefined,
+      appSlug: env.SC_GATEWAY_APP?.trim() || url.hostname.split(".")[0],
       access: accessSchema.parse(YAML.parse(await readFile(env.SC_ACCESS_PATH!, "utf8"))) };
   }
   for (const key of ["SC_PUBLIC_URL", "SC_OIDC_ISSUER", "SC_OIDC_CLIENT_ID", "SC_OIDC_CLIENT_SECRET", "SC_ACCESS_PATH"]) if (!env[key]) throw new Error(`${key} is required in team mode`);
@@ -135,7 +142,7 @@ export class CompanyAuth {
           let identity = mapIdentity(payload, this.config.issuer!, this.config.access!);
           if (identity && this.config.policySecret) {
             // The gateway strips these from clients and only ext_authz adds them; the signature makes that trust explicit here.
-            const rules = readGatewayPolicy(req.header("x-gateway-policy"), req.header("x-gateway-policy-sig"), this.config.policySecret, String(payload.sub));
+            const rules = readGatewayPolicy(req.header("x-gateway-policy"), req.header("x-gateway-policy-sig"), this.config.policySecret, String(payload.sub), Date.now(), this.config.appSlug ?? new URL(this.config.publicUrl!).hostname.split(".")[0]);
             if (rules) identity = { ...identity, policy: rules };
           }
           if (identity) {

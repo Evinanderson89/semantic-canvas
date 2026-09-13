@@ -205,6 +205,9 @@ it("lets editors register and disconnect ingested tables, admins publish them, a
   expect((await register(editor, { ...registration, dataset: "fct_events" })).status).toBe(409);
   expect((await register(editor, { ...registration, unexpected: 1 })).status).toBe(400);
   const registered = await register(editor); expect(registered.status, await registered.clone().text()).toBe(200);
+  // A metric Ingest declared with its dataset is not removable here; the answer says where it is.
+  const ingestMetric = await call("/api/sources/public/metrics/ingest_orders_rows", { method: "DELETE", headers: headers(admin) });
+  expect(ingestMetric.status).toBe(404); expect((await ingestMetric.json()).error).toContain("declared by Ingest");
   const summary = await registered.json(); expect(summary).toMatchObject({ status: "unreviewed", registeredBy: editor.user.id, table: { connected: { status: "unreviewed" } } });
   expect(summary.table.columns.map((c: any) => c.name)).toContain("_import_id");
   expect(YAML.parse(await readFile(join(root, "data", "models", "connected", "public.yaml"), "utf8")).tables.ingest_orders.status).toBe("unreviewed");
@@ -316,6 +319,9 @@ it("Modeler, extend: proposes only what a source's model lacks, publishes it as 
   draft.proposal.tables.find((t: any) => t.name === "fct_web_sessions").reportingLag = 3;
   const gap = draft.proposal.metrics.find((m: any) => m.status === "gap"); gap.include = true;
   expect((await call("/api/modeler/drafts/lake-more", { method: "PUT", headers: headers(admin), body: JSON.stringify({ proposal: draft.proposal }) })).status).toBe(200);
+  // "View as YAML" on an extension draft shows the extension file that publish writes, not a whole model.
+  const yaml = await (await call("/api/modeler/drafts/lake-more/yaml", { headers: headers(admin) })).text();
+  expect(yaml).toContain("this file is merged over it"); expect(yaml).toContain("patches:"); expect(yaml).toContain("fct_web_sessions:\n    reporting_lag: 3"); expect(yaml).not.toContain("model:\n");
   const published = await call("/api/modeler/drafts/lake-more/publish", { method: "POST", headers: headers(admin) });
   expect(published.status, await published.clone().text()).toBe(200);
   const result = await published.json();
@@ -364,7 +370,8 @@ it("Proposed metrics: an editor proposes an aggregate, charts it at once, viewer
   expect((await q(viewer)).status).toBe(200);
   // Once published, the proposer can no longer withdraw it; an admin can remove it; base-model metrics are not removable here.
   expect((await call(`/api/sources/${from}/metrics/long_sessions`, { method: "DELETE", headers: headers(editor) })).status).toBe(403);
-  expect((await call(`/api/sources/${from}/metrics/active_users`, { method: "DELETE", headers: headers(admin) })).status).toBe(404);
+  const baseMetric = await call(`/api/sources/${from}/metrics/active_users`, { method: "DELETE", headers: headers(admin) });
+  expect(baseMetric.status).toBe(404); expect((await baseMetric.json()).error).toContain("comes from the base model");
   expect((await call(`/api/sources/${from}/metrics/long_sessions`, { method: "DELETE", headers: headers(admin) })).status).toBe(200);
   expect((await (await call("/api/model", { headers: headers(editor) })).json()).metrics.long_sessions).toBeUndefined();
   // A withdrawal by the proposer, while unreviewed.
