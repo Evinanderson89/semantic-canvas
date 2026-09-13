@@ -44,7 +44,7 @@ export const expand = (v: string) =>
   v.replace(/^~(?=\/)/, homedir())
    .replace(/\$\{(\w+)\}/g, (_, k) => process.env[k] ?? "");
 
-async function connect(c: Record<string, any>): Promise<Connector> {
+export async function connectConnector(c: Record<string, any>): Promise<Connector> {
   const type = String(c.type ?? "duckdb");
   if (type === "duckdb")
     return pooledDuckdb(expand(String(c.lakeRoot ?? "")), {
@@ -79,7 +79,7 @@ export async function connectOne(s: SourceConfig): Promise<Source> {
     if (!loaded) throw new Error(`adapter "${s.adapter}" did not recognise ${s.model}`);
     // Tables Ingest registered sit in a per-source overlay, never in the base model file.
     const model = mergeOverlay(loaded, await readOverlay(s.id), s.id);
-    const conn = await connect(s.connector);
+    const conn = await connectConnector(s.connector);
     return { ...base, status: "ready", model, conn,
              connectMs: Math.round(performance.now() - t0) };
   } catch (e: any) {

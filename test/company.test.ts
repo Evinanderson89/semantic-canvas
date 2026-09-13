@@ -249,3 +249,33 @@ it("provisions the first source from an empty registry and keeps its uploaded mo
   expect(concurrent.map(r => r.status)).toEqual([200, 200]);
   expect(YAML.parse(await readFile(join(root, "sources.yaml"), "utf8")).sources.map((s: any) => s.id)).toEqual(["first-source", "second-source", "third-source"]);
 });
+it("Modeler: an admin proposes a model from a source's warehouse, reviews it, and publishes it as a new source; editors are refused", async () => {
+  const admin = await login("modeler-admin", ["admins"]), editor = await login("modeler-editor", ["editors"]);
+  expect((await call("/api/modeler/drafts", { headers: headers(editor) })).status).toBe(403);
+  // The previous case re-provisioned the registry; read from whichever source is ready now.
+  const from = (await (await call("/api/sources", { headers: headers(admin) })).json()).active as string;
+  const created = await call("/api/modeler/drafts", { method: "POST", headers: headers(admin), body: JSON.stringify({ id: "lake-model", label: "Lake, modelled", fromSource: from }) });
+  expect(created.status, await created.clone().text()).toBe(200);
+  const draft = await created.json();
+  expect(draft.proposal.tables.map((t: any) => t.name)).toEqual(expect.arrayContaining(["dim_users", "fct_web_sessions"]));
+  expect(draft.proposal.joins.some((j: any) => j.left === "fct_web_sessions" && j.right === "dim_users" && j.resolution > 0.99)).toBe(true);
+  expect(draft.connector).toBeUndefined(); expect(draft.fromSource).toBe(from);
+  const list = await (await call("/api/modeler/drafts", { headers: headers(admin) })).json();
+  expect(list.drafts[0]).toMatchObject({ id: "lake-model", publishedAt: null, fromSource: from });
+  expect(list.drafts[0].proposal).toBeUndefined();
+  // Review: every table gets a grain, the yaml reflects it.
+  for (const t of draft.proposal.tables) if (!t.grain) t.grain = "one row per event";
+  const saved = await call("/api/modeler/drafts/lake-model", { method: "PUT", headers: headers(admin), body: JSON.stringify({ proposal: draft.proposal }) });
+  expect(saved.status, await saved.clone().text()).toBe(200); expect((await saved.json()).issues).toEqual([]);
+  const yaml = await (await call("/api/modeler/drafts/lake-model/yaml", { headers: headers(admin) })).text();
+  expect(yaml).toContain("dim_users:"); expect(yaml).toContain("base_table: fct_web_sessions");
+  const published = await call("/api/modeler/drafts/lake-model/publish", { method: "POST", headers: headers(admin) });
+  expect(published.status, await published.clone().text()).toBe(200);
+  const result = await published.json();
+  expect(result.source).toMatchObject({ id: "lake-model", status: "ready", adapter: "duckglue" });
+  expect(result.path).toContain(join(root, "data", "models", "authored", "lake-model.yaml"));
+  expect(await readFile(join(root, "sources.yaml"), "utf8")).toContain("id: lake-model");
+  const model = await (await call("/api/model", { headers: { ...headers(admin), "x-sc-source": "lake-model" } })).json();
+  expect(Object.keys(model.tables)).toEqual(expect.arrayContaining(["dim_users", "fct_web_sessions"]));
+  expect((await call("/api/modeler/drafts/lake-model/publish", { method: "POST", headers: headers(editor) })).status).toBe(403);
+});

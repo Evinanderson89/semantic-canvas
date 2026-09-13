@@ -1296,3 +1296,17 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .review-scope-list li.off::before{background:var(--line-2);border:1px solid var(--ink-3)}
 .review-scope-list li.off{color:var(--ink-3)}
 .review-scope-list .link{padding:0;font-size:inherit}
+
+/* Modeler (docs/modeler.md) */
+.modeler-row{width:100%;text-align:left;cursor:pointer;border:1px solid var(--line);font:inherit;color:inherit}
+.modeler-row:hover{background:var(--surface-2)}
+.modeler-title{font:inherit;letter-spacing:inherit;border:0;background:transparent;color:inherit;width:100%;padding:0;border-bottom:1px dashed var(--line)}
+.modeler-warnings ul{margin:6px 0 0;padding-left:18px;font-size:12.5px;line-height:1.6;color:var(--ink-2)}
+.modeler .tbl-card>summary input[type=checkbox]{margin:0 2px 0 0}
+.modeler .join input[type=checkbox]{margin:0 6px 0 0}
+.modeler .join.dim,.modeler tr.dim{opacity:.45}
+.modeler-evidence{margin-left:10px;color:var(--ink-3);font-size:11px;font-family:inherit;flex:1;min-width:0}
+.modeler .join i.warn{color:#9a6b00}
+.modeler-metrics td input{width:100%;font-size:12px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;background:var(--surface);color:inherit;min-width:90px}
+.modeler-metrics td{vertical-align:middle;padding:4px 6px}
+.modeler .cform-grid{margin:8px 0 14px}
