@@ -5,7 +5,10 @@ import { duckglueAdapter } from "../src/semantic/duckglue.ts";
 import { duckdbConnector } from "../src/connectors/duckdb.ts";
 import { bucketEnd } from "../src/suggest/dataHonesty.ts";
 import type { Connector } from "../src/connectors/types.ts";
-import type { Model } from "../src/semantic/model.ts";
+import { calendarOf, todayOf, type Model } from "../src/semantic/model.ts";
+
+// The sample model declares a calendar of its own (a pinned today); tests that want another calendar replace it.
+const withCalendar = (calendar: string) => readFileSync("sample-data/warehouse.yaml", "utf8").replace(/\n  calendar:\n    today: "[^"]+"\n/, "\n").replace("model:\n", `model:\n  calendar: ${calendar}\n`);
 import { conn, model as base, tile } from "./fixtures.ts";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -57,7 +60,7 @@ describe("calendar on the sample lake", () => {
     c = await duckdbConnector("sample-data/lake");
     mondays = (await duckglueAdapter.load("sample-data/warehouse.yaml"))!;
     const dir = mkdtempSync(join(tmpdir(), "sc-cal-"));
-    writeFileSync(join(dir, "w.yaml"), readFileSync("sample-data/warehouse.yaml", "utf8").replace("model:\n", "model:\n  calendar: { week_start: sunday }\n"));
+    writeFileSync(join(dir, "w.yaml"), withCalendar("{ week_start: sunday }"));
     sundays = (await duckglueAdapter.load(join(dir, "w.yaml")))!;
     expect(sundays.calendar).toEqual({ weekStart: "sunday", fiscalYearStartMonth: 1 });
   });
@@ -75,7 +78,23 @@ describe("calendar on the sample lake", () => {
   });
   it("refuses a time zone that is not one", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sc-cal-bad-"));
-    writeFileSync(join(dir, "w.yaml"), readFileSync("sample-data/warehouse.yaml", "utf8").replace("model:\n", "model:\n  calendar: { timezone: Mars/Olympus }\n"));
+    writeFileSync(join(dir, "w.yaml"), withCalendar("{ timezone: Mars/Olympus }"));
     await expect(duckglueAdapter.load(join(dir, "w.yaml"))).rejects.toThrow(/not an IANA time zone/);
+  });
+  it("pins today for a dataset that stops on a known date, and refuses a today that is not a date", async () => {
+    // The sample lake ends on 31 August 2026 and its model says so; every clock read that decides a period follows it.
+    const sample = (await duckglueAdapter.load("sample-data/warehouse.yaml"))!;
+    expect(sample.calendar?.today).toBe("2026-08-31");
+    expect(todayOf(sample).toISOString()).toBe("2026-08-31T12:00:00.000Z");
+    expect(JSON.stringify(resolvePreset({ preset: "last-7-days" } as any, todayOf(sample), calendarOf(sample)))).toContain("2026-08-31"); // the preset ends on the pinned day, not on the wall clock
+    // Without one, today is now.
+    const now = new Date("2030-01-02T03:04:05Z");
+    expect(todayOf({ calendar: { weekStart: "monday", fiscalYearStartMonth: 1 } }, now)).toBe(now);
+    expect(todayOf(null, now)).toBe(now);
+    const dir = mkdtempSync(join(tmpdir(), "sc-cal-today-"));
+    writeFileSync(join(dir, "w.yaml"), withCalendar("{ today: 2026-08-31 }")); // a bare YAML date reads the same as the quoted one
+    expect((await duckglueAdapter.load(join(dir, "w.yaml")))!.calendar?.today).toBe("2026-08-31");
+    writeFileSync(join(dir, "bad.yaml"), withCalendar("{ today: yesterday }"));
+    await expect(duckglueAdapter.load(join(dir, "bad.yaml"))).rejects.toThrow(/model.calendar.today: a date, YYYY-MM-DD/);
   });
 });

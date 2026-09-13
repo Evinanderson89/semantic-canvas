@@ -1,6 +1,6 @@
 # The calendar
 
-Status: **built**: week start, fiscal year start, time zone.
+Status: **built**: week start, fiscal year start, time zone, and a pinned today for sample data.
 
 ## Why
 
@@ -13,7 +13,12 @@ model:
     week_start: sunday            # monday (default) or sunday
     fiscal_year_start_month: 2    # 1 (default) to 12
     timezone: America/New_York    # an IANA zone; absent means timestamps are read as they are
+    today: "2026-08-31"           # sample and demo models only: the clock stops here
 ```
+
+### A pinned today
+
+A dataset that stops on a known date, such as the sample lake, drifts against the wall clock: the week after it was made, "last 7 days" is empty and every chart is stale. `calendar.today` pins the model's clock. Date presets, the data-honesty review (partial, stale, lagging and future rows), the fixes it offers and the watches that run on the model all read today from there, so the same charts say the same thing on any day. Never set it on a real warehouse: a pinned today would hide that its data has stopped, which is exactly what the review exists to say. The sample warehouse pins 31 August 2026 and the messy lake 13 September 2026.
 
 ## What follows it
 

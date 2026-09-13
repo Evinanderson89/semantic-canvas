@@ -7,7 +7,10 @@ const spec = (): DashboardSpec => ({ title: `Filter styles ${crypto.randomUUID()
   { id: "k", title: "Active users", metrics: ["active_users"], dimensions: [], chart: "kpi", layout: { x: 800, y: 190, w: 180, h: 150 } },
 ] });
 const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const daysFromToday = (n: number) => { const d = new Date(); return iso(new Date(d.getFullYear(), d.getMonth(), d.getDate() + n)); };
+// The sample model pins its calendar's today (docs/calendar.md), so presets end there, not on the wall clock.
+let today = new Date();
+test.beforeEach(async ({ request }) => { const m = await (await request.get("/api/model")).json(); today = m.calendar?.today ? new Date(`${m.calendar.today}T12:00:00`) : new Date(); });
+const daysFromToday = (n: number) => { const d = today; return iso(new Date(d.getFullYear(), d.getMonth(), d.getDate() + n)); };
 async function open(page: Page, d: DashboardSpec) {
   const id = crypto.randomUUID();
   const saved = await page.request.post("/api/dashboards", { data: { id, spec: d, canvas: { ...DEFAULT_CANVAS, width: 1000, height: 850 }, revision: 0 } }); expect(saved.ok()).toBe(true);

@@ -100,9 +100,13 @@ export interface Join {
  * read in. One declaration; the compiler, the edge-completeness flags, the
  * date presets and the honesty rules all follow it.
  */
-export interface Calendar { weekStart: "monday" | "sunday"; fiscalYearStartMonth: number; timezone?: string }
+export interface Calendar { weekStart: "monday" | "sunday"; fiscalYearStartMonth: number; timezone?: string;
+  /** A fixed "today" (YYYY-MM-DD) for a dataset that stops on a known date: presets, the data-honesty review and watches read the clock from it instead of the wall. For sample and demo models only. */
+  today?: string }
 export const DEFAULT_CALENDAR: Calendar = { weekStart: "monday", fiscalYearStartMonth: 1 };
 export const calendarOf = (model: Pick<Model, "calendar"> | null | undefined): Calendar => model?.calendar ?? DEFAULT_CALENDAR;
+/** The model's idea of today: the pinned date at noon UTC when the calendar declares one, else now. Every clock read that decides a period goes through here. */
+export const todayOf = (model: Pick<Model, "calendar"> | null | undefined, now = new Date()): Date => model?.calendar?.today ? new Date(`${model.calendar.today}T12:00:00Z`) : now;
 
 export interface Model {
   /** Which adapter produced this, for provenance in the UI. */

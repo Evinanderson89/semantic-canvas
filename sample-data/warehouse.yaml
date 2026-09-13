@@ -16,6 +16,9 @@ model:
     consumer apps and content sites. Grain-per-table is documented below.
     Use it to explore metrics, cohorts, funnels and subscription revenue.
   default_date_column: event_date
+  # The lake stops on 31 August 2026; the sample's clock stops with it, so the same charts say the same thing every day (docs/calendar.md).
+  calendar:
+    today: "2026-08-31"
 
 tables:
 
