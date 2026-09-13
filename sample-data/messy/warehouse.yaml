@@ -1,0 +1,57 @@
+# The model someone wrote for the messy warehouse a while ago, and never
+# updated (docs/messy-lake.md). It is wrong in the ways models get wrong:
+# a column was renamed underneath it (order_total is now amount), three
+# tables were added after it was written, and the join it does declare
+# resolves for only nine orders in ten.
+model:
+  name: messy_shop
+  description: An online shop's warehouse as it actually is.
+
+tables:
+  dim_customers:
+    description: One row per customer account.
+    grain: one row per customer_id
+    synonyms: [customers, accounts]
+    partition_keys: []
+    primary_key: customer_id
+    columns:
+      - {name: customer_id, type: string}
+      - {name: country, type: string, description: "ISO country. In theory."}
+      - {name: signup_date, type: string}
+      - {name: email, type: string}
+      - {name: full_name, type: string}
+      - {name: region_id, type: integer}
+      - {name: plan, type: string}
+
+  fct_orders:
+    description: One row per order.
+    grain: one row per order_id
+    synonyms: [orders, sales]
+    partition_keys: [ordered_at]
+    primary_key: order_id
+    columns:
+      - {name: order_id, type: string}
+      - {name: customer_id, type: string}
+      - {name: ordered_at, type: timestamp}
+      - {name: order_total, type: double, description: "Order value in USD."}
+      - {name: status, type: string}
+      - {name: channel, type: string}
+      - {name: items, type: integer}
+
+joins:
+  - {left: fct_orders, left_on: customer_id, right: dim_customers, right_on: customer_id, type: left}
+
+metrics:
+  orders:
+    label: Orders
+    base_table: fct_orders
+    expression: COUNT(*)
+  revenue:
+    label: Revenue (USD)
+    base_table: fct_orders
+    expression: SUM(fct_orders.order_total)
+    description: Sum of order values.
+  customers:
+    label: Customers
+    base_table: dim_customers
+    expression: COUNT(*)

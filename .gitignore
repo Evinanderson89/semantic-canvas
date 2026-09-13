@@ -13,3 +13,6 @@ deploy/access.yaml
 deploy/policies.yaml
 backups/
 coverage/
+sample-data/messy/lake/
+sample-data/messy/messy-orders.csv
+sample-data/messy/README.md
