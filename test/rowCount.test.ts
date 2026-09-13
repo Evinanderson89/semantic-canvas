@@ -25,6 +25,9 @@ describe("row count", () => {
     expect(metricOf(model, "nope")).toBeUndefined();
     expect(isRowCount("rows:fct_sales")).toBe(true);
     expect(isRowCount("revenue")).toBe(false);
+    // A heading tile has no metrics: metrics[0] is undefined and reads as "no metric".
+    expect(metricOf(model, undefined)).toBeUndefined();
+    expect(isRowCount(undefined)).toBe(false);
   });
 
   it("validates and compiles like any simple metric, grouped by the dimension picked first", () => {

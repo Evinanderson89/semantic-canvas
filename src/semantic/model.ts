@@ -138,7 +138,7 @@ export interface SemanticAdapter {
  */
 export const ROW_COUNT_PREFIX = "rows:";
 export const rowCountName = (table: string) => `${ROW_COUNT_PREFIX}${table}`;
-export const isRowCount = (name: string) => name.startsWith(ROW_COUNT_PREFIX);
+export const isRowCount = (name: string | undefined) => typeof name === "string" && name.startsWith(ROW_COUNT_PREFIX);
 export function rowCountMetric(model: Pick<Model, "tables">, table: string): Metric | undefined {
   const t = model.tables[table];
   if (!t) return undefined;
@@ -148,7 +148,9 @@ export function rowCountMetric(model: Pick<Model, "tables">, table: string): Met
 }
 /** A metric by name: declared in the model, or the built-in row count of a table. Every lookup of a tile's metric goes through here.
  *  Typed like the map index it replaces (`model.metrics[name]`): callers that already check for absence keep doing so with `?.`. */
-export function metricOf(model: Pick<Model, "tables" | "metrics">, name: string): Metric {
+export function metricOf(model: Pick<Model, "tables" | "metrics">, name: string | undefined): Metric {
+  // A heading or text tile has no metrics; `metrics[0]` is undefined there and must read as "no metric", not throw.
+  if (name == null) return undefined as unknown as Metric;
   return (model.metrics[name] ?? (isRowCount(name) ? rowCountMetric(model, name.slice(ROW_COUNT_PREFIX.length)) : undefined)) as Metric;
 }
 
