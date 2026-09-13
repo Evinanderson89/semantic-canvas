@@ -82,6 +82,7 @@ export async function snowflakeConnector(
     // Snowflake spells this the same as DuckDB, but the unit must be unquoted.
     dateTrunc: (grain, expr) => `DATE_TRUNC(${grain}, ${expr})`,
     dateAdd: (unit, expr, n) => `DATEADD(${unit}, ${n}, ${expr})`,
+    toTimezone: (expr, timezone) => `CONVERT_TIMEZONE('UTC', '${timezone.replace(/'/g, "''")}', ${expr})`,
     relation: (table, physical) => physical ? [physical.database ?? cfg.database, physical.schema ?? cfg.schema, physical.table].filter(Boolean).map(quote).join(".") : qualify(table),
 
     async execute(sql: string, limit = 5000): Promise<QueryResult> {

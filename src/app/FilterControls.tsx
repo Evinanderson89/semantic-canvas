@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { DashboardFilter, DashboardSpec, FilterPresentation, FilterValue } from "../compiler/spec.ts";
 import { FILTER_PRESENTATIONS } from "../compiler/schema.ts";
-import { fieldReachable, prettifyModelName, type Model } from "../semantic/model.ts";
+import { calendarOf, fieldReachable, prettifyModelName, type Model } from "../semantic/model.ts";
 import { fieldKind, hasFilterValue, presentationOf, suggestedBindings } from "./filters.ts";
 import { PRESETS, PRESET_IDS, resolvePreset } from "./datePresets.ts";
 import { tabOf, tabsOf } from "./tabs.ts";
@@ -79,7 +79,7 @@ export function FilterControl({ filter, value, onChange, spec, model, queryConte
     <button className="link" onClick={() => onChange({})}>Clear selection</button>
   </section><footer><span className="spacer" /><button className="primary" onClick={() => setChoosing(false)}>Done</button></footer></StudioDialog>;
   const range = <div className="filter-range">{(["min", "max"] as const).map((key, i) => <label key={key}><span>{i ? "To" : "From"}</span><input aria-label={`${filter.label} ${i ? "to" : "from"}`} type={filter.control === "date" ? "date" : "number"} value={value[key] ?? ""} onChange={e => onChange({ ...value, preset: undefined, [key]: e.target.value === "" ? undefined : filter.control === "number" ? Number(e.target.value) : e.target.value })} /></label>)}</div>;
-  const resolved = value.preset ? resolvePreset(value) : null, customOpen = !value.preset && (custom || hasFilterValue(value));
+  const resolved = value.preset ? resolvePreset(value, new Date(), calendarOf(model)) : null, customOpen = !value.preset && (custom || hasFilterValue(value));
   const body = presentation === "dropdown" ? <><button className="studio-trigger" aria-label={`Choose ${filter.label}`} onClick={() => setChoosing(true)}><span className="filter-selection">{label}</span><span>⌄</span></button>{picker}</>
     : presentation === "chips" || presentation === "segmented" ? <div className="filter-pills-wrap">
       {loading && !options.length && <p role="status" className="muted">Loading values…</p>}{error && <p role="alert">{error}</p>}

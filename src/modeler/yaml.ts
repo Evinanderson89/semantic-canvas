@@ -24,7 +24,7 @@ export function proposalToYaml(p: Proposal): string {
     };
   }
   const joins = p.joins.filter((j) => j.include && included.has(j.left) && included.has(j.right))
-    .map((j) => ({ left: j.left, left_on: j.leftOn, right: j.right, right_on: j.rightOn, type: j.type }));
+    .map((j) => ({ left: j.left, left_on: j.leftOn, right: j.right, right_on: j.rightOn, type: j.type, cardinality: "many_to_one" }));
   const metrics: Record<string, unknown> = {};
   for (const m of p.metrics) {
     if (!m.include || !included.has(m.baseTable)) continue;
@@ -56,7 +56,7 @@ export function proposalToExtension(p: Proposal, origin?: { by: string; at: stri
   const patches: Record<string, unknown> = {};
   for (const t of p.tables) if (t.status === "existing" && t.reportingLag !== undefined && t.reportingLag !== null) patches[t.name] = { reporting_lag: t.reportingLag };
   const joins = p.joins.filter((j) => j.include && j.status !== "existing" && present.has(j.left) && present.has(j.right))
-    .map((j) => ({ left: j.left, left_on: j.leftOn, right: j.right, right_on: j.rightOn, type: j.type }));
+    .map((j) => ({ left: j.left, left_on: j.leftOn, right: j.right, right_on: j.rightOn, type: j.type, cardinality: "many_to_one" }));
   const metrics: Record<string, unknown> = {};
   for (const m of p.metrics) if (m.include && present.has(m.baseTable)) metrics[m.name] = { label: m.label, base_table: m.baseTable, expression: m.expression, ...(m.description ? { description: m.description } : {}), ...stamp };
   return `# Added in Semantic Canvas's Modeler to the model of source ${p.extends ?? "?"}. The base model file is never edited; this file is merged over it.

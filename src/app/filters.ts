@@ -1,5 +1,5 @@
 import type { DashboardFilter, DashboardSpec, FilterSpec, FilterValue, TileSpec } from "../compiler/spec.ts";
-import { fieldReachable, isTemporal, isNumeric, type Model } from "../semantic/model.ts";
+import { fieldReachable, isTemporal, isNumeric, DEFAULT_CALENDAR, type Calendar, type Model } from "../semantic/model.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { tabOf, tabsOf } from "./tabs.ts";
 import { resolvePreset } from "./datePresets.ts";
@@ -16,10 +16,10 @@ export function suggestedBindings(spec: DashboardSpec, model: Model, field: stri
 }
 export const presentationOf = (f: Pick<DashboardFilter, "control" | "presentation">) => f.presentation ?? FILTER_PRESENTATIONS[f.control][0];
 export const hasFilterValue = (v: FilterValue) => !!v.preset || !!v.values?.length || v.min != null && v.min !== "" || v.max != null && v.max !== "";
-export function filtersForTile(spec: DashboardSpec, tile: TileSpec, values: Record<string, FilterValue>, now = new Date()): FilterSpec[] {
+export function filtersForTile(spec: DashboardSpec, tile: TileSpec, values: Record<string, FilterValue>, now = new Date(), calendar: Calendar = DEFAULT_CALENDAR): FilterSpec[] {
   return (spec.filters ?? []).flatMap(f => {
     const b = f.bindings.find(b => b.tileId === tile.id);
-    const v = resolvePreset(values[f.id] ?? f.defaultValue ?? {}, now);
+    const v = resolvePreset(values[f.id] ?? f.defaultValue ?? {}, now, calendar);
     if (!b || f.scope === "tab" && f.tabId !== tabOf(spec, tile) || !hasFilterValue(v)) return [];
     const range = f.control === "date" && typeof v.max === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v.max) && !Number.isNaN(Date.parse(v.max))
       ? { ...v, max: new Date(Date.parse(v.max) + 86400000).toISOString().slice(0, 10), maxExclusive: true } : v;
