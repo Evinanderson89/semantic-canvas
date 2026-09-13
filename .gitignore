@@ -12,3 +12,4 @@ playwright-report/
 deploy/access.yaml
 deploy/policies.yaml
 backups/
+coverage/

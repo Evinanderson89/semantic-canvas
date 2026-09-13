@@ -20,7 +20,7 @@ jobs:
 
       - run: npm run typecheck
 
-      - run: npm test
+      - run: npm run test:coverage
 
       - run: npx playwright install --with-deps chromium
 
