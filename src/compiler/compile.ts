@@ -1,5 +1,5 @@
 import type { Connector } from "../connectors/types.ts";
-import { findJoin, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, timeColumnOf, computedMetricIssue, type Metric, type Model } from "../semantic/model.ts";
+import { joinPath, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, timeColumnOf, computedMetricIssue, calendarOf, type Metric, type Model } from "../semantic/model.ts";
 import type { FilterSpec, TileSpec, ValidationIssue } from "./spec.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -42,7 +42,7 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
         const { grain, table } = parseDimension(dim);
         if (grain) continue;
         if (!table) issues.push({ tile: id, problem: `${m.label} crosses two tables: name the dimension's table (${dim} → table.${dim})` });
-        else if (table !== den.baseTable && !findJoin(model, den.baseTable, table)) issues.push({ tile: id, problem: `no join from ${den.baseTable} to ${table}, which ${m.label}'s denominator needs` });
+        else if (table !== den.baseTable && "error" in joinPath(model, den.baseTable, table)) issues.push({ tile: id, problem: `${(joinPath(model, den.baseTable, table) as { error: string }).error}, which ${m.label}'s denominator needs` });
       }
     }
   }
@@ -59,8 +59,7 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
     if (!t) { issues.push({ tile: id, problem: `unknown table "${target}"` }); continue; }
     if (!t.columns.some((c) => c.name === column))
       issues.push({ tile: id, problem: `"${column}" is not a column of ${target}` });
-    if (table && table !== base && !findJoin(model, base, table))
-      issues.push({ tile: id, problem: `no join from ${base} to ${table}` });
+    if (table && table !== base) { const path = joinPath(model, base, table); if ("error" in path) issues.push({ tile: id, problem: path.error }); }
   }
   const aliases = (tile.dimensions ?? []).map((d) => { const x = parseDimension(d); return x.column + (x.grain ? `_${x.grain}` : ""); });
   if (new Set(aliases).size !== aliases.length || aliases.some((a) => tile.metrics.includes(a)))
@@ -83,6 +82,22 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
   if ((tile.dimensions ?? []).filter((d) => d.includes(":")).length > 1 && tile.compare && tile.compare !== "none")
     issues.push({ tile: id, problem: "period comparison requires exactly one time dimension" });
   return issues;
+}
+
+/**
+ * date_trunc on the model's calendar (docs/calendar.md): a week starting
+ * Sunday is the Monday-based week of the next day, moved back a day; a
+ * fiscal quarter or year starting in month M is the calendar one of the
+ * date moved back M-1 months, moved forward again. Every bucket is named
+ * by its first day, so edge flags, comparisons and presets need nothing new.
+ */
+export function truncOnCalendar(model: Model, conn: Connector, grain: string, expr: string): string {
+  const cal = calendarOf(model);
+  // The shifted forms end in a date arithmetic whose type is a timestamp on some dialects; a final day-trunc makes it a date like the plain form.
+  if (grain === "week" && cal.weekStart === "sunday") return conn.dateTrunc("day", conn.dateAdd("day", conn.dateTrunc("week", conn.dateAdd("day", expr, 1)), -1));
+  const shift = cal.fiscalYearStartMonth - 1;
+  if ((grain === "quarter" || grain === "year") && shift) return conn.dateTrunc("day", conn.dateAdd("month", conn.dateTrunc(grain, conn.dateAdd("month", expr, -shift)), shift));
+  return conn.dateTrunc(grain, expr);
 }
 
 export function parseDimension(dim: string) {
@@ -162,9 +177,12 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
     const owner = table ?? base;
     assertIdent(owner);
     if (owner !== base) needed.add(owner);
-    const ref = `${owner}.${q(column)}`;
+    const raw = `${owner}.${q(column)}`;
+    // Timestamps are read in the calendar's time zone before any period is cut; dates need no conversion.
+    const colType = model.tables[owner]?.columns.find((c) => c.name === column)?.type ?? "";
+    const ref = grain && calendarOf(model).timezone && /timestamp|datetime/i.test(colType) && conn.toTimezone ? conn.toTimezone(raw, calendarOf(model).timezone!) : raw;
     const alias = grain ? `${column}_${grain}` : column;
-    dimSelect.push(`${grain ? conn.dateTrunc(grain, ref) : ref} AS ${q(alias)}`);
+    dimSelect.push(`${grain ? truncOnCalendar(model, conn, grain, ref) : ref} AS ${q(alias)}`);
     groupCols.push(q(alias));
     if (grain && grain !== "day" && !edge) edge = { alias: q(alias), ref, grain };
   }
@@ -473,13 +491,21 @@ export function compileFrom(model: Model, conn: Connector, base: string, needed:
   assertIdent(base);
   if (!model.tables[base]) throw new Error(`unknown table: ${base}`);
   let from = `${conn.relation(base, model.tables[base].relation)} AS ${base}`;
+  // Every hop on the way to a needed table is joined once, in path order, so a
+  // snowflake (fact -> dimension -> dimension) resolves as naturally as a star.
+  const joined = new Set([base]);
   for (const target of new Set(needed)) {
     if (target === base) continue;
     assertIdent(target);
-    const j = findJoin(model, base, target);
-    if (!j) throw new Error(`no unambiguous join from ${base} to ${target}`);
-    const on = joinPairs(j).map((p) => `${base}.${conn.quote(p.left)} = ${target}.${conn.quote(p.right)}`).join(" AND ");
-    from += `\n  ${j.type === "inner" ? "INNER" : "LEFT"} JOIN ${conn.relation(target, model.tables[target].relation)} AS ${target} ON ${on}`;
+    const path = joinPath(model, base, target);
+    if ("error" in path) throw new Error(path.error);
+    for (const j of path.joins) {
+      if (joined.has(j.right)) continue;
+      assertIdent(j.right);
+      const on = joinPairs(j).map((p) => `${j.left}.${conn.quote(p.left)} = ${j.right}.${conn.quote(p.right)}`).join(" AND ");
+      from += `\n  ${j.type === "inner" ? "INNER" : "LEFT"} JOIN ${conn.relation(j.right, model.tables[j.right].relation)} AS ${j.right} ON ${on}`;
+      joined.add(j.right);
+    }
   }
   return from;
 }

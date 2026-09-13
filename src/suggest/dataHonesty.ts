@@ -66,7 +66,7 @@ export function bucketEnd(start: Date, grain: string): Date {
     case "week": return new Date(Date.UTC(y, mo, d + 7));
     case "month": return new Date(Date.UTC(y, mo + 1, 1));
     case "quarter": return new Date(Date.UTC(y, mo + 3, 1));
-    case "year": return new Date(Date.UTC(y + 1, 0, 1));
+    case "year": return new Date(Date.UTC(y, mo + 12, 1));
     default: return new Date(Date.UTC(y, mo, d + 1));
   }
 }

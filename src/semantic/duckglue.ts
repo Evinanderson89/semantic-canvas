@@ -81,15 +81,23 @@ export const duckglueAdapter: SemanticAdapter = {
       const issue = computedMetricIssue(draft, m);
       if (issue) throw new Error(`Metric ${issue}`);
     }
+    let calendar: Model["calendar"];
+    if (d.model?.calendar !== undefined) {
+      const c = z.object({ week_start: z.enum(["monday", "sunday"]).default("monday"), fiscal_year_start_month: z.number().int().min(1).max(12).default(1), timezone: z.string().min(1).max(64).optional() }).strict().parse(d.model.calendar);
+      if (c.timezone) { try { new Intl.DateTimeFormat("en", { timeZone: c.timezone }); } catch { throw new Error(`model.calendar.timezone: "${c.timezone}" is not an IANA time zone (America/New_York, Europe/London, UTC)`); } }
+      calendar = { weekStart: c.week_start, fiscalYearStartMonth: c.fiscal_year_start_month, ...(c.timezone ? { timezone: c.timezone } : {}) };
+    }
     return {
       source: "duckglue",
       name: d.model?.name ?? "warehouse",
+      ...(calendar ? { calendar } : {}),
       description: (d.model?.description ?? "").trim(),
       tables,
       metrics,
       joins: (d.joins ?? []).map((j: any) => ({
         left: j.left, leftOn: j.left_on, right: j.right, rightOn: j.right_on,
         type: j.type ?? "left",
+        ...(j.cardinality !== undefined ? { cardinality: z.enum(["many_to_one", "one_to_one", "one_to_many", "many_to_many"]).parse(j.cardinality) } : {}),
       })),
     };
   },

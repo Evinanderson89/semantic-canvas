@@ -21,6 +21,8 @@ export interface Connector {
    *  (e.g. a "month" bucket's last day), which `dateTrunc` alone can't give:
    *  it only rounds an existing date DOWN to a period's start. */
   dateAdd(unit: "day" | "month" | "year", expr: string, n: number): string;
+  /** A UTC timestamp expression read in an IANA time zone, as a naive local timestamp; dates pass through unchanged. */
+  toTimezone?(expr: string, timezone: string): string;
   /** What to put in FROM for a catalog table. */
   relation(table: string, physical?: { database?: string; schema?: string; table: string }): string;
   execute(sql: string, limit?: number, cacheKey?: string): Promise<QueryResult>;

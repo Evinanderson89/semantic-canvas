@@ -83,6 +83,7 @@ export async function pooledDuckdb(
     quote: (i) => `"${i.replace(/"/g, '""')}"`,
     dateTrunc: (grain, expr) => `CAST(date_trunc('${grain}', ${expr}) AS DATE)`,
     dateAdd: (unit, expr, n) => `(${expr} + INTERVAL '${n} ${unit}')`,
+    toTimezone: (expr, timezone) => `timezone('${timezone.replace(/'/g, "''")}', timezone('UTC', CAST(${expr} AS TIMESTAMP)))`,
     relation: (table) =>
       `read_parquet('${root}/${table}/**/*.parquet', hive_partitioning = true, union_by_name = true)`,
 
