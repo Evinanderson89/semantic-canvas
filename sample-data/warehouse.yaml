@@ -338,6 +338,47 @@ metrics:
     description: Gross new MRR divided by lost MRR. Above 4 is healthy growth; below 1 means shrinking.
     synonyms: [growth efficiency, sales quick ratio]
 
+  # ---- computed metrics (docs/metric-types.md) -----------------------------
+  mrr_per_subscriber:
+    label: MRR per paying subscriber (USD)
+    type: ratio
+    numerator: mrr
+    denominator: paying_subscribers
+    description: Live MRR divided by live paying subscribers; the same as ARPU, defined from two governed metrics instead of one expression.
+    synonyms: [revenue per subscriber, mrr per customer]
+
+  new_customers_per_session:
+    label: New paying customers per web session
+    type: ratio
+    numerator: new_paying_customers
+    denominator: web_sessions
+    description: >-
+      New paying customers in a period divided by web sessions in the same
+      period; the two tables are aligned on their own dates (movement_date,
+      session_date). A conversion-style ratio across two fact tables.
+    synonyms: [session to customer rate, acquisition rate]
+
+  lost_mrr:
+    label: Lost MRR (USD)
+    type: derived
+    expression: gross_new_mrr - net_new_mrr
+    description: MRR lost to churn and contraction in the period, as the gap between gross and net new MRR.
+    synonyms: [churned and contracted mrr, mrr lost]
+
+  cumulative_net_new_mrr:
+    label: Cumulative net new MRR (USD)
+    type: cumulative
+    metric: net_new_mrr
+    description: Net new MRR summed from the first period shown to each period; the live MRR curve when the window starts at the beginning.
+    synonyms: [mrr curve, running mrr]
+
+  trailing_3_period_net_new_mrr:
+    label: Net new MRR, trailing 3 periods (USD)
+    type: cumulative
+    metric: net_new_mrr
+    window: 3
+    description: Net new MRR summed over the current period and the two before it.
+
   new_paying_customers:
     label: New paying customers
     base_table: fct_mrr_movements

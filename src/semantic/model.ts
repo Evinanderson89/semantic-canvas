@@ -41,12 +41,29 @@ export const isLineage = (c: Column) => LINEAGE_COLUMNS.some((l) => l.name === c
 
 export type TimeGrain = "day" | "week" | "month" | "quarter" | "year";
 
+/**
+ * What kind of metric this is (docs/metric-types.md):
+ *   simple      one aggregate expression over the base table (the default)
+ *   ratio       numerator / denominator, two metrics; on the same table or across two
+ *   derived     an expression over other metrics on the same table (revenue - cost)
+ *   cumulative  a running total of a metric along the time axis, optionally trailing N periods
+ */
+export type MetricType = "simple" | "ratio" | "derived" | "cumulative";
+
 export interface Metric {
   name: string;
   label: string;
   description?: string;
   baseTable: string;
+  /** The SQL aggregate for a simple metric; for a derived metric, an expression over metric names. */
   expression: string;
+  type?: MetricType;
+  /** ratio: the two metrics. */
+  numerator?: string;
+  denominator?: string;
+  /** cumulative: the metric summed along time, and how many periods the window trails (absent: since the start). */
+  metric?: string;
+  window?: number;
   /** Declared native reporting grains. Omitted means the expression owns rollup semantics. */
   importance?: number;
   direction?: "higher" | "lower" | "neutral";
@@ -207,6 +224,54 @@ export function fieldReachable(model: Model, baseTable: string, field: string): 
 }
 
 export const joinPairs = (join: Join) => join.columns ?? [{ left: join.leftOn, right: join.rightOn }];
+
+export const metricType = (m: Metric): MetricType => m.type ?? "simple";
+
+/** Metric names a derived expression refers to: every identifier that is a metric of the model. */
+export function derivedReferences(model: Model, expression: string): string[] {
+  const names = new Set<string>();
+  for (const m of expression.replace(/'(?:[^']|'')*'/g, "''").matchAll(/(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)(?!\s*\()/g)) if (model.metrics[m[1]]) names.add(m[1]);
+  return [...names];
+}
+
+/** The simple metrics a metric is computed from (itself, when simple). One level deep: components are simple. */
+export function metricComponents(model: Model, m: Metric): Metric[] {
+  switch (metricType(m)) {
+    case "ratio": return [model.metrics[m.numerator ?? ""], model.metrics[m.denominator ?? ""]].filter(Boolean);
+    case "derived": return derivedReferences(model, m.expression).map((n) => model.metrics[n]).filter(Boolean);
+    case "cumulative": return [model.metrics[m.metric ?? ""]].filter(Boolean);
+    default: return [m];
+  }
+}
+
+/** A ratio whose denominator lives on another table than its numerator: compiled as two grouped queries joined on the dimensions. */
+export const isCrossTableRatio = (model: Model, m: Metric) =>
+  metricType(m) === "ratio" && !!m.numerator && !!m.denominator && model.metrics[m.numerator]?.baseTable !== model.metrics[m.denominator]?.baseTable;
+
+/** Problems with a computed metric's definition, in words; null when it is sound. */
+export function computedMetricIssue(model: Model, m: Metric): string | null {
+  const t = metricType(m);
+  if (t === "simple") return null;
+  const simple = (name: string | undefined, what: string) => {
+    if (!name) return `${m.name}: ${what} is required.`;
+    const c = model.metrics[name];
+    if (!c) return `${m.name}: ${what} names an unknown metric "${name}".`;
+    if (metricType(c) !== "simple") return `${m.name}: ${what} must be a simple metric; "${name}" is ${metricType(c)}.`;
+    return null;
+  };
+  if (t === "ratio") {
+    const issue = simple(m.numerator, "numerator") ?? simple(m.denominator, "denominator");
+    if (issue) return issue;
+    if (m.baseTable !== model.metrics[m.numerator!].baseTable) return `${m.name}: a ratio's base table is its numerator's (${model.metrics[m.numerator!].baseTable}).`;
+    return null;
+  }
+  if (t === "cumulative") return simple(m.metric, "metric") ?? (m.window !== undefined && (!Number.isInteger(m.window) || m.window < 1) ? `${m.name}: window is a whole number of periods.` : null);
+  const refs = derivedReferences(model, m.expression);
+  if (!refs.length) return `${m.name}: a derived metric's expression names other metrics (revenue - cost).`;
+  for (const r of refs) { const issue = simple(r, `"${r}"`); if (issue) return issue; if (model.metrics[r].baseTable !== m.baseTable) return `${m.name}: "${r}" is on ${model.metrics[r].baseTable}, not ${m.baseTable}; a derived metric stays on one table (a ratio may cross tables).`; }
+  if (/;|--|\/\*|\bselect\b/i.test(m.expression)) return `${m.name}: a derived expression is arithmetic over metric names.`;
+  return null;
+}
 
 /** Restricted metrics require their declared time dimension at a supported grain. */
 export function metricGrainIssue(metric: Metric, dimensions: string[]): string | null {

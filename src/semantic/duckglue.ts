@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import YAML from "yaml";
 import { z } from "zod";
-import type { Model, SemanticAdapter, Table, TimeGrain } from "./model.ts";
+import { computedMetricIssue, metricComponents, metricType, type Model, type SemanticAdapter, type Table, type TimeGrain } from "./model.ts";
 
 /** Restricted grains only make sense on a date column of the metric's own base table. Shared with the connected overlay. */
 export function timeDimensionIssue(name: string, base: string, table: Table | undefined, timeGrains: TimeGrain[] | undefined, timeDimension: unknown): string | null {
@@ -49,14 +49,21 @@ export const duckglueAdapter: SemanticAdapter = {
     for (const [name, m] of Object.entries<any>(d.metrics)) {
       const timeGrains = m.time_grains === undefined ? undefined : z.array(z.enum(["day", "week", "month", "quarter", "year"])).min(1).parse(m.time_grains);
       const timeDimension = m.time_dimension;
-      const issue = timeDimensionIssue(name, m.base_table, tables[m.base_table], timeGrains, timeDimension);
+      const issue = (m.type === undefined || m.type === "simple") ? timeDimensionIssue(name, m.base_table, tables[m.base_table], timeGrains, timeDimension) : null;
       if (issue) throw new Error(issue);
+      const type = m.type === undefined ? undefined : z.enum(["simple", "ratio", "derived", "cumulative"]).parse(m.type);
       metrics[name] = {
         name,
         label: m.label ?? name,
         description: (m.description ?? "").trim(),
-        baseTable: m.base_table,
-        expression: m.expression,
+        // A computed metric may leave base_table out; it is filled in from its components below.
+        baseTable: m.base_table ?? "",
+        expression: m.expression ?? "",
+        ...(type && type !== "simple" ? { type } : {}),
+        ...(m.numerator !== undefined ? { numerator: String(m.numerator) } : {}),
+        ...(m.denominator !== undefined ? { denominator: String(m.denominator) } : {}),
+        ...(m.metric !== undefined ? { metric: String(m.metric) } : {}),
+        ...(m.window !== undefined ? { window: z.number().int().min(1).parse(m.window) } : {}),
         timeGrains, timeDimension,
         direction: m.direction === undefined ? undefined : z.enum(["higher", "lower", "neutral"]).parse(m.direction),
         importance: m.importance === undefined ? undefined : z.number().min(0).max(100).parse(m.importance),
@@ -65,6 +72,15 @@ export const duckglueAdapter: SemanticAdapter = {
       };
     }
 
+    // Computed metrics: fill the base table from the components, then check the definition against the finished model.
+    const draft = { source: "duckglue", name: "", tables, metrics, joins: [] as Model["joins"] };
+    for (const m of Object.values(metrics)) {
+      if (metricType(m) === "simple") { if (!m.baseTable) throw new Error(`Metric ${m.name}: base_table is required`); continue; }
+      const first = metricComponents(draft, m)[0];
+      if (!m.baseTable && first) m.baseTable = first.baseTable;
+      const issue = computedMetricIssue(draft, m);
+      if (issue) throw new Error(`Metric ${issue}`);
+    }
     return {
       source: "duckglue",
       name: d.model?.name ?? "warehouse",
