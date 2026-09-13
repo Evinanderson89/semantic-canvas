@@ -1321,3 +1321,5 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .metric-actions{display:inline-flex;gap:6px;align-items:center;margin-left:auto}
 .mrow-top .use{margin-left:0}
 .data-policy{display:block;margin-top:3px;font-size:10.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+/* A tile's rows are scoped by a data policy the gateway signed onto the request (docs/self-hosting.md). */
+.gateway-scope{color:var(--accent,#345c48);border:1px solid currentColor;border-radius:999px;padding:1px 7px;font-size:10.5px;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}

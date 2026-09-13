@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { scopeFor } from "../src/security/rls.ts";
 import { requireScope } from "../src/security/queryScope.ts";
 import { readGatewayPolicy } from "../src/security/auth.ts";
+import { scopedBy } from "../src/app/Tile.tsx";
 import { createHmac } from "node:crypto";
 import { model } from "./fixtures.ts";
 
@@ -33,5 +34,17 @@ describe("gateway data policy in the query scope", () => {
     const bad = Buffer.from(JSON.stringify({ v: 1, sub: "u1", app: "canvas", iat: now, exp: now + 120, rules: [{ field: "country", mode: "only", values: ["GB"] }] })).toString("base64url");
     expect(readGatewayPolicy(bad, createHmac("sha256", secret).update(bad).digest("base64url"), secret, "u1")).toBeNull();
     expect(readGatewayPolicy(undefined, undefined, secret, "u1")).toBeNull();
+  });
+});
+
+describe("the tile chip", () => {
+  it("says which gateway rules a query applied, in the session's own words, and nothing when none did", () => {
+    const policy = [{ field: "dim_users.country", mode: "only" as const, values: ["GB", "DE"] }, { field: "fct_orders.status", mode: "not" as const, values: ["internal"] }];
+    expect(scopedBy(["rls:region", "gateway:dim_users.country:only"], policy)).toEqual({ short: "country only GB, DE", full: "dim_users.country only GB, DE" });
+    expect(scopedBy(["gateway:dim_users.country:only", "gateway:fct_orders.status:not"], policy)!.short).toBe("country only GB, DE; status not internal");
+    expect(scopedBy(["rls:region"], policy)).toBeNull();
+    expect(scopedBy(undefined, policy)).toBeNull();
+    // A rule the session does not list (it changed since the page loaded) is still named by field.
+    expect(scopedBy(["gateway:dim_users.plan:only"], policy)!.short).toBe("plan only");
   });
 });

@@ -19,6 +19,7 @@ import { downloadCsv, downloadPng, slugForFilename } from "./export.ts";
 import { renderMarkdown } from "./markdown.tsx";
 import { betterKind, coarserGrain, detectDegenerate, detectNoisy, recommend,
          type DegenerateFinding, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
+import { useSession } from "./Session.tsx";
 
 /** The column alias a dimension resolves to in query results, matching the
  *  compiler's own convention exactly (compile.ts: `${column}_${grain}` for
@@ -37,6 +38,18 @@ function dimAlias(d: string): string {
  *  needs enough room for axis labels and a legend to not read as cramped. */
 const KPI_HEIGHT = 156;
 const CHART_MIN_HEIGHT = 300;
+
+
+/** The gateway rules a query reported applying (ids `gateway:<field>:<mode>`), said in words from the session's own policy. */
+export function scopedBy(applied: string[] | undefined, policy: { field: string; mode: "only" | "not"; values: string[] }[] | undefined): { short: string; full: string } | null {
+  const rules = (applied ?? []).filter((id) => id.startsWith("gateway:")).map((id) => { const [, field, mode] = id.split(":"); return policy?.find((r) => r.field === field && r.mode === mode) ?? { field, mode: mode as "only" | "not", values: [] }; });
+  if (!rules.length) return null;
+  const word = (m: string) => (m === "only" ? "only" : "not");
+  return {
+    short: rules.map((r) => `${r.field.split(".").pop()} ${word(r.mode)} ${r.values.slice(0, 3).join(", ")}${r.values.length > 3 ? "…" : ""}`.trim()).join("; "),
+    full: rules.map((r) => `${r.field} ${word(r.mode)} ${r.values.join(", ")}`).join("\n"),
+  };
+}
 
 function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCrossFilter,
                      drill, onDrill, onDrillUp, aiAvailable, queryContext }: {
@@ -58,6 +71,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   aiAvailable?: boolean;
 }) {
   const [state, setState] = useState<any>({ status: "loading" });
+  const session = useSession();
   const [explain, setExplain] = useState<{ status: "loading" | "ok" | "error"; text: string } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [beautifyOpen, setBeautifyOpen] = useState(false);
@@ -318,6 +332,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
             <span className="ms mono">{state.ms}ms</span>}
           {connected && <span className="ms mono data-as-of" title={`${connected.provenance.source}, loaded by ${connected.provenance.loadedBy}${connected.status === "unreviewed" ? ". Ingested, unreviewed." : ""}`}>{dataAsOf(connected)}</span>}
           {state.status === "ok" && state.coverage === "unknown" && <span className="ms mono" title="The source has not declared period completeness. These dates describe returned rows, not a verified complete reporting period.">Coverage unverified</span>}
+          {state.status === "ok" && scopedBy(state.rlsApplied, session?.policy) && <span className="ms gateway-scope" title={"The gateway signed this policy onto the request; every row here obeys it.\n" + scopedBy(state.rlsApplied, session?.policy)!.full}>Scoped by gateway: {scopedBy(state.rlsApplied, session?.policy)!.short}</span>}
           {state.status === "ok" && (state.partial?.start || state.partial?.end) && (
             <span className="ms mono partial-note"
                   title={`The data does not cover the whole first or last ${grain ?? "period"}, so that ${grain ?? "period"} is left out ` +
