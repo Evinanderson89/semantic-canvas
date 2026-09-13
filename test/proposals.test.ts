@@ -20,8 +20,18 @@ describe("proposed metrics", () => {
     expect(proposalProblems(model, { ...ok, expression: "SUM(revenue_usd)" })[0]).toContain('"revenue_usd" is not a column of fct_sales');
     expect(proposalProblems(model, { ...ok, expression: "SUM(amount); DROP TABLE x" })[0]).toContain("no statements");
     expect(proposalProblems(model, { ...ok, expression: "(SELECT MAX(amount) FROM fct_sales)" })[0]).toContain("no statements, subqueries");
-    expect(proposalProblems(model, { ...ok, expression: "SUM(read_parquet('/etc/passwd'))" })[0]).toContain("file reads");
+    expect(proposalProblems(model, { ...ok, expression: "SUM(read_parquet('/etc/passwd'))" })[0]).toContain("read_parquet() is not a function a metric may use");
     expect(proposalProblems(model, { ...ok, filter: "SUM(amount) > 1" })).toContain("Filter: a row condition, not an aggregate (the aggregate goes in the expression).");
     expect(proposalProblems(model, { ...ok, expression: "" })[0]).toContain("say what to compute");
   });
+});
+it("allows only the functions on its list: nothing that reads files, environment or secrets", () => {
+  const model2 = model;
+  for (const expr of ["MAX(read_text('/etc/passwd'))", "MAX(getenv('SNOWFLAKE_PASSWORD'))", "COUNT(*) + (SELECT 1)", "SUM(amount) + read_json_auto('x')", "MAX(parquet_scan('/tmp/x'))", "MAX(duckdb_secrets())"]) {
+    const problems = proposalProblems(model2, { name: "leak", label: "Leak", baseTable: "fct_sales", expression: expr });
+    expect(problems.length, expr).toBeGreaterThan(0);
+    expect(problems.join(" "), expr).toMatch(/is not a function a metric may use|no statements, subqueries/);
+  }
+  expect(proposalProblems(model2, { name: "fine", label: "Fine", baseTable: "fct_sales", expression: "ROUND(SUM(COALESCE(amount, 0)) / NULLIF(COUNT(DISTINCT user_id), 0), 2)" })).toEqual([]);
+  expect(proposalProblems(model2, { name: "fine2", label: "Fine", baseTable: "fct_sales", expression: "COUNT(*) FILTER (WHERE DATE_TRUNC('month', sold_on) = DATE_TRUNC('month', CURRENT_DATE))" })).toEqual([]);
 });

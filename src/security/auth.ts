@@ -119,7 +119,10 @@ export class CompanyAuth {
     return session;
   }
   mount(app: Express) {
-    if (this.config.mode === "gateway") app.use("/api", (req, _res, next) => {
+    if (this.config.mode === "gateway" && !this.config.policySecret) console.error(JSON.stringify({ event: "auth.policy_secret_missing", level: "warn", message: "SC_GATEWAY_POLICY_SECRET is not set: a data policy the gateway delivers cannot be verified, and any request carrying one is refused." }));
+    if (this.config.mode === "gateway") app.use("/api", (req, res, next) => {
+      // A policy we cannot verify is not one we may ignore: refusing is the only honest answer.
+      if (!this.config.policySecret && (req.header("x-gateway-policy") || req.header("x-gateway-policy-sig"))) return res.status(503).json({ error: "The gateway sent a data policy for this request, but this app has no secret to verify it. Ask an administrator to set SC_GATEWAY_POLICY_SECRET." });
       // The portal sends the Gateway token as a cookie; the gateway CLI and other
       // non-browser clients send the same token as a bearer. Envoy has already
       // verified either form; we verify again here and never trust proxy headers.

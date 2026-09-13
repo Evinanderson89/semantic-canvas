@@ -5,6 +5,7 @@ import { alertInputSchema, commentInputSchema, type ActivityRecord, type AlertIn
 import { evaluateAlert } from "./evaluate.ts";
 import { dueAlerts, listActivity, loadDashboard, mutateActivity, StoreConflict } from "../store/store.ts";
 import { identityOf, canUseSource, type CompanyAuth, type GatewayPolicyRule } from "../security/auth.ts";
+import { scopeFor } from "../security/rls.ts";
 import type { Principal, RlsConfig } from "../security/rls.ts";
 import { requireScope } from "../security/queryScope.ts";
 import type { Source } from "../sources/registry.ts";
@@ -47,6 +48,13 @@ export function mountChartActivity(app: Express, deps: {
     const scoped = requireScope(source.model!, source.model!.metrics[rule.metric].baseTable, deps.rls(), who, policy);
     if (scoped.filters.some((f) => f.id.startsWith("gateway:"))) throw failure("A data policy set at the gateway applies to this chart. Watches run in the background without your session, so they cannot carry it yet; ask an administrator.", 403);
     return { ...query, where: [...(query.where ?? []), ...scoped.filters] };
+  }
+  /** Whether the gateway's rules touch (or cannot be applied to) the chart's table. */
+  function governedByGateway(source: Source, rule: AlertInput, who: Principal | null, policy: GatewayPolicyRule[]) {
+    const base = source.model!.metrics[rule.metric]?.baseTable;
+    if (!base) return true;
+    const scope = scopeFor(source.model!, base, deps.rls(), who, policy);
+    return scope.unenforceable.length > 0 || scope.filters.some((f) => f.id.startsWith("gateway:"));
   }
   const fingerprint = (query: ReturnType<typeof chartQuery>, source: Source) => hash({ query: { metrics: query.metrics, dimensions: query.dimensions, where: query.where }, model: source.model });
   async function evaluate(source: Source, query: ReturnType<typeof chartQuery>, rule: AlertInput, who: Principal | null) {
@@ -148,6 +156,8 @@ export function mountChartActivity(app: Express, deps: {
         if (deps.auth.config.mode !== "local" && (!identity || identity.principal !== rule.principalId || !canUseSource(identity, row.source))) evaluation = { state: "waiting", reason: "Sign in to resume checks with your current data permissions.", checkedAt };
         else if (audience(who) !== row.audience) evaluation = { state: "needs_review", reason: "Data permissions changed. Recreate this alert with your current access.", checkedAt };
         else if (!source) evaluation = { state: "error", reason: "The data source is unavailable. No alert was inferred.", checkedAt };
+        // A gateway data policy seen on the owner's latest request governs this chart: the watch would run without it, so it waits instead.
+        else if (identity?.policy?.length && governedByGateway(source, rule, who, identity.policy)) evaluation = { state: "waiting", reason: "A data policy set at the gateway now applies to this chart. Watches run without your session and cannot carry it, so this one is paused; delete it, or ask an administrator.", checkedAt };
         else {
           const document = await loadDashboard(row.dashboardId, { source: row.source, model: source.model!.name });
           const tile = document?.spec.tiles.find(t => t.id === row.tileId);
