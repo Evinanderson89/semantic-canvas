@@ -160,7 +160,7 @@ describe("extend", () => {
     const ext = extensionSchema.parse(YAML.parse(yaml));
     expect(Object.keys(ext.tables)).toEqual(["fct_refunds"]);
     expect(ext.patches).toEqual({ fct_sales: { reporting_lag: 2 } });
-    expect(ext.joins).toEqual([{ left: "fct_refunds", left_on: "sale_id", right: "fct_sales", right_on: "sale_id", type: "left" }]);
+    expect(ext.joins).toEqual([{ left: "fct_refunds", left_on: "sale_id", right: "fct_sales", right_on: "sale_id", type: "left", cardinality: "many_to_one" }]);
     const merged = mergeExtension(fixtureModel, ext, "t");
     expect(merged.tables.fct_sales.grain).toBe("one row per sale");
     expect(merged.tables.fct_sales.reportingLagDays).toBe(2);
