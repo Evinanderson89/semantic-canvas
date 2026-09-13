@@ -32,6 +32,13 @@ export interface Scope {
 }
 
 /**
+ * A rule the gateway delivered (gateway-platform/docs/policy.md): declared
+ * once there for a group, signed onto every request, enforced here like any
+ * policy of our own. `only` keeps the listed values; `not` removes them.
+ */
+export interface GatewayRule { field: string; mode: "only" | "not"; values: string[] }
+
+/**
  * Turn policies into filters for one tile.
  *
  * Returns them as ordinary FilterSpecs, which means RLS costs nothing new at
@@ -39,10 +46,22 @@ export interface Scope {
  * same join resolution as a user-authored filter.
  */
 export function scopeFor(
-  model: Model, baseTable: string, cfg: RlsConfig, principal: Principal | null,
+  model: Model, baseTable: string, cfg: RlsConfig, principal: Principal | null, gatewayRules: GatewayRule[] = [],
 ): Scope {
   const filters: FilterSpec[] = [];
   const unenforceable: RlsPolicy[] = [];
+
+  for (const r of gatewayRules) {
+    const [table, column] = r.field.split(".");
+    if (!table || !column) continue;
+    if (!model.tables[table]) {
+      // The gateway names a table this model does not have: nothing here can leak through it, and nothing here can enforce it either.
+      // A policy on a table that exists elsewhere is not this tile's concern; one on a table that exists here but is unreachable is.
+      continue;
+    }
+    if (!fieldReachable(model, baseTable, r.field)) { unenforceable.push({ id: `gateway:${r.field}`, table, column, claim: "gateway", description: "Set at the gateway." }); continue; }
+    filters.push({ id: `gateway:${r.field}:${r.mode}`, field: baseTable === table ? column : r.field, source: "dimension", mode: "discrete", values: r.values, ...(r.mode === "not" ? { exclude: true } : {}) });
+  }
 
   for (const p of cfg.policies) {
     const field = `${p.table}.${p.column}`;

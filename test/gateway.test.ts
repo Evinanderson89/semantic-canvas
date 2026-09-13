@@ -63,3 +63,26 @@ it('refuses to start when the access default names an unknown RLS principal',asy
   expect(code,output).toBe(1);expect(output).toContain('access default references an unknown RLS principal');expect(output).toContain('"event":"server.start_failed"');
  }finally{await rm(root,{recursive:true,force:true});}
 },60_000);
+it('reads the signed data policy the gateway adds, ignores a forged or foreign one, and reports it on the session',async()=>{
+ const {createHmac}=await import('node:crypto');
+ const secret='policy-secret';
+ const {auth:a,server:s,url:u}=await serve({groupsClaim:'groups',bindings});
+ (a as any).config.policySecret=secret;
+ const jwt=await token();
+ const rules=[{field:'dim_users.country',mode:'only',values:['GB','DE']}];
+ const sign=(payload:object)=>{const body=Buffer.from(JSON.stringify(payload)).toString('base64url');return {body,sig:createHmac('sha256',secret).update(body).digest('base64url')};};
+ const now=Math.floor(Date.now()/1000);
+ const good=sign({v:1,sub:'casey',app:'semantic-canvas',iat:now,exp:now+120,rules});
+ const session=await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':good.body,'x-gateway-policy-sig':good.sig}})).json();
+ expect(session.policy).toEqual(rules);
+ const identity=await(await fetch(u+'/api/identity',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':good.body,'x-gateway-policy-sig':good.sig}})).json();
+ expect(identity.identity.policy).toEqual(rules);
+ const forged=Buffer.from(JSON.stringify({v:1,sub:'casey',app:'semantic-canvas',iat:now,exp:now+120,rules:[]})).toString('base64url');
+ expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':forged,'x-gateway-policy-sig':good.sig}})).json()).policy).toBeUndefined();
+ const foreign=sign({v:1,sub:'someone-else',app:'semantic-canvas',iat:now,exp:now+120,rules});
+ expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':foreign.body,'x-gateway-policy-sig':foreign.sig}})).json()).policy).toBeUndefined();
+ const expired=sign({v:1,sub:'casey',app:'semantic-canvas',iat:now-300,exp:now-100,rules});
+ expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':expired.body,'x-gateway-policy-sig':expired.sig}})).json()).policy).toBeUndefined();
+ expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`}})).json()).policy).toBeUndefined();
+ await new Promise<void>(r=>s.close(()=>r()));
+});

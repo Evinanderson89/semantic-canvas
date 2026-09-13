@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Express, Request, Response, NextFunction } from "express";
 import * as oidc from "openid-client";
@@ -18,10 +18,39 @@ export function checkAccessPrincipals(access: AccessConfig | undefined, principa
   for (const binding of access?.bindings ?? []) if (!principals[binding.principal]) throw new Error("An access binding references an unknown RLS principal");
   if (access?.default && !principals[access.default.principal]) throw new Error("The access default references an unknown RLS principal");
 }
-export interface Identity { id: string; name: string; role: "viewer" | "editor" | "admin"; principal: string; sources: string[] }
+export interface Identity { id: string; name: string; role: "viewer" | "editor" | "admin"; principal: string; sources: string[];
+  /** Rules the gateway signed onto this request; every query is filtered by them or refused. */
+  policy?: GatewayPolicyRule[] }
 interface Session { identity: Identity; csrf: string; expires: number }
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
-export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string; scopes: string; sessionSeconds: number; access?: AccessConfig }
+export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string; scopes: string; sessionSeconds: number; access?: AccessConfig;
+  /** Shared with the gateway's control API; verifies the data policy it signs onto each request (gateway-platform/docs/policy.md). Absent: policies are not read. */
+  policySecret?: string }
+/** A row-level rule the gateway delivered for this request. */
+export interface GatewayPolicyRule { field: string; mode: "only" | "not"; values: string[] }
+
+/**
+ * The gateway's x-gateway-policy header (base64url JSON) and its HMAC-SHA256
+ * signature, as produced by gateway-platform's control API. Returns the rules
+ * only when the signature verifies, the policy is for this subject, and it
+ * has not expired; anything else is no policy at all, never a partial one.
+ */
+export function readGatewayPolicy(body: string | undefined, sig: string | undefined, secret: string, sub: string, now = Date.now()): GatewayPolicyRule[] | null {
+  if (!body || !sig) return null;
+  const want = createHmac("sha256", secret).update(body).digest();
+  let got: Buffer;
+  try { got = Buffer.from(sig, "base64url"); } catch { return null; }
+  if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+  let payload: any;
+  try { payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")); } catch { return null; }
+  if (payload?.v !== 1 || payload.sub !== sub || typeof payload.exp !== "number" || payload.exp * 1000 < now || !Array.isArray(payload.rules)) return null;
+  const rules: GatewayPolicyRule[] = [];
+  for (const r of payload.rules) {
+    if (!r || typeof r.field !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$/.test(r.field) || (r.mode !== "only" && r.mode !== "not") || !Array.isArray(r.values) || r.values.some((v: unknown) => typeof v !== "string")) return null;
+    rules.push({ field: r.field, mode: r.mode, values: r.values });
+  }
+  return rules;
+}
 const token = () => randomBytes(32).toString("base64url");
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 const cookie = (req: Request, name: string) => req.headers.cookie?.split(";").map(x => x.trim()).find(x => x.startsWith(`${name}=`))?.slice(name.length + 1);
@@ -47,6 +76,7 @@ export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
     if (!local && [url, issuer, portal, jwks].some(u => u.protocol !== "https:")) throw new Error("Gateway sign-in requires HTTPS outside the localhost development stack");
     if ([url, issuer, portal, jwks].some(u => !["http:", "https:"].includes(u.protocol) || u.username || u.password || u.search || u.hash) || url.pathname !== "/" || portal.pathname !== "/") throw new Error("Use valid Gateway origins and identity provider URLs");
     return { ...config, publicUrl: url.origin, issuer: env.SC_OIDC_ISSUER, clientId: env.SC_OIDC_CLIENT_ID, jwksUri: jwks.href, portalUrl: portal.origin,
+      policySecret: env.SC_GATEWAY_POLICY_SECRET?.trim() || undefined,
       access: accessSchema.parse(YAML.parse(await readFile(env.SC_ACCESS_PATH!, "utf8"))) };
   }
   for (const key of ["SC_PUBLIC_URL", "SC_OIDC_ISSUER", "SC_OIDC_CLIENT_ID", "SC_OIDC_CLIENT_SECRET", "SC_ACCESS_PATH"]) if (!env[key]) throw new Error(`${key} is required in team mode`);
@@ -99,7 +129,12 @@ export class CompanyAuth {
       void (async () => {
         try {
           const { payload } = await jwtVerify(decodeURIComponent(raw), this.gatewayKeys!, { issuer: this.config.issuer, audience: this.config.clientId, algorithms: ["RS256", "ES256"], requiredClaims: ["sub", "exp"] });
-          const identity = mapIdentity(payload, this.config.issuer!, this.config.access!);
+          let identity = mapIdentity(payload, this.config.issuer!, this.config.access!);
+          if (identity && this.config.policySecret) {
+            // The gateway strips these from clients and only ext_authz adds them; the signature makes that trust explicit here.
+            const rules = readGatewayPolicy(req.header("x-gateway-policy"), req.header("x-gateway-policy-sig"), this.config.policySecret, String(payload.sub));
+            if (rules) identity = { ...identity, policy: rules };
+          }
           if (identity) {
             (req as any).gatewaySession = { identity, csrf: digest(`${this.gatewayCsrfSecret}\0${raw}`), expires: Number(payload.exp) * 1000 } satisfies Session;
             if (this.lastVerified.size >= 5000) this.prune();
@@ -113,7 +148,7 @@ export class CompanyAuth {
       res.setHeader("Cache-Control", "no-store");
       if (this.config.mode === "local") return res.json({ mode: "local", authenticated: true, canEdit: true, canAdmin: true });
       const session = this.session(req);
-      return res.json(session ? { mode: "team", authenticated: true, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined, user: { id: session.identity.id, name: session.identity.name, role: session.identity.role }, csrf: session.csrf, canEdit: session.identity.role !== "viewer", canAdmin: session.identity.role === "admin", expiresAt: session.expires } : { mode: "team", authenticated: false, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined });
+      return res.json(session ? { mode: "team", authenticated: true, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined, user: { id: session.identity.id, name: session.identity.name, role: session.identity.role }, csrf: session.csrf, canEdit: session.identity.role !== "viewer", canAdmin: session.identity.role === "admin", expiresAt: session.expires, ...(session.identity.policy?.length ? { policy: session.identity.policy } : {}) } : { mode: "team", authenticated: false, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined });
     });
     app.get("/api/auth/login", async (_req, res) => {
       // The portal owns the session: its refresh route renews an expired token
