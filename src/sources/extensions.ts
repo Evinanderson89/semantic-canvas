@@ -25,7 +25,7 @@ const tableSchema = z.object({
   columns: z.array(columnSchema).min(1).max(1000),
   origin: originSchema.optional(),
 }).strict();
-const joinSchema = z.object({ left: ident, left_on: ident, right: ident, right_on: ident, type: z.enum(["left", "inner"]).default("left") }).strict();
+const joinSchema = z.object({ left: ident, left_on: ident, right: ident, right_on: ident, type: z.enum(["left", "inner"]).default("left"), cardinality: z.enum(["many_to_one", "one_to_one", "one_to_many", "many_to_many"]).optional() }).strict();
 const metricSchema = z.object({
   label: z.string().min(1).max(200), base_table: ident, expression: z.string().min(1).max(4000), description: z.string().max(2000).optional(), synonyms: z.array(z.string().max(120)).max(50).optional(),
   filter: z.string().max(4000).nullable().optional(),
@@ -84,7 +84,7 @@ export function mergeExtension(model: Model, ext: Extension | null, sourceId: st
   for (const j of ext.joins) {
     if (!tables[j.left] || !tables[j.right]) { warn("extension.join_orphaned", { left: j.left, right: j.right }); continue; }
     const dup = joins.some((k) => (k.left === j.left && k.leftOn === j.left_on && k.right === j.right && k.rightOn === j.right_on) || (k.left === j.right && k.leftOn === j.right_on && k.right === j.left && k.rightOn === j.left_on));
-    if (!dup) joins.push({ left: j.left, leftOn: j.left_on, right: j.right, rightOn: j.right_on, type: j.type });
+    if (!dup) joins.push({ left: j.left, leftOn: j.left_on, right: j.right, rightOn: j.right_on, type: j.type, ...(j.cardinality ? { cardinality: j.cardinality } : {}) });
   }
   for (const [name, m] of Object.entries(ext.metrics)) {
     if (metrics[name]) { warn("extension.metric_shadowed", { metric: name }); continue; }

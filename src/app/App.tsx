@@ -31,7 +31,7 @@ import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
 import { applyLayout } from "../canvas/layouts.ts";
 import { downloadPng, slugForFilename } from "./export.ts";
-import { prettifyModelName, type Model } from "../semantic/model.ts";
+import { calendarOf, prettifyModelName, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
 import { readResponse } from "./http.ts";
@@ -722,7 +722,7 @@ export function App() {
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
                        beautify={<DashboardBeautify dash={dash} canvas={canvas} model={model}
-                                                     aiAvailable={aiAvailable} canConfigureAi={session.canAdmin} onConnections={() => setView("connections")} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues)]))} />} />
+                                                     aiAvailable={aiAvailable} canConfigureAi={session.canAdmin} onConnections={() => setView("connections")} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, new Date(), calendarOf(model))]))} />} />
             )}
             {canvas.locked && session.canEdit && (
               <div className="editbar slim">
@@ -771,7 +771,7 @@ export function App() {
                     })() : (
                       <TileBoundary label={t.title ?? t.metrics.join(", ")}>
                       <Tile key={`${activeSourceId}:${asWho}:${refreshToken}`} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} model={model} spec={t} locked={canvas.locked}
-                            crossFilters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, t, filterValues)]}
+                            crossFilters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, t, filterValues, new Date(), calendarOf(model))]}
                             onCrossFilter={(f) => setDash((d) => !d ? d : ({
                               ...d,
                               crossFilters: [

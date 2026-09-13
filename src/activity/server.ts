@@ -6,6 +6,7 @@ import { evaluateAlert } from "./evaluate.ts";
 import { dueAlerts, listActivity, loadDashboard, mutateActivity, StoreConflict } from "../store/store.ts";
 import { identityOf, canUseSource, type CompanyAuth, type GatewayPolicyRule } from "../security/auth.ts";
 import { scopeFor } from "../security/rls.ts";
+import { calendarOf } from "../semantic/model.ts";
 import type { Principal, RlsConfig } from "../security/rls.ts";
 import { requireScope } from "../security/queryScope.ts";
 import type { Source } from "../sources/registry.ts";
@@ -42,7 +43,7 @@ export function mountChartActivity(app: Express, deps: {
     if (tile.dimensions.length > 1 || tile.dimensions.length === 1 && !tile.dimensions[0].includes(":")) throw failure("Alerts need a total or a time series with no category breakdown");
     if (rule.mode === "anomaly" && tile.dimensions.length !== 1) throw failure("Anomaly checks need a time-series chart");
     const defaults = Object.fromEntries((document.filters ?? []).map(f => [f.id, f.defaultValue ?? {}]));
-    const query = { ...visibleQuery(source.model!, { ...tile, metrics: [rule.metric] }, [...(document.crossFilters ?? []), ...filtersForTile(document, tile, defaults)]), compare: "none" as const, limit: 1000, layout: tile.layout };
+    const query = { ...visibleQuery(source.model!, { ...tile, metrics: [rule.metric] }, [...(document.crossFilters ?? []), ...filtersForTile(document, tile, defaults, new Date(), calendarOf(source.model!))]), compare: "none" as const, limit: 1000, layout: tile.layout };
     const issues = validateTile(source.model!, query);
     if (issues.length) throw failure("The saved chart needs valid semantic fields before it can be watched");
     const scoped = requireScope(source.model!, source.model!.metrics[rule.metric].baseTable, deps.rls(), who, policy);

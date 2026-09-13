@@ -81,6 +81,9 @@ export interface Metric {
 /** Provenance of a table or metric that was added in Canvas. */
 export interface Origin { kind: "modeler" | "proposal"; by: string; byId?: string; at: string; publishedBy?: string; publishedAt?: string }
 
+/** How many rows of the right table one row of the left meets (docs/joins.md). Absent means many_to_one: the fact-to-dimension case, which never multiplies rows. */
+export type JoinCardinality = "many_to_one" | "one_to_one" | "one_to_many" | "many_to_many";
+
 export interface Join {
   left: string;
   leftOn: string;
@@ -88,7 +91,18 @@ export interface Join {
   rightOn: string;
   type: "left" | "inner";
   columns?: { left: string; right: string }[];
+  cardinality?: JoinCardinality;
 }
+
+/**
+ * The calendar every period is cut on (docs/calendar.md): which day a week
+ * starts, which month a fiscal year starts, and the timezone timestamps are
+ * read in. One declaration; the compiler, the edge-completeness flags, the
+ * date presets and the honesty rules all follow it.
+ */
+export interface Calendar { weekStart: "monday" | "sunday"; fiscalYearStartMonth: number; timezone?: string }
+export const DEFAULT_CALENDAR: Calendar = { weekStart: "monday", fiscalYearStartMonth: 1 };
+export const calendarOf = (model: Pick<Model, "calendar"> | null | undefined): Calendar => model?.calendar ?? DEFAULT_CALENDAR;
 
 export interface Model {
   /** Which adapter produced this, for provenance in the UI. */
@@ -98,6 +112,7 @@ export interface Model {
   tables: Record<string, Table>;
   metrics: Record<string, Metric>;
   joins: Join[];
+  calendar?: Calendar;
 }
 
 export interface SemanticAdapter {
@@ -133,6 +148,39 @@ export function metricsByTable(model: Model): Record<string, Metric[]> {
 export function findJoin(model: Model, left: string, right: string): Join | null {
   const matches = model.joins.filter((j) => j.left === left && j.right === right);
   return matches.length === 1 ? matches[0] : null;
+}
+
+/** A join that multiplies the left table's rows: an aggregate over it would double count. */
+export const fansOut = (j: Join) => j.cardinality === "one_to_many" || j.cardinality === "many_to_many";
+
+/**
+ * The joins from `from` to `to`, following declared joins left to right
+ * (docs/joins.md). The shortest path wins; two shortest paths are ambiguous
+ * and refused with both named, as is a path through a join that fans out,
+ * because a chart cannot be right on a guess.
+ */
+export function joinPath(model: Model, from: string, to: string): { joins: Join[] } | { error: string } {
+  if (from === to) return { joins: [] };
+  const paths: Join[][] = [];
+  let frontier: { at: string; via: Join[] }[] = [{ at: from, via: [] }];
+  const seen = new Set([from]);
+  while (frontier.length && !paths.length) {
+    const next: { at: string; via: Join[] }[] = [];
+    const reached = new Set<string>();
+    for (const f of frontier) for (const j of model.joins) {
+      if (j.left !== f.at || seen.has(j.right) && !reached.has(j.right)) continue;
+      const via = [...f.via, j];
+      if (j.right === to) paths.push(via);
+      else { reached.add(j.right); next.push({ at: j.right, via }); }
+    }
+    for (const r of reached) seen.add(r);
+    frontier = next;
+  }
+  if (!paths.length) return { error: `no join from ${from} to ${to}` };
+  if (paths.length > 1) return { error: `${from} reaches ${to} two ways (${paths.map((p) => p.map((j) => j.right).join(" → ")).join(", or ")}); the model must say which` };
+  const fan = paths[0].find(fansOut);
+  if (fan) return { error: `joining ${fan.left} to ${fan.right} multiplies ${fan.left}'s rows (${fan.cardinality}); an aggregate over it would double count` };
+  return { joins: paths[0] };
 }
 
 /**
@@ -220,7 +268,7 @@ export function fieldReachable(model: Model, baseTable: string, field: string): 
   const table = model.tables[t];
   if (!table || !table.columns.some((x) => x.name === c)) return false;
   if (t === baseTable) return true;
-  return findJoin(model, baseTable, t) !== null;
+  return "joins" in joinPath(model, baseTable, t);
 }
 
 export const joinPairs = (join: Join) => join.columns ?? [{ left: join.leftOn, right: join.rightOn }];

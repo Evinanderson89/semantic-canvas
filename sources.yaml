@@ -36,6 +36,25 @@ sources:
       lakeRoot: ./sample-data/lake
       poolSize: 4
 
+  # gravity-card-lab's warehouse: duckglue YAML materialised into an AWS Glue
+  # Data Catalog (infra/main.tf) backing a Parquet lake in S3 (infra/warehouse.yaml
+  # is the source of truth for both). No static credentials here -- awsProfile
+  # names a ~/.aws/config profile (gravity-card-lab/infra/iam.tf's read-only
+  # role, assumed via role_arn + source_profile) that DuckDB's credential_chain
+  # provider is told to use explicitly. It does NOT read AWS_PROFILE on its
+  # own, unlike the AWS CLI/boto3 -- whoever runs this server just needs
+  # `aws sso login` already done against the account that role lives in.
+  - id: gravity-card-lab
+    label: Gravity Card Lab (DuckDB / Glue / S3)
+    adapter: duckglue
+    model: ../gravity-card-lab/infra/warehouse.yaml
+    connector:
+      type: duckdb
+      lakeRoot: s3://gravity-card-lab-lake-565905128321/lake
+      awsProfile: gravity-card-lab-reader
+      awsRegion: us-east-2
+      poolSize: 4
+
   # A Parquet lake in S3 (the same <lakeRoot>/<table>/**/*.parquet layout).
   # No key lives here: awsProfile names a profile in the server's
   # ~/.aws/config (an SSO login or a role_arn + source_profile entry), and the
