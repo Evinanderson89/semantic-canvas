@@ -6,6 +6,9 @@
 model:
   name: messy_shop
   description: An online shop's warehouse as it actually is.
+  # Generated for 13 September 2026 (src/testing/messyLake.ts, MESSY_TODAY); the clock is pinned there so the mess reads the same every day.
+  calendar:
+    today: "2026-09-13"
 
 tables:
   dim_customers:

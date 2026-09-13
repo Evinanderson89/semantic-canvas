@@ -83,9 +83,10 @@ export const duckglueAdapter: SemanticAdapter = {
     }
     let calendar: Model["calendar"];
     if (d.model?.calendar !== undefined) {
-      const c = z.object({ week_start: z.enum(["monday", "sunday"]).default("monday"), fiscal_year_start_month: z.number().int().min(1).max(12).default(1), timezone: z.string().min(1).max(64).optional() }).strict().parse(d.model.calendar);
+      const c = z.object({ week_start: z.enum(["monday", "sunday"]).default("monday"), fiscal_year_start_month: z.number().int().min(1).max(12).default(1), timezone: z.string().min(1).max(64).optional(),
+        today: z.union([z.string(), z.date()]).optional().transform((v) => v instanceof Date ? v.toISOString().slice(0, 10) : v).refine((v) => v === undefined || (/^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`))), { message: "model.calendar.today: a date, YYYY-MM-DD" }) }).strict().parse(d.model.calendar);
       if (c.timezone) { try { new Intl.DateTimeFormat("en", { timeZone: c.timezone }); } catch { throw new Error(`model.calendar.timezone: "${c.timezone}" is not an IANA time zone (America/New_York, Europe/London, UTC)`); } }
-      calendar = { weekStart: c.week_start, fiscalYearStartMonth: c.fiscal_year_start_month, ...(c.timezone ? { timezone: c.timezone } : {}) };
+      calendar = { weekStart: c.week_start, fiscalYearStartMonth: c.fiscal_year_start_month, ...(c.timezone ? { timezone: c.timezone } : {}), ...(c.today ? { today: c.today } : {}) };
     }
     return {
       source: "duckglue",

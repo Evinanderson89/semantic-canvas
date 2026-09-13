@@ -8,7 +8,7 @@ import type { CanvasSpec } from "../canvas/presets.ts";
 import type { Model } from "../semantic/model.ts";
 import { applyLayout, sectionsOf } from "../canvas/layouts.ts";
 import { inferChart } from "../suggest/chartRules.ts";
-import { timeColumnOf } from "../semantic/model.ts";
+import { timeColumnOf, todayOf } from "../semantic/model.ts";
 import { coarserGrain, detectDegenerate, detectNoisy, type DegenerateFinding } from "../suggest/recommend.ts";
 import { renderInline, renderMarkdown } from "./markdown.tsx";
 import { readableChartTitle, suggestStoryStructure } from "../suggest/storyStructure.ts";
@@ -95,7 +95,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
         reviewed++; if (r.truncated) limited++;
         if (timeDimIdx !== -1 && !drills[t.id]?.length) {
           honest.push(...reviewDataHonesty({ tile: { ...t, compare: query.compare }, model, columns: r.columns ?? [], rows: r.rows ?? [],
-            partial: r.partial ?? { start: false, end: false }, timeDimension: query.dimensions[timeDimIdx], where: query.where, today: new Date() }));
+            partial: r.partial ?? { start: false, end: false }, timeDimension: query.dimensions[timeDimIdx], where: query.where, today: todayOf(model) }));
           const grain = query.dimensions[timeDimIdx].split(":")[0], next = coarserGrain(grain);
           if (next && !validateTile(model, { ...t, dimensions: t.dimensions.map(d => d.includes(":") ? `${next}:${d.split(":")[1]}` : d) }).length && detectNoisy(r.rows ?? [], r.columns ?? [], t.metrics).length)
             found.push({ kind: "noise", tileId: t.id, title, grain, next });
@@ -163,7 +163,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
   };
 
   const applyHonesty = (f: HonestyFinding, fix: HonestyFix) => {
-    const today = new Date();
+    const today = todayOf(model);
     if (fix.kind === "freshness-note") {
       const note: TileSpec = {
         id: `t${Math.random().toString(36).slice(2, 8)}`, kind: "text", metrics: [], dimensions: [],

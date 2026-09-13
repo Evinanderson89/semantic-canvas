@@ -18,5 +18,5 @@ What runs on every push (`.github/workflows/ci.yml`): typecheck, the unit and se
 ## Known debts
 
 - The company suite shares one server across cases; every case that changes the registry restores it (`restoreRegistry`), so no case depends on the one before it. Keep it that way: a case that adds a source deletes it before it ends.
-- Two suites read the clock: the browser preset tests (correctly: presets are relative to today) and the data-honesty rules in the running app. The sample lake ends on 2026-08-31, so as the calendar moves, weekly sample charts go from *partial* to *stale* findings; that is the honest answer, not a flake, but a demo should know it.
+- Two suites read the clock: the browser preset tests (correctly: presets are relative to today) and the data-honesty rules in the running app. The sample lake ends on 2026-08-31 and its model pins `calendar.today` there (docs/calendar.md), so sample charts read the same on any day; a model without a pinned today drifts honestly from *partial* to *stale* as the calendar moves.
 - The CLI's mock re-implements server rules by hand (policy merging, proposal validation); the two can drift. The admin surface should be run against the real control API in CI.
