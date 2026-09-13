@@ -1,4 +1,5 @@
 import type { Model } from "../semantic/model.ts";
+import { metricOf } from "../semantic/model.ts";
 
 /**
  * A proposed metric (docs/modeler.md, "Proposed metrics"): an editor names
@@ -38,7 +39,7 @@ const SQL_WORDS = new Set(["and", "or", "not", "case", "when", "then", "else", "
 export function proposalProblems(model: Model, p: MetricProposal): string[] {
   const out: string[] = [];
   if (!NAME.test(p.name)) out.push("Name: lowercase letters, digits and underscores, starting with a letter (up to 64).");
-  if (model.metrics[p.name]) out.push(`There is already a metric called ${p.name}.`);
+  if (metricOf(model, p.name)) out.push(`There is already a metric called ${p.name}.`);
   if (!p.label.trim() || p.label.length > 200) out.push("Label: one to 200 characters.");
   const table = model.tables[p.baseTable];
   if (!table) { out.push(`No table called ${p.baseTable}.`); return out; }

@@ -1,6 +1,7 @@
 import { format as d3format } from "d3-format";
 import type { Model } from "../semantic/model.ts";
 import type { TileSpec } from "../compiler/spec.ts";
+import { metricOf } from "../semantic/model.ts";
 
 export type NumberStyle = "auto" | "currency" | "percent" | "compact" | "plain";
 
@@ -107,7 +108,7 @@ export function tileFill(f: FormatSpec, defaultColor = "var(--surface)"): string
  * of what "smart" means here.
  */
 export function inferNumberStyle(model: Model, tile: TileSpec): NumberStyle {
-  const ms = tile.metrics.map((n) => model.metrics[n]).filter(Boolean);
+  const ms = tile.metrics.map((n) => metricOf(model, n)).filter(Boolean);
   if (!ms.length) return "auto";
   // The FIRST selected metric decides, not every metric's label text
   // pooled together -- the same convention a combo chart's "first measure

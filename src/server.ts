@@ -19,7 +19,7 @@ if (typeof process.loadEnvFile === "function") {
 import { compileTile, splitPartialPeriods, validateTile } from "./compiler/compile.ts";
 import { suggestDashboard } from "./suggest/suggest.ts";
 import type { Connector } from "./connectors/types.ts";
-import { reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
+import { metricOf, reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
 import { metricIssues, publishSchema, readOverlay, registerSchema, summarize, writeOverlay, type ConnectedEntry } from "./sources/connected.ts";
 import { connectConnector } from "./sources/registry.ts";
 import { joinCandidates, probeJoins, profileTables } from "./modeler/introspect.ts";
@@ -1206,7 +1206,7 @@ app.post("/api/query", safe(async (req, res) => {
   const issues = validateTile(model, tile, { role });
   if (issues.length) return res.status(400).json({ issues });
   try {
-    const base = model.metrics[tile.metrics[0]].baseTable;
+    const base = metricOf(model, tile.metrics[0]).baseTable;
     const who = principalOf(req);
     // RLS is applied here, server-side, on top of whatever the client sent. A
     // client that strips its filters still gets a scoped query.

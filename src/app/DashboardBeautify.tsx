@@ -8,7 +8,7 @@ import type { CanvasSpec } from "../canvas/presets.ts";
 import type { Model } from "../semantic/model.ts";
 import { applyLayout, sectionsOf } from "../canvas/layouts.ts";
 import { inferChart } from "../suggest/chartRules.ts";
-import { timeColumnOf, todayOf } from "../semantic/model.ts";
+import { metricOf, timeColumnOf, todayOf } from "../semantic/model.ts";
 import { coarserGrain, detectDegenerate, detectNoisy, type DegenerateFinding } from "../suggest/recommend.ts";
 import { renderInline, renderMarkdown } from "./markdown.tsx";
 import { readableChartTitle, suggestStoryStructure } from "../suggest/storyStructure.ts";
@@ -88,7 +88,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
       const query = visibleQuery(model, t, [...(dash.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])], drills[t.id]);
       const timeDimIdx = query.dimensions.findIndex(d => d.includes(":"));
       const isSingleCategorical = query.dimensions.length === 1 && t.metrics.length === 1 && timeDimIdx === -1;
-      const title = t.title ?? t.metrics.map(m => model.metrics[m]?.label ?? m).join(", ");
+      const title = t.title ?? t.metrics.map(m => metricOf(model, m)?.label ?? m).join(", ");
       try {
         const r = await fetch("/api/query", { method: "POST", signal: ac.signal,
           headers: { "content-type": "application/json", "x-sc-refresh": queryContext }, body: JSON.stringify(query) }).then(readResponse);
@@ -102,7 +102,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
         }
         if (isSingleCategorical) {
           const finding = detectDegenerate(r.rows ?? [], r.columns ?? [], r.columns?.[0], t.metrics[0]);
-          if (finding) found.push({ kind: "degenerate", tileId: t.id, title, finding, timeDimension: timeColumnOf(model, model.metrics[t.metrics[0]]?.baseTable ?? null) });
+          if (finding) found.push({ kind: "degenerate", tileId: t.id, title, finding, timeDimension: timeColumnOf(model, metricOf(model, t.metrics[0])?.baseTable ?? null) });
         }
       } catch (e: any) { if (ac.signal.aborted) return; failed.push(`${title}: ${e.message}`); }
     }
@@ -112,7 +112,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
   const tileSummary = (t: TileSpec) => {
     const kind = (t.kind ?? "metric") === "metric" ? inferChart(model, t) : (t.kind ?? "text");
     const title = t.title ?? ((t.kind ?? "metric") === "metric"
-      ? t.metrics.map((m) => model.metrics[m]?.label ?? m).join(", ") || "(untitled)"
+      ? t.metrics.map((m) => metricOf(model, m)?.label ?? m).join(", ") || "(untitled)"
       : t.text ?? String(t.kind ?? "note"));
     return { id: t.id, title, kind, metrics: t.metrics ?? [], dimensions: t.dimensions ?? [], text: t.text, layout: t.layout, section: t.section, pinned: t.pinned };
   };
@@ -204,7 +204,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
   };
 
   const applyAddition = (addition: Addition) => {
-    const base = model.metrics[addition.metrics[0]]?.baseTable ?? null;
+    const base = metricOf(model, addition.metrics[0])?.baseTable ?? null;
     const timeCol = addition.breakdown === "time" ? timeColumnOf(model, base) : null;
     const newTile: TileSpec = {
       id: `t${Math.random().toString(36).slice(2, 8)}`,

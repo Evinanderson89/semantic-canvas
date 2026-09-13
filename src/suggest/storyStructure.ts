@@ -4,6 +4,7 @@ import { validateTile } from "../compiler/compile.ts";
 import { dashboardSchema } from "../compiler/schema.ts";
 import { applyLayout } from "../canvas/layouts.ts";
 import { inferChart } from "./chartRules.ts";
+import { metricOf } from "../semantic/model.ts";
 
 export interface StoryStructure {
   spec: DashboardSpec;
@@ -14,7 +15,7 @@ export interface StoryStructure {
 
 /** Refresh automatic labels when a chart changes while keeping authored titles. */
 export function readableChartTitle(model: Model, tile: TileSpec, next = tile): string {
-  const measure = tile.metrics.map(m => model.metrics[m]?.label ?? m).join(", ");
+  const measure = tile.metrics.map(m => metricOf(model, m)?.label ?? m).join(", ");
   const automatic = (t: TileSpec) => {
     if (["kpi", "stat"].includes(inferChart(model, t))) return measure;
     const categories = t.dimensions.filter(d => !d.includes(":"));
@@ -34,11 +35,11 @@ export function suggestStoryStructure(dash: DashboardSpec, model: Model, width: 
   const available = width - 48;
   if (available < 180) return null;
   const ordered = [...metricTiles].sort((a, b) => a.layout.y - b.layout.y || a.layout.x - b.layout.x);
-  const metricLabel = (t: TileSpec) => t.metrics.map(m => model.metrics[m].label).join(", ");
+  const metricLabel = (t: TileSpec) => t.metrics.map(m => metricOf(model, m).label).join(", ");
   const isKpi = (t: TileSpec) => ["kpi", "stat"].includes(inferChart(model, t));
   const temporal = (t: TileSpec) => t.dimensions.some(d => /^(day|week|month|quarter|year):/.test(d));
   const label = (t: TileSpec) => readableChartTitle(model, t);
-  const priority = (t: TileSpec) => Math.max(...t.metrics.map(m => model.metrics[m].importance ?? 0));
+  const priority = (t: TileSpec) => Math.max(...t.metrics.map(m => metricOf(model, m).importance ?? 0));
   const kpis = ordered.filter(isKpi).sort((a, b) => priority(b) - priority(a));
   const trends = ordered.filter(t => !isKpi(t) && temporal(t)).sort((a, b) => priority(b) - priority(a));
   const detail = ordered.filter(t => !isKpi(t) && !temporal(t));

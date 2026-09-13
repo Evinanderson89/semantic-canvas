@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
-import { fieldReachable } from "../semantic/model.ts";
+import { metricOf, fieldReachable } from "../semantic/model.ts";
 import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
 import { copiedTiles, tabsOf, tabView } from "./tabs.ts";
 import { validateDashboard } from "./filters.ts";
@@ -15,7 +15,7 @@ export function distributeCharts(target: DashboardSpec, charts: TileSpec[], tabI
   const existing = tabView(target, tabId).tiles;
   let y = Math.max(8, ...existing.map(t => t.layout.y + t.layout.h)) + 16;
   const copies = copiedTiles(eligible, tabId).map(t => { const next = { ...t, section: undefined, layout: { x: 24, y, w: Math.min(t.layout.w, width - 48), h: t.layout.h } }; y += t.layout.h + 16; return next; });
-  const filters = target.filters?.map(f => ({ ...f, bindings: [...f.bindings, ...copies.filter(t => (f.scope === "report" || f.tabId === tabId) && fieldReachable(model, model.metrics[t.metrics[0]]?.baseTable ?? "", f.field)).map(t => ({ tileId: t.id, field: f.field }))] }));
+  const filters = target.filters?.map(f => ({ ...f, bindings: [...f.bindings, ...copies.filter(t => (f.scope === "report" || f.tabId === tabId) && fieldReachable(model, metricOf(model, t.metrics[0])?.baseTable ?? "", f.field)).map(t => ({ tileId: t.id, field: f.field }))] }));
   const next = { ...target, tiles: [...target.tiles, ...copies], filters };
   const parsed = dashboardSchema.parse(next), issues = validateDashboard(model, parsed);
   if (issues.length) throw new Error(issues[0].problem);

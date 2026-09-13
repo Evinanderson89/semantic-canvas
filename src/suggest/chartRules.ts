@@ -1,6 +1,7 @@
 import type { ChartKind, TileSpec } from "../compiler/spec.ts";
 import { parseDimension } from "../compiler/compile.ts";
 import type { Model } from "../semantic/model.ts";
+import { metricOf } from "../semantic/model.ts";
 
 /**
  * Chart type is DERIVED, not chosen by a model. An LLM asked for a chart type
@@ -17,7 +18,7 @@ export function inferChart(model: Model, tile: TileSpec): ChartKind {
 
   const parsed = dims.map((d) => {
     const p = parseDimension(d);
-    const owner = p.table ?? model.metrics[tile.metrics[0]].baseTable;
+    const owner = p.table ?? metricOf(model, tile.metrics[0]).baseTable;
     const col = model.tables[owner]?.columns.find((c) => c.name === p.column);
     return { ...p, temporal: !!p.grain || /date|timestamp/i.test(col?.type ?? "") };
   });
