@@ -251,12 +251,14 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
             <button className="icon" onClick={close} aria-label="Close">✕</button>
           </div>
           <div className="beautify-body">
-            <div className="review-intro"><h3>Make the story easier to see.</h3><p>Refine the charts, give them a reading order, and keep every change in your hands.</p></div>
-            <ul className="review-scope-list" aria-label="What this review covers">
-              <li className="on"><b>Chart checks</b> ran: results, grain, breakdowns and layout, from the current queries.</li>
-              <li className="on"><b>Data honesty</b> ran: partial periods, lagging comparisons and freshness, from the current results.</li>
-              <li className="on"><b>Story structure</b> ran: a reading order from your headings and sections.</li>
-              <li className={aiAvailable ? "on" : "off"}><b>Editorial review</b> {aiAvailable ? "ran: an AI read of the dashboard as a story." : <>did not run: it needs an AI provider. {canConfigureAi ? <button className="link" onClick={onConnections}>Add a key in Connections</button> : "Ask a workspace admin to add a key in Connections."}</>}</li>
+            <div className="review-intro"><h3>Make the story easier to see.</h3></div>
+            <ul className="review-passes" aria-label="What this review covers">
+              <li className="on" title="Results, grain, breakdowns and layout, from the current queries.">Chart checks</li>
+              <li className="on" title="Partial periods, lagging comparisons and freshness, from the current results.">Data honesty</li>
+              <li className="on" title="A reading order from your headings and sections.">Story structure</li>
+              <li className={aiAvailable ? "on" : "off"} title={aiAvailable ? "An AI read of the dashboard as a story." : "Did not run: the editorial review needs an AI provider."}>
+                Editorial{!aiAvailable && <> · {canConfigureAi ? <button className="link" onClick={onConnections}>add a key</button> : "needs a key"}</>}
+              </li>
             </ul>
             {hits === "checking" && <p className="explain-body loading">Checking the current charts…</p>}
             {Array.isArray(hits) && hits.length > 0 && (
@@ -295,10 +297,10 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
                 ))}
               </section>
             )}
-            {scan && <div className="review-coverage" role="status"><b>{scan.failed.length ? "Review incomplete" : "Review complete"}</b><p>{scan.reviewed} charts reviewed{scan.limited ? ` · ${scan.limited} limited result window${scan.limited === 1 ? "" : "s"}` : ""}{scan.failed.length ? ` · ${scan.failed.length} unavailable` : ""}.</p>{scan.failed.map(message => <p key={message} className="err">{message}</p>)}</div>}
+            {scan && <div className="review-coverage" role="status"><b>{scan.failed.length ? "Review incomplete" : "Review complete"}</b> · {scan.reviewed} chart{scan.reviewed === 1 ? "" : "s"} reviewed{scan.limited ? ` · ${scan.limited} limited result window${scan.limited === 1 ? "" : "s"}` : ""}{scan.failed.length ? ` · ${scan.failed.length} unavailable` : ""}{Array.isArray(hits) && hits.length === 0 && !visibleHonesty.length ? (scan.failed.length ? " · nothing to change in the readable tiles" : " · nothing to change") : ""}{scan.failed.map(message => <p key={message} className="err">{message}</p>)}</div>}
             {hits === null && <p className="explain-body">The dashboard changed. <button className="link" onClick={run}>Review this version</button></p>}
-            {Array.isArray(hits) && hits.length === 0 &&
-              <p className="explain-body">{scan?.failed.length ? "The readable tiles have no additional chart suggestions. The review is incomplete." : "No chart changes suggested for the results reviewed."}</p>}
+            {!scan && Array.isArray(hits) && hits.length === 0 &&
+              <p className="explain-body">No chart changes suggested for the results reviewed.</p>}
 
             {structure && <section className="structure-review" aria-label="Story structure">
               <div className="eyebrow">Shape the story</div>

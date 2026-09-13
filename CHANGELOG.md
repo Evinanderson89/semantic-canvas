@@ -2,6 +2,7 @@
 
 ## Unreleased — CoreCanvas Library and Gateway integration
 
+- Tightened the Design review dialog: the four passes are a row of chips (detail on hover), and coverage and the result are one status line.
 - Added persistent source-scoped folders, reusable view snapshots, starter dashboards and library setup/migration, replacing Explore by topic.
 - Added personal chart-chat and notification display preferences, off by default, without deleting existing activity.
 - Added verified Gateway session support and navigation back to the shared app launcher.
