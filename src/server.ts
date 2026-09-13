@@ -522,7 +522,8 @@ app.put("/api/modeler/drafts/:id", safe(async (req, res) => {
 app.get("/api/modeler/drafts/:id/yaml", safe(async (req, res) => {
   const d = await readDraft(String(req.params.id));
   if (!d) return res.status(404).json({ error: `no draft "${req.params.id}"` });
-  res.type("text/yaml").send(proposalToYaml(d.proposal));
+  // A draft that extends a source is published as an extension file, so that is what "view as YAML" shows.
+  res.type("text/yaml").send(d.proposal.extends ? proposalToExtension(d.proposal) : proposalToYaml(d.proposal));
 }));
 
 app.delete("/api/modeler/drafts/:id", safe(async (req, res) => {
@@ -675,6 +676,14 @@ app.delete("/api/sources/:id", safe(async (req, res) => {
  * governed catalogue. The lake itself is never touched from here.
  */
 // ---- Proposed metrics (docs/modeler.md, "Proposed metrics"): an editor names an aggregate; admins publish it to viewers ----
+/** How long one proposal probe may take before Canvas stops waiting (the warehouse may finish it on its own; nothing is stored either way). */
+const PROBE_TIMEOUT_MS = Number(process.env.SC_PROBE_TIMEOUT_MS) > 0 ? Number(process.env.SC_PROBE_TIMEOUT_MS) : 15_000;
+class TimeoutError extends Error {}
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  return Promise.race([p.finally(() => clearTimeout(timer)), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new TimeoutError(message)), ms); })]);
+}
+
 const proposeMetricSchema = z.object({
   name: z.string().max(64), label: z.string().max(200), baseTable: z.string().max(128), expression: z.string().max(4000),
   description: z.string().max(2000).optional(), filter: z.string().max(4000).nullable().optional(),
@@ -691,8 +700,8 @@ app.post("/api/sources/:sourceId/metrics", safe(async (req, res) => {
   const candidate: Model = { ...source.model, metrics: { ...source.model.metrics, [p.name]: { name: p.name, label: p.label, baseTable: p.baseTable, expression: p.expression, filter: p.filter ?? null, synonyms: [], reviewed: false } } };
   try {
     const sql = compileTile(candidate, source.conn, { id: "probe", metrics: [p.name], dimensions: [], layout: { x: 0, y: 0, w: 1, h: 1 } }, { probe: true });
-    await source.conn.execute(sql, 1, `probe:${whoId}:${at}`);
-  } catch (e: any) { return res.status(422).json({ error: `The warehouse refused it: ${String(e?.message ?? e).split("\n")[0]}`, problems: [] }); }
+    await withTimeout(source.conn.execute(sql, 1, `probe:${whoId}:${at}`), PROBE_TIMEOUT_MS, `The probe took longer than ${PROBE_TIMEOUT_MS / 1000} seconds. A metric this slow would make every chart that uses it slow; narrow it with a filter, or ask the warehouse team about the table.`);
+  } catch (e: any) { return res.status(422).json({ error: e instanceof TimeoutError ? e.message : `The warehouse refused it: ${String(e?.message ?? e).split("\n")[0]}`, problems: [] }); }
   await updateExtension(source.id, (ext) => ({ ...ext, metrics: { ...ext.metrics, [p.name]: {
     label: p.label.trim(), base_table: p.baseTable, expression: p.expression.trim(), ...(p.description?.trim() ? { description: p.description.trim() } : {}), ...(p.filter?.trim() ? { filter: p.filter.trim() } : {}),
     reviewed: false, origin: { kind: "proposal", by: who, by_id: whoId, at } } } }));
@@ -717,7 +726,10 @@ app.post("/api/sources/:sourceId/metrics/:name/publish", safe(async (req, res) =
 app.delete("/api/sources/:sourceId/metrics/:name", safe(async (req, res) => {
   const source = connectedSource(req), name = String(req.params.name);
   const m = source.model?.metrics[name];
-  if (!m?.origin) return res.status(404).json({ error: m ? `${name} comes from the base model; edit it there.` : `no metric "${name}" on ${source.id}` });
+  if (!m?.origin) {
+    const fromIngest = m && source.model?.tables[m.baseTable]?.connected;
+    return res.status(404).json({ error: !m ? `no metric "${name}" on ${source.id}` : fromIngest ? `${name} was declared by Ingest with its dataset; change or remove it there and it follows on the next refresh.` : `${name} comes from the base model; edit it there.` });
+  }
   const mine = m.origin.byId === actorOf(req) && m.reviewed === false;
   if (roleOf(req) !== "admin" && !mine) return res.status(403).json({ error: "Only the person who proposed it can withdraw it before it is published; after that, an administrator." });
   await updateExtension(source.id, (ext) => { const { [name]: _gone, ...rest } = ext.metrics; return { ...ext, metrics: rest }; });

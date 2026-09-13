@@ -27,6 +27,9 @@ describe("gateway data policy in the query scope", () => {
     expect(readGatewayPolicy(body, sig, secret, "u1")).toEqual([{ field: "dim_users.country", mode: "only", values: ["GB"] }]);
     expect(readGatewayPolicy(body, sig, "other", "u1")).toBeNull();
     expect(readGatewayPolicy(body, sig, secret, "u2")).toBeNull();
+    // Signed for this app, the rules apply; signed for another app, they are that app's, not ours.
+    expect(readGatewayPolicy(body, sig, secret, "u1", Date.now(), "canvas")).toHaveLength(1);
+    expect(readGatewayPolicy(body, sig, secret, "u1", Date.now(), "ingest")).toBeNull();
     const bad = Buffer.from(JSON.stringify({ v: 1, sub: "u1", app: "canvas", iat: now, exp: now + 120, rules: [{ field: "country", mode: "only", values: ["GB"] }] })).toString("base64url");
     expect(readGatewayPolicy(bad, createHmac("sha256", secret).update(bad).digest("base64url"), secret, "u1")).toBeNull();
     expect(readGatewayPolicy(undefined, undefined, secret, "u1")).toBeNull();
