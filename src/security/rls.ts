@@ -69,6 +69,12 @@ export function scopeFor(
 
     // A principal with "*" is unrestricted for this policy.
     if (allowed === "*") continue;
+    // A policy names a table. A model that does not have that table is not
+    // governed by it: nothing in this model can leak through a table it
+    // lacks, and nothing in it could enforce the policy either. (The gateway's
+    // rules are read the same way.) A table the model has but this tile
+    // cannot reach is a different matter: that is refused below.
+    if (!model.tables[p.table]) continue;
 
     const reachable = fieldReachable(model, baseTable, field);
     if (!reachable) {
