@@ -12,7 +12,7 @@ import { isTemporal, type Model } from "../semantic/model.ts";
  * (partial edge periods) lives in the compiler, which leaves a partial
  * edge bucket out and reports it as `partial`; these rules read that flag.
  */
-export type HonestyRule = "lagging" | "stale";
+export type HonestyRule = "lagging" | "stale" | "future";
 
 export type HonestyFix =
   /** Append "(through <date>)" to the tile's title. */
@@ -22,7 +22,9 @@ export type HonestyFix =
   /** Add a range filter that leaves out buckets from `before` on, so an unsettled newest period is not compared. */
   | { kind: "exclude-unsettled"; field: string; before: string }
   /** Add a text tile to the dashboard saying what date the data runs through. */
-  | { kind: "freshness-note"; date: string };
+  | { kind: "freshness-note"; date: string }
+  /** Add a range filter ending today, so rows dated in the future are left out. */
+  | { kind: "exclude-future"; field: string; through: string };
 
 export interface HonestyFinding {
   rule: HonestyRule;
@@ -115,6 +117,18 @@ export function reviewDataHonesty(input: HonestyInput): HonestyFinding[] {
   const title = tile.title ?? tile.metrics.map((m) => model.metrics[m]?.label ?? m).join(", ");
   const findings: HonestyFinding[] = [];
 
+  // Rows dated after today: the newest buckets are not real periods, the
+  // partial-edge check cannot see the true edge, and a comparison against
+  // them means nothing. Said first; the other rules stand down until fixed.
+  if (newest > todayUtc) {
+    findings.push({
+      rule: "future", tileId: tile.id, title, key: `future:${tile.id}:${iso(newest)}`,
+      text: `The newest ${periodWord(grain)} starts ${sayDate(iso(newest), today)}, after today: some rows are dated in the future, so the newest periods are not real and the edge of the data cannot be judged.`,
+      fixes: [{ kind: "exclude-future", field: `${owner}.${column}`, through: iso(todayUtc) }],
+    });
+    return findings;
+  }
+
   // Rule 2: a comparison against a period that is not finished, or that the
   // table says is still settling.
   const comparing = tile.compare === "prior" || tile.compare === "yoy";
@@ -167,6 +181,11 @@ export function labelTile(tile: TileSpec, baseTitle: string, fix: Extract<Honest
   const clean = (tile.title ?? baseTitle).replace(SUFFIX, "");
   const word = fix.kind === "label-through" ? "through" : "as of";
   return { ...tile, title: `${clean} (${word} ${sayDate(fix.date, today)})` };
+}
+
+/** The filter an "exclude future" fix adds: everything through today. */
+export function futureFilter(tileId: string, fix: Extract<HonestyFix, { kind: "exclude-future" }>): FilterSpec {
+  return { id: `honesty:${tileId}:through-today`, field: fix.field, source: "dimension", mode: "range", max: fix.through };
 }
 
 /** The filter an "exclude unsettled" fix adds; replaces an earlier one of its own. */

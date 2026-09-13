@@ -121,11 +121,15 @@ export function findKey(t: TableProfile): ColumnProfile | null {
   return unique.find((c) => ID_LIKE.test(c.name)) ?? unique[0];
 }
 
-/** Which table's key a foreign-key-looking column points at, by name. */
-function keyTarget(column: string, own: TableProfile, tables: TableProfile[], keys: Map<string, ColumnProfile | null>): TableProfile | null {
+/** A staging, raw, backup or year-stamped copy of a table: never the one a key points at when the real table exists. */
+export const looksLikeCopy = (name: string) => /^(stg|staging|raw|tmp|temp|bak|backup|old|archive)_|_(bak|backup|old|copy|archive|v\d+|\d{4}|\d{6}|\d{8})$/i.test(name);
+
+/** Which table's key a foreign-key-looking column points at, by name. Exported so the probe pairs joins exactly as the proposal does. */
+export function keyTarget(column: string, own: TableProfile, tables: TableProfile[], keys: Map<string, ColumnProfile | null>): TableProfile | null {
   const candidates = tables.filter((t) => t.name !== own.name && keys.get(t.name));
   // Exact key-name match: fct_orders.user_id -> dim_users.user_id.
-  const exact = candidates.filter((t) => keys.get(t.name)!.name === column);
+  let exact = candidates.filter((t) => keys.get(t.name)!.name === column);
+  if (exact.length > 1 && exact.some((t) => !looksLikeCopy(t.name))) exact = exact.filter((t) => !looksLikeCopy(t.name));
   if (exact.length === 1) return exact[0];
   if (exact.length > 1) return exact.find((t) => /^dim_/.test(t.name)) ?? null;
   // Stem match: plan_id -> dim_plans.id / plans.id.
@@ -133,6 +137,23 @@ function keyTarget(column: string, own: TableProfile, tables: TableProfile[], ke
   if (!stem) return null;
   const byStem = candidates.filter((t) => { const s = singular(stemOf(t.name).toLowerCase()); return s === stem || s === singular(stem); });
   return byStem.length === 1 ? byStem[0] : null;
+}
+
+/** The joins the profile suggests, by name: every id-like column paired with the table whose key it names. */
+export function pairJoins(profiles: TableProfile[]): Array<{ left: string; leftOn: string; right: string; rightOn: string }> {
+  const tables = [...profiles].sort((a, b) => a.name.localeCompare(b.name));
+  const keys = new Map(tables.map((t) => [t.name, findKey(t)]));
+  const out: Array<{ left: string; leftOn: string; right: string; rightOn: string }> = [];
+  for (const t of tables) {
+    const key = keys.get(t.name);
+    for (const c of t.columns) {
+      if (key && c.name === key.name) continue;
+      if (!ID_LIKE.test(c.name)) continue;
+      const target = keyTarget(c.name, t, tables, keys);
+      if (target) out.push({ left: t.name, leftOn: c.name, right: target.name, rightOn: keys.get(target.name)!.name });
+    }
+  }
+  return out;
 }
 
 export function propose(input: { id: string; label: string; tables: TableProfile[]; probes?: JoinProbe[] }): Proposal {

@@ -12,7 +12,7 @@ import { timeColumnOf } from "../semantic/model.ts";
 import { coarserGrain, detectDegenerate, detectNoisy, type DegenerateFinding } from "../suggest/recommend.ts";
 import { renderInline, renderMarkdown } from "./markdown.tsx";
 import { readableChartTitle, suggestStoryStructure } from "../suggest/storyStructure.ts";
-import { labelTile, reviewDataHonesty, unsettledFilter, type HonestyFinding, type HonestyFix } from "../suggest/dataHonesty.ts";
+import { futureFilter, labelTile, reviewDataHonesty, unsettledFilter, type HonestyFinding, type HonestyFix } from "../suggest/dataHonesty.ts";
 
 /** A KPI card's natural height -- matches the headline tiles Exec Summary
  *  already packs at this height (layouts.ts: layoutExecSummary). A chart
@@ -174,15 +174,15 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
     }
     applyReviewed({ ...dash, tiles: dash.tiles.map((t) => {
       if (t.id !== f.tileId) return t;
-      if (fix.kind === "exclude-unsettled") {
-        const filter = unsettledFilter(t.id, fix);
+      if (fix.kind === "exclude-unsettled" || fix.kind === "exclude-future") {
+        const filter = fix.kind === "exclude-future" ? futureFilter(t.id, fix) : unsettledFilter(t.id, fix);
         return { ...t, where: [...(t.where ?? []).filter((w) => w.id !== filter.id), filter] };
       }
       return labelTile(t, f.title, fix, today);
     }) });
   };
   const fixLabel = (fix: HonestyFix) => fix.kind === "label-through" ? "Label as through that date"
-    : fix.kind === "label-as-of" ? "Label as of that date" : fix.kind === "exclude-unsettled" ? "Compare complete periods only" : "Add a freshness note";
+    : fix.kind === "label-as-of" ? "Label as of that date" : fix.kind === "exclude-unsettled" ? "Compare complete periods only" : fix.kind === "exclude-future" ? "Leave out rows dated after today" : "Add a freshness note";
   const visibleHonesty = honesty.filter((f) => !dismissed.has(f.key));
 
   const applyTitle = () => {

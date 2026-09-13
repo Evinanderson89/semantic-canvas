@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bucketEnd, isPeriodKeyed, labelTile, reviewDataHonesty, sayDate, unsettledFilter } from "../src/suggest/dataHonesty.ts";
+import { bucketEnd, futureFilter, isPeriodKeyed, labelTile, reviewDataHonesty, sayDate, unsettledFilter } from "../src/suggest/dataHonesty.ts";
 import { duckglueAdapter } from "../src/semantic/duckglue.ts";
 import { model as base, tile } from "./fixtures.ts";
 import type { Model } from "../src/semantic/model.ts";
@@ -54,6 +54,18 @@ describe("data honesty: stale data", () => {
   });
   it("does not fire on a series that is one week old", () => {
     expect(review({}, weeks("2026-08-31"), false)).toEqual([]);
+  });
+});
+
+describe("data honesty: rows dated in the future", () => {
+  it("says so first, offers to leave them out, and stands the other rules down until then", () => {
+    const rows = [...weeks("2026-08-31"), ["2026-09-21", 999]]; // one bucket after today
+    const [f, ...rest] = review({ compare: "prior" }, rows, false);
+    expect(rest).toEqual([]);
+    expect(f.rule).toBe("future");
+    expect(f.text).toContain("starts Sep 21, after today");
+    expect(f.fixes).toEqual([{ kind: "exclude-future", field: "fct_sales.sold_on", through: "2026-09-11" }]);
+    expect(futureFilter("t1", f.fixes[0] as any)).toEqual({ id: "honesty:t1:through-today", field: "fct_sales.sold_on", source: "dimension", mode: "range", max: "2026-09-11" });
   });
 });
 
