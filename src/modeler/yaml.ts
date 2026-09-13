@@ -39,7 +39,8 @@ export function proposalToYaml(p: Proposal): string {
  * only what is new (tables, joins between them or to base tables, gap metrics)
  * and, for base tables, a reporting lag. Nothing the base model owns is repeated.
  */
-export function proposalToExtension(p: Proposal): string {
+export function proposalToExtension(p: Proposal, origin?: { by: string; at: string }): string {
+  const stamp = origin ? { origin: { kind: "modeler", by: origin.by, at: origin.at, published_by: origin.by, published_at: origin.at } } : {};
   const newTables = new Set(p.tables.filter((t) => t.include && t.status !== "existing").map((t) => t.name));
   const present = new Set([...newTables, ...p.tables.filter((t) => t.status === "existing").map((t) => t.name)]);
   const tables: Record<string, unknown> = {};
@@ -49,6 +50,7 @@ export function proposalToExtension(p: Proposal): string {
       ...(t.description ? { description: t.description } : {}), grain: t.grain || "one row per (say what)", synonyms: t.synonyms,
       ...(t.primaryKey ? { primary_key: t.primaryKey } : {}), ...(t.reportingLag ? { reporting_lag: t.reportingLag } : {}), ...(t.timeColumn ? { default_date_column: t.timeColumn } : {}),
       columns: t.columns.map((c) => ({ name: c.name, type: c.type, ...(c.description ? { description: c.description } : {}) })),
+      ...stamp,
     };
   }
   const patches: Record<string, unknown> = {};
@@ -56,7 +58,7 @@ export function proposalToExtension(p: Proposal): string {
   const joins = p.joins.filter((j) => j.include && j.status !== "existing" && present.has(j.left) && present.has(j.right))
     .map((j) => ({ left: j.left, left_on: j.leftOn, right: j.right, right_on: j.rightOn, type: j.type }));
   const metrics: Record<string, unknown> = {};
-  for (const m of p.metrics) if (m.include && present.has(m.baseTable)) metrics[m.name] = { label: m.label, base_table: m.baseTable, expression: m.expression, ...(m.description ? { description: m.description } : {}) };
+  for (const m of p.metrics) if (m.include && present.has(m.baseTable)) metrics[m.name] = { label: m.label, base_table: m.baseTable, expression: m.expression, ...(m.description ? { description: m.description } : {}), ...stamp };
   return `# Added in Semantic Canvas's Modeler to the model of source ${p.extends ?? "?"}. The base model file is never edited; this file is merged over it.
 ` + YAML.stringify({ tables, joins, metrics, patches }, { lineWidth: 0 });
 }

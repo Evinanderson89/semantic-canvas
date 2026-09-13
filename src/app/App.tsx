@@ -643,7 +643,8 @@ export function App() {
           <Connections sources={sources} activeId={activeSourceId} onSelect={switchSource}
                        onRefresh={() => { refreshSources(); fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message)); }} principals={principals} policies={policies} />
         ) : !dash && view === "registry" ? (
-          <MetricRegistry model={model} initialTable={registryTable} onUse={(m) => {
+          <MetricRegistry model={model} initialTable={registryTable} sourceId={activeSourceId ?? ""}
+            onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} onUse={(m) => {
             const t = model.metrics[m].baseTable;
             setView("home"); build({ table: t, metrics: [m], audience: "operator", grain });
           }} />

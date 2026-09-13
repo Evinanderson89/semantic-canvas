@@ -318,3 +318,48 @@ it("Modeler, extend: proposes only what a source's model lacks, publishes it as 
   expect(await drift.json()).toMatchObject({ source: from, drift: [], dashboards: [] });
   expect((await call(`/api/modeler/drift?source=${from}`, { headers: headers(await login("extend-editor", ["editors"])) })).status).toBe(403);
 }, 60_000);
+it("Proposed metrics: an editor proposes an aggregate, charts it at once, viewers cannot see it until an admin publishes it; bad proposals are refused in words", async () => {
+  const editor = await login("propose-editor", ["editors"]), viewer = await login("propose-viewer", ["viewers"]), admin = await login("propose-admin", ["admins"]);
+  // Editors and viewers are granted "public" only; an earlier case re-provisioned the registry without it, so put it back.
+  const from = "public";
+  if (!(await (await call("/api/sources", { headers: headers(admin) })).json()).sources.some((s: any) => s.id === from)) {
+    const add = await call("/api/sources", { method: "POST", headers: headers(admin), body: JSON.stringify({ id: from, label: "Public", adapter: "duckglue", model: resolve("sample-data/warehouse.yaml"), connector: { type: "duckdb", lakeRoot: resolve("sample-data/lake"), poolSize: 1 } }) });
+    expect(add.status, await add.clone().text()).toBe(200);
+  }
+  const propose = (s: Login, body: unknown) => call(`/api/sources/${from}/metrics`, { method: "POST", headers: headers(s), body: JSON.stringify(body) });
+  expect((await propose(viewer, { name: "x", label: "x", baseTable: "fct_web_sessions", expression: "COUNT(*)" })).status).toBe(403);
+  const bad = await propose(editor, { name: "long_sessions", label: "Long sessions", baseTable: "fct_web_sessions", expression: "COUNT(*) FILTER (WHERE dim_users.country = 'US')" });
+  expect(bad.status).toBe(400); expect((await bad.json()).problems[0]).toContain("dim_users.country is not on fct_web_sessions");
+  const nope = await propose(editor, { name: "long_sessions", label: "Long sessions", baseTable: "fct_web_sessions", expression: "SUM(no_such_column)" });
+  expect(nope.status).toBe(400); expect((await nope.json()).error).toContain('"no_such_column" is not a column');
+  const columns = (await (await call("/api/model", { headers: headers(editor) })).json()).tables.fct_web_sessions.columns.map((c: any) => c.name) as string[];
+  const numeric = columns.find((c) => /pageviews|duration|seconds|minutes/i.test(c)) ?? columns[1];
+  const ok = await propose(editor, { name: "long_sessions", label: "Long sessions", baseTable: "fct_web_sessions", expression: `COUNT(*) FILTER (WHERE fct_web_sessions.${numeric} IS NOT NULL)`, description: "Sessions with a known length." });
+  expect(ok.status, await ok.clone().text()).toBe(200);
+  const m = (await ok.json()).metric;
+  expect(m).toMatchObject({ name: "long_sessions", reviewed: false, origin: { kind: "proposal", by: "Private Person" } });
+  expect((await propose(editor, { name: "long_sessions", label: "Again", baseTable: "fct_web_sessions", expression: "COUNT(*)" })).status).toBe(400);
+  // Live for the editor at once; invisible to the viewer, who cannot query it either.
+  const editorModel = await (await call("/api/model", { headers: headers(editor) })).json();
+  expect(editorModel.metrics.long_sessions.reviewed).toBe(false);
+  expect((await (await call("/api/model", { headers: headers(viewer) })).json()).metrics.long_sessions).toBeUndefined();
+  const q = (s: Login) => call("/api/query", { method: "POST", headers: headers(s), body: JSON.stringify({ metrics: ["long_sessions"], dimensions: [] }) });
+  expect((await q(editor)).status).toBe(200);
+  expect((await q(viewer)).status).toBe(400);
+  // Only an admin publishes; then the viewer sees it, with its provenance.
+  expect((await call(`/api/sources/${from}/metrics/long_sessions/publish`, { method: "POST", headers: headers(editor) })).status).toBe(403);
+  const published = await call(`/api/sources/${from}/metrics/long_sessions/publish`, { method: "POST", headers: headers(admin) });
+  expect(published.status, await published.clone().text()).toBe(200);
+  const seen = (await (await call("/api/model", { headers: headers(viewer) })).json()).metrics.long_sessions;
+  expect(seen.reviewed).not.toBe(false);
+  expect(seen.origin).toMatchObject({ kind: "proposal", by: "Private Person", publishedBy: "Private Person" });
+  expect((await q(viewer)).status).toBe(200);
+  // Once published, the proposer can no longer withdraw it; an admin can remove it; base-model metrics are not removable here.
+  expect((await call(`/api/sources/${from}/metrics/long_sessions`, { method: "DELETE", headers: headers(editor) })).status).toBe(403);
+  expect((await call(`/api/sources/${from}/metrics/active_users`, { method: "DELETE", headers: headers(admin) })).status).toBe(404);
+  expect((await call(`/api/sources/${from}/metrics/long_sessions`, { method: "DELETE", headers: headers(admin) })).status).toBe(200);
+  expect((await (await call("/api/model", { headers: headers(editor) })).json()).metrics.long_sessions).toBeUndefined();
+  // A withdrawal by the proposer, while unreviewed.
+  await propose(editor, { name: "short_sessions", label: "Short sessions", baseTable: "fct_web_sessions", expression: "COUNT(*)" });
+  expect((await call(`/api/sources/${from}/metrics/short_sessions`, { method: "DELETE", headers: headers(editor) })).status).toBe(200);
+}, 60_000);

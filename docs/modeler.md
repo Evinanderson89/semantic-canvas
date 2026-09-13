@@ -61,6 +61,24 @@ Most teams that reach Canvas already have a semantic view (a dbt project, a Snow
 
 Each finding names the metrics whose expression or filter touches the column, and the answer lists the **dashboards** in that source that chart any of them, so "a column vanished" arrives as "these three dashboards break". An extension draft carries the drift as read when it was made.
 
+## Proposed metrics: a field made to order
+
+A metric is a named expression compiled per query; nothing runs when it is defined. So an editor may propose one on the Metric Registry page — label, table, one aggregate over that table's own columns, an optional always-on row filter, a sentence on what it means — and it exists at once:
+
+- **Checked, then probed.** The vocabulary is closed (src/modeler/proposals.ts): an aggregate (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, `COUNT(DISTINCT …)`, `… FILTER (WHERE …)`, `CASE`, `NULLIF`, …) over the base table's columns, qualified or bare; no other table (joins come from the model), no statement, subquery, or file read. Every problem is named in words ("`dim_users.country` is not on `fct_orders`; a metric aggregates one table"). What passes is compiled and run once with `LIMIT 1` before it is stored.
+- **Live for editors, badged.** It is written to the source's extension with `reviewed: false` and `origin: proposal` (who, when), and reloads at once. Editors see it with **Proposed by …, unreviewed**; they can chart it, and the tile carries the badge. Viewers do not see it in the model, cannot query it, and the agent leaves it out — the same gate Ingest's connected tables use.
+- **Published by an administrator.** *Publish to everyone* flips `reviewed` and records who published it and when; the badge becomes **Added in Canvas · by · date** for good, so anyone can tell what came from the governed base model and what was added here. The proposer may withdraw it while unreviewed; after that only an administrator may remove it. Base-model metrics cannot be removed here.
+
+Everything the Modeler adds (tables, metrics) carries the same provenance badge in the Data Model and the Metric Registry.
+
+| Method and path | Who | Answer |
+| --- | --- | --- |
+| `POST /sources/:id/metrics` `{ name, label, baseTable, expression, description?, filter? }` | editors, admins | `{ metric }` (`400` with `problems`; `422` when the warehouse refuses it) |
+| `POST /sources/:id/metrics/:name/publish` | admins | `{ metric }` |
+| `DELETE /sources/:id/metrics/:name` | the proposer while unreviewed; admins | `{ ok, name }` |
+
+From the terminal: `gateway canvas metrics propose|publish|remove`; `gateway canvas model metrics` shows each metric's state and origin.
+
 ## HTTP contract
 
 All routes are administrator-only and serialised with the other configuration writes.

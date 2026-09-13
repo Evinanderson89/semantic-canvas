@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
-import type { Join, Metric, Model, Table } from "../semantic/model.ts";
+import type { Join, Metric, Model, Origin, Table } from "../semantic/model.ts";
 
 /**
  * A model extension: what the Modeler added to a source whose base model
@@ -17,14 +17,22 @@ import type { Join, Metric, Model, Table } from "../semantic/model.ts";
  */
 const SOURCE = /^[a-z][a-z0-9-]{1,40}$/;
 const ident = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(128);
+const originSchema = z.object({ kind: z.enum(["modeler", "proposal"]), by: z.string().min(1).max(200), by_id: z.string().max(200).optional(), at: z.string(), published_by: z.string().max(200).optional(), published_at: z.string().optional() }).strict();
 const columnSchema = z.object({ name: ident, type: z.string().min(1).max(64), description: z.string().max(2000).optional() }).strict();
 const tableSchema = z.object({
   description: z.string().max(4000).optional(), grain: z.string().max(400), synonyms: z.array(z.string().max(120)).max(50).optional(),
   primary_key: ident.nullable().optional(), reporting_lag: z.number().int().min(0).max(365).optional(), default_date_column: ident.optional(),
   columns: z.array(columnSchema).min(1).max(1000),
+  origin: originSchema.optional(),
 }).strict();
 const joinSchema = z.object({ left: ident, left_on: ident, right: ident, right_on: ident, type: z.enum(["left", "inner"]).default("left") }).strict();
-const metricSchema = z.object({ label: z.string().min(1).max(200), base_table: ident, expression: z.string().min(1).max(4000), description: z.string().max(2000).optional(), synonyms: z.array(z.string().max(120)).max(50).optional() }).strict();
+const metricSchema = z.object({
+  label: z.string().min(1).max(200), base_table: ident, expression: z.string().min(1).max(4000), description: z.string().max(2000).optional(), synonyms: z.array(z.string().max(120)).max(50).optional(),
+  filter: z.string().max(4000).nullable().optional(),
+  /** false on a metric an editor proposed that no administrator has published; absent counts as reviewed. */
+  reviewed: z.boolean().optional(),
+  origin: originSchema.optional(),
+}).strict();
 export const extensionSchema = z.object({
   tables: z.record(ident, tableSchema).default({}),
   joins: z.array(joinSchema).default([]),
@@ -66,6 +74,7 @@ export function mergeExtension(model: Model, ext: Extension | null, sourceId: st
     tables[name] = {
       name, description: (t.description ?? "").trim(), grain: t.grain, synonyms: t.synonyms ?? [], partitionKeys: [], primaryKey: t.primary_key ?? null,
       reportingLagDays: t.reporting_lag, relation: { table: name }, columns: t.columns.map((c) => ({ name: c.name, type: c.type, description: c.description })),
+      ...(t.origin ? { origin: fromOrigin(t.origin) } : {}),
     };
   }
   for (const [name, patch] of Object.entries(ext.patches)) {
@@ -80,7 +89,18 @@ export function mergeExtension(model: Model, ext: Extension | null, sourceId: st
   for (const [name, m] of Object.entries(ext.metrics)) {
     if (metrics[name]) { warn("extension.metric_shadowed", { metric: name }); continue; }
     if (!tables[m.base_table]) { warn("extension.metric_orphaned", { metric: name }); continue; }
-    metrics[name] = { name, label: m.label, description: (m.description ?? "").trim(), baseTable: m.base_table, expression: m.expression, filter: null, synonyms: m.synonyms ?? [] };
+    metrics[name] = { name, label: m.label, description: (m.description ?? "").trim(), baseTable: m.base_table, expression: m.expression, filter: m.filter ?? null, synonyms: m.synonyms ?? [],
+      ...(m.reviewed === false ? { reviewed: false } : {}), ...(m.origin ? { origin: fromOrigin(m.origin) } : {}) };
   }
   return { ...model, tables, metrics, joins };
+}
+
+const fromOrigin = (o: NonNullable<Extension["metrics"][string]["origin"]>): Origin => ({ kind: o.kind, by: o.by, byId: o.by_id, at: o.at, publishedBy: o.published_by, publishedAt: o.published_at });
+
+/** Read-modify-write one source's extension under the caller's queue; creates it when absent. */
+export async function updateExtension(sourceId: string, change: (ext: Extension) => Extension | Promise<Extension>): Promise<Extension> {
+  const current = (await readExtension(sourceId)) ?? extensionSchema.parse({});
+  const next = extensionSchema.parse(await change(current));
+  await writeExtension(sourceId, YAML.stringify(next, { lineWidth: 0 }));
+  return next;
 }
