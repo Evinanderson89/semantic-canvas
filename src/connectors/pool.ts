@@ -1,7 +1,8 @@
 import { leasePool } from "./leases.ts";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
-import type { Connector, QueryResult } from "./types.ts";
+import { readdir } from "node:fs/promises";
+import type { CatalogTable, Connector, QueryResult } from "./types.ts";
 
 /**
  * A small connection pool plus a result cache.
@@ -77,7 +78,7 @@ export async function pooledDuckdb(
   const cache = new Map<string, Entry>();
 
   const root = lakeRoot.replace(/\/$/, "");
-  return {
+  const self: Connector & { stats(): object } = {
     id: "duckdb", label: "DuckDB (pooled)",
     quote: (i) => `"${i.replace(/"/g, '""')}"`,
     dateTrunc: (grain, expr) => `CAST(date_trunc('${grain}', ${expr}) AS DATE)`,
@@ -112,11 +113,33 @@ export async function pooledDuckdb(
       } finally { release(conn); }
     },
 
+    /** Every table directory in the lake (a directory holding Parquet), with the columns DuckDB reads from it. */
+    async catalog(): Promise<CatalogTable[]> {
+      let names: string[];
+      if (root.startsWith("s3://")) {
+        const r = await self.execute(`SELECT DISTINCT regexp_extract(file, '^${root.replace(/'/g, "''")}/([^/]+)/', 1) AS t FROM glob('${root.replace(/'/g, "''")}/*/**/*.parquet') ORDER BY t`, 5000, "catalog");
+        names = r.rows.map((x: unknown[]) => String(x[0])).filter(Boolean);
+      } else {
+        const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+        names = entries.filter((e) => e.isDirectory() && /^[A-Za-z_][A-Za-z0-9_]*$/.test(e.name) && !e.name.startsWith("_")).map((e) => e.name).sort();
+      }
+      const out: CatalogTable[] = [];
+      for (const name of names) {
+        try {
+          const r = await self.execute(`DESCRIBE SELECT * FROM ${self.relation(name)}`, 1000, "catalog");
+          const ni = r.columns.indexOf("column_name"), ti = r.columns.indexOf("column_type");
+          out.push({ name, columns: r.rows.map((x: unknown[]) => ({ name: String(x[ni]), type: String(x[ti]) })) });
+        } catch { /* not a table directory */ }
+      }
+      return out;
+    },
+
     stats: () => ({ ...leases.stats(),
                     cached: cache.size, hits, misses,
                     hitRate: hits + misses ? +(hits / (hits + misses)).toFixed(3) : 0 }),
     close() { if (secretRefresh) clearInterval(secretRefresh); cache.clear(); return closing ??= leases.close().finally(() => { cache.clear(); instance.closeSync(); }); },
   };
+  return self;
 }
 
 function normalize(v: any): unknown {

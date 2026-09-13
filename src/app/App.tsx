@@ -25,6 +25,7 @@ import { AgentChat } from "./AgentChat.tsx";
 import { Inspector } from "./Inspector.tsx";
 import { MetricRegistry, DataModel } from "./Explore.tsx";
 import { Connections, type Principal, type RlsPolicy, type SourceInfo } from "./Connections.tsx";
+import { Modeler } from "./Modeler.tsx";
 import type { Brief } from "../suggest/match.ts";
 import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
@@ -85,7 +86,8 @@ export function App() {
   const [zoom, setZoom] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [interview, setInterview] = useState(false);
-  const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library">("home");
+  // /modeler is the Modeler's own address on the gateway (registered as its own app); the SPA serves it like any path.
+  const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library" | "modeler">(() => location.pathname.replace(/\/+$/, "") === "/modeler" ? "modeler" : "home");
   // ?source=&table= from an "Open in Semantic Canvas" link: read once, applied when the sources (then the model) are known, and stripped.
   const link = React.useRef<ReturnType<typeof parseLink> | null>(parseLink(location.search));
   const [sourcesLoaded, setSourcesLoaded] = useState(false);
@@ -647,6 +649,8 @@ export function App() {
           }} />
         ) : !dash && view === "model" ? (
           <DataModel model={model} />
+        ) : !dash && view === "modeler" ? (
+          <Modeler sources={sources} onPublished={() => refreshSources()} />
         ) : !dash ? (
           <>{session.canEdit ? <Entry model={model} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)}
                  onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} /> : <div className="explore"><span className="eyebrow">Company workspace</span><h1>Your metrics, in focus.</h1><p className="lede">Open a shared dashboard below, or browse CoreCanvas Library. Filters and drill-downs follow your company’s data permissions.</p></div>}

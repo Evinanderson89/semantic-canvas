@@ -21,6 +21,11 @@ import { suggestDashboard } from "./suggest/suggest.ts";
 import type { Connector } from "./connectors/types.ts";
 import { reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
 import { metricIssues, publishSchema, readOverlay, registerSchema, summarize, writeOverlay, type ConnectedEntry } from "./sources/connected.ts";
+import { connectConnector } from "./sources/registry.ts";
+import { joinCandidates, probeJoins, profileTables } from "./modeler/introspect.ts";
+import { propose } from "./modeler/propose.ts";
+import { proposalIssues, proposalToYaml } from "./modeler/yaml.ts";
+import { draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import YAML from "yaml";
@@ -146,7 +151,7 @@ const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => 
     catch (e: any) { telemetry.log("request.failed", { requestId: res.locals.requestId, errorType: e?.name ?? "Error" }, "error"); res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
   };
   // Covers /api/sources/:id/connected* too: overlay writes share the queue with sources.yaml edits.
-  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(sources|agent\/key|setup\/model)(\/|$)/.test(req.path.toLowerCase())) {
+  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(sources|agent\/key|setup\/model|modeler)(\/|$)/.test(req.path.toLowerCase())) {
     const pending = configQueue.then(run); configQueue = pending.catch(() => {}); await pending;
   } else await run();
 };
@@ -375,19 +380,26 @@ app.post("/api/sources", safe(async (req, res) => {
 
   const built = buildConnector(connectorType, body.connector, {});
   if (!built.ok) return res.status(built.status).json({ error: built.error });
-  const rawConnector = built.connector;
+  const added = await addSource({ id, label, adapter, model, connectorType, connector: built.connector });
+  if ("error" in added) return res.status(added.status).json({ error: added.error });
+  res.json(added.reload);
+}));
 
+/** Connect with the literal values first; nothing is written unless that succeeds. Shared by the Connections form and the Modeler's publish. */
+async function addSource(input: { id: string; label: string; adapter: string; model: string; connectorType: string; connector: Record<string, any> }):
+  Promise<{ reload: Awaited<ReturnType<typeof hotReload>> } | { status: number; error: string }> {
+  const { id, label, adapter, model, connectorType, connector: rawConnector } = input;
   // DuckDB's pool opens lazily (an in-memory instance; lakeRoot is only ever
   // touched by the read_parquet() a real query issues), so "it connected"
   // proves nothing about lakeRoot -- check the directory ourselves.
   if (connectorType === "duckdb" && !String(rawConnector.lakeRoot ?? "").startsWith("s3://")) {
     const dir = expand(rawConnector.lakeRoot);
     if (!existsSync(dir) || !statSync(dir).isDirectory())
-      return res.status(422).json({ error: `lakeRoot does not exist or is not a directory: ${dir}` });
+      return { status: 422, error: `lakeRoot does not exist or is not a directory: ${dir}` };
   }
 
   const trial = await connectOne({ id, label, adapter, model, connector: rawConnector });
-  if (trial.status === "error") return res.status(422).json({ error: trial.error });
+  if (trial.status === "error") return { status: 422, error: trial.error! };
   await trial.conn?.close?.().catch(() => {}); // the reload below opens its own pool
 
   try {
@@ -406,10 +418,119 @@ app.post("/api/sources", safe(async (req, res) => {
     else throw new Error("sources must be a list");
     await writeConfig(SOURCES_PATH, document.toString({ lineWidth: 0 }));
   } catch (e: any) {
-    return res.status(500).json({ error: `connected, but failed to save: ${e?.message ?? e}` });
+    return { status: 500, error: `connected, but failed to save: ${e?.message ?? e}` };
   }
+  return { reload: await hotReload() };
+}
 
-  res.json(await hotReload());
+// ---- Modeler (docs/modeler.md): a semantic model proposed from the warehouse, reviewed, published as a source ----
+const draftCreateSchema = z.object({
+  id: z.string().regex(SLUG, "id must be lowercase letters, digits and hyphens, starting with a letter"), label: z.string().min(1).max(200),
+  connector: z.record(z.string(), z.unknown()).optional(), fromSource: z.string().regex(SLUG).optional(),
+}).strict().refine((b) => Boolean(b.connector) !== Boolean(b.fromSource), "Give a connector or a source to read, not both");
+
+app.get("/api/modeler/drafts", safe(async (_req, res) => res.json({ drafts: (await listDrafts()).map(summarizeDraft) })));
+
+app.post("/api/modeler/drafts", safe(async (req, res) => {
+  const input = draftCreateSchema.parse(req.body ?? {});
+  if (await readDraft(input.id)) return res.status(409).json({ error: `a draft named "${input.id}" already exists` });
+  if (sources.some((s) => s.id === input.id)) return res.status(409).json({ error: `a source named "${input.id}" already exists; choose another id` });
+  let conn: Connector, stored: Draft["connector"], fromSource: string | undefined, borrowed = false;
+  if (input.fromSource) {
+    const s = sources.find((x) => x.id === input.fromSource);
+    if (!s || s.status !== "ready" || !s.conn) return res.status(404).json({ error: `no ready source "${input.fromSource}"` });
+    conn = s.conn; fromSource = s.id; borrowed = true;
+  } else {
+    const connectorType = String((input.connector as any)?.type ?? "");
+    const built = buildConnector(connectorType, input.connector, {});
+    if (!built.ok) return res.status(built.status).json({ error: built.error });
+    if (connectorType === "duckdb" && !String(built.connector.lakeRoot ?? "").startsWith("s3://")) {
+      const dir = expand(built.connector.lakeRoot);
+      if (!existsSync(dir) || !statSync(dir).isDirectory()) return res.status(422).json({ error: `lakeRoot does not exist or is not a directory: ${dir}` });
+    }
+    try { conn = await connectConnector(built.connector); } catch (e: any) { return res.status(422).json({ error: String(e?.message ?? e) }); }
+    // Stored as sources.yaml would hold it: credentials go to .env now, the draft keeps ${VAR} references.
+    const lines = await renderConnectorLines(input.id, input.label, connectorType, built.connector);
+    stored = YAML.parse(lines.map((l) => l.replace(/^ {6}/, "")).join("\n"));
+  }
+  try {
+    if (!conn.catalog) return res.status(400).json({ error: "This connector cannot list its tables, so the Modeler cannot read it." });
+    const catalog = await conn.catalog();
+    if (!catalog.length) return res.status(422).json({ error: "The warehouse has no tables to model." });
+    const profiles = await profileTables(conn, catalog);
+    const probes = await probeJoins(conn, profiles, joinCandidates(profiles));
+    const now = new Date().toISOString();
+    const draft: Draft = { id: input.id, label: input.label, connector: stored, fromSource, createdAt: now, createdBy: actorOf(req), updatedAt: now, publishedAt: null, sourceId: null,
+      proposal: propose({ id: input.id, label: input.label, tables: profiles, probes }) };
+    await writeDraft(draft);
+    telemetry.log("audit.modeler_drafted", { actor: actorOf(req), id: draft.id, tables: profiles.length, probes: probes.length });
+    res.json(draft);
+  } finally { if (!borrowed) await conn!.close().catch(() => {}); }
+}));
+
+app.get("/api/modeler/drafts/:id", safe(async (req, res) => {
+  const d = await readDraft(String(req.params.id));
+  if (!d) return res.status(404).json({ error: `no draft "${req.params.id}"` });
+  res.json(d);
+}));
+
+app.put("/api/modeler/drafts/:id", safe(async (req, res) => {
+  const d = await readDraft(String(req.params.id));
+  if (!d) return res.status(404).json({ error: `no draft "${req.params.id}"` });
+  const patch = draftPatchSchema.parse(req.body ?? {});
+  const next: Draft = { ...d, ...(patch.label ? { label: patch.label } : {}), ...(patch.proposal ? { proposal: patch.proposal } : {}), updatedAt: new Date().toISOString() };
+  await writeDraft(next);
+  res.json({ ...next, issues: proposalIssues(next.proposal) });
+}));
+
+app.get("/api/modeler/drafts/:id/yaml", safe(async (req, res) => {
+  const d = await readDraft(String(req.params.id));
+  if (!d) return res.status(404).json({ error: `no draft "${req.params.id}"` });
+  res.type("text/yaml").send(proposalToYaml(d.proposal));
+}));
+
+app.delete("/api/modeler/drafts/:id", safe(async (req, res) => {
+  const d = await readDraft(String(req.params.id));
+  if (!d) return res.status(404).json({ error: `no draft "${req.params.id}"` });
+  await removeDraft(d.id);
+  res.json({ ok: true, id: d.id, sourceId: d.sourceId });
+}));
+
+/** Write the model file and add (or refresh) the source that reads it. The draft stays, marked published, so it can be revised and republished. */
+app.post("/api/modeler/drafts/:id/publish", safe(async (req, res) => {
+  const d = await readDraft(String(req.params.id));
+  if (!d) return res.status(404).json({ error: `no draft "${req.params.id}"` });
+  const issues = proposalIssues(d.proposal);
+  if (issues.length) return res.status(400).json({ error: issues[0], issues });
+  const path = await writeAuthored(d.id, proposalToYaml(d.proposal));
+  const already = sources.find((s) => s.id === d.id);
+  let reload: Awaited<ReturnType<typeof hotReload>>;
+  if (already) reload = await hotReload();
+  else {
+    let connector: Record<string, any>, connectorType: string;
+    if (d.fromSource) {
+      // The borrowed source's connector, as configured (${VAR} references resolve in buildConnector). Parsed, not line-matched: any YAML layout will do.
+      const entry = ((YAML.parse((await readFile(SOURCES_PATH, "utf8").catch(() => "")) || "{}")?.sources ?? []) as any[]).find((x) => x?.id === d.fromSource);
+      if (!entry) return res.status(404).json({ error: `the source this draft reads, ${d.fromSource}, is no longer configured` });
+      connectorType = String(entry.connector?.type ?? "duckdb");
+      const built = buildConnector(connectorType, {}, entry.connector ?? {});
+      if (!built.ok) return res.status(built.status).json({ error: built.error });
+      connector = built.connector;
+    } else {
+      connectorType = String(d.connector?.type ?? "duckdb");
+      const built = buildConnector(connectorType, {}, d.connector ?? {});
+      if (!built.ok) return res.status(built.status).json({ error: built.error });
+      connector = built.connector;
+    }
+    const added = await addSource({ id: d.id, label: d.label, adapter: "duckglue", model: path, connectorType, connector });
+    if ("error" in added) return res.status(added.status).json({ error: added.error });
+    reload = added.reload;
+  }
+  const published: Draft = { ...d, publishedAt: new Date().toISOString(), sourceId: d.id, updatedAt: new Date().toISOString() };
+  await writeDraft(published);
+  const source = sources.find((s) => s.id === d.id);
+  telemetry.log("audit.modeler_published", { actor: actorOf(req), id: d.id, tables: Object.keys(source?.model?.tables ?? {}).length, metrics: Object.keys(source?.model?.metrics ?? {}).length });
+  res.json({ draft: summarizeDraft(published), source: source ? describeSource(source) : null, path, sources: reload.sources });
 }));
 
 /** Non-secret fields only, for the edit form to pre-fill -- privateKey,

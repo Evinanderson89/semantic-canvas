@@ -24,5 +24,9 @@ export interface Connector {
   /** What to put in FROM for a catalog table. */
   relation(table: string, physical?: { database?: string; schema?: string; table: string }): string;
   execute(sql: string, limit?: number, cacheKey?: string): Promise<QueryResult>;
+  /** The warehouse's own catalogue, for the Modeler: every scannable table with its columns and their native types. */
+  catalog?(): Promise<CatalogTable[]>;
   close(): Promise<void>;
 }
+
+export interface CatalogTable { name: string; columns: { name: string; type: string }[]; relation?: { database?: string; schema?: string; table: string } }

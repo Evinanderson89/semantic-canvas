@@ -76,7 +76,7 @@ export async function snowflakeConnector(
   const qualify = (t: string) =>
     [cfg.database, cfg.schema, t].filter(Boolean).map(quote).join(".");
 
-  return {
+  const self: Connector & { schema(): Promise<SchemaTable[]>; stats(): object } = {
     id: "snowflake", label: `Snowflake (${cfg.account}/${cfg.database}.${cfg.schema})`,
     quote,
     // Snowflake spells this the same as DuckDB, but the unit must be unquoted.
@@ -97,6 +97,9 @@ export async function snowflakeConnector(
         };
       } finally { release(conn); }
     },
+
+    /** The Modeler's view of the schema: the same listing, in the connector's shared shape. */
+    async catalog() { return (await self.schema()).map((t) => ({ name: t.name, columns: t.columns, relation: { table: t.name } })); },
 
     /** Read the warehouse schema -- step 1's "schema is fully readable". */
     async schema(): Promise<SchemaTable[]> {
@@ -122,6 +125,7 @@ export async function snowflakeConnector(
     stats: leases.stats,
     close: leases.close,
   };
+  return self;
 }
 
 export interface SchemaTable { name: string; columns: { name: string; type: string }[] }

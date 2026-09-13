@@ -32,7 +32,7 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
                           principals = [], principal = "", onPrincipal = () => {},
                           sources = [], activeSource = null }: {
   model: Model; view: string;
-  onView: (v: "home" | "registry" | "model" | "connections") => void;
+  onView: (v: "home" | "registry" | "model" | "connections" | "modeler") => void;
   collapsed: boolean; onToggle: () => void;
   onSettings: () => void;
   library: ReactNode;
@@ -89,6 +89,8 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
         <NavItem icon="plug" label="Connections" active={view === "connections"}
                  badge={String(sources.length)}
                  onClick={() => onView("connections")} />
+        {session.canAdmin && <NavItem icon="db" label="Modeler" active={view === "modeler"}
+                 onClick={() => onView("modeler")} />}
       </nav>
 
       {/* The library tree is the flexible part of a short sidebar: it scrolls so the footer stays reachable. */}
