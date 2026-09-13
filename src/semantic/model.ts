@@ -25,6 +25,8 @@ export interface Table {
   relation?: { database?: string; schema?: string; table: string };
   /** Set on tables registered by Ingest (docs/connected-canvas.md); absent on base-model tables. */
   connected?: ConnectedInfo;
+  /** Set on tables the Modeler added over a base model. */
+  origin?: Origin;
 }
 
 export interface ConnectedProvenance { source: string; loadedAt: string; loadedBy: string; rows: number; refreshEvery?: "15m" | "1h" | "6h" | "12h" | "1d" | "7d"; expectedBy?: string }
@@ -55,7 +57,12 @@ export interface Metric {
   synonyms: string[];
   /** false on a connected draft metric no admin has published yet; undefined (base model) counts as reviewed. */
   reviewed?: boolean;
+  /** Set on what was added in Canvas rather than in the base model: by the Modeler, or proposed on the Metric Registry. */
+  origin?: Origin;
 }
+
+/** Provenance of a table or metric that was added in Canvas. */
+export interface Origin { kind: "modeler" | "proposal"; by: string; byId?: string; at: string; publishedBy?: string; publishedAt?: string }
 
 export interface Join {
   left: string;

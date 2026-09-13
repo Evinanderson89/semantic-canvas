@@ -167,7 +167,8 @@ export class CompanyAuth {
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !this.validCsrf(req, session)) return res.status(403).json({ error: "Your session needs a fresh page. Reload and try again." });
     const route = req.path.toLowerCase().replace(/^\/api(?=\/)/, "");
     // Tables Ingest registers (/sources/:id/connected) are an editor surface; publishing them into the governed catalogue stays admin-only, as does everything else under /sources/.
-    const connected = /^\/sources\/[^/]+\/connected(\/|$)/.test(route), publish = /^\/sources\/[^/]+\/connected\/[^/]+\/publish$/.test(route);
+    // Proposed metrics (/sources/:id/metrics) are an editor surface too; publishing one is admin-only.
+    const connected = /^\/sources\/[^/]+\/(connected|metrics)(\/|$)/.test(route), publish = /^\/sources\/[^/]+\/(connected|metrics)\/[^/]+\/publish$/.test(route);
     const admin = /^\/(sources\/|operations|setup|modeler)/.test(route) && (!connected || publish) || route === "/sources" && req.method !== "GET" || route === "/agent/key";
     const write = (route.startsWith("/dashboards") || /^\/library(\/|$)/.test(route) || connected) && !["GET", "HEAD", "OPTIONS"].includes(req.method);
     if (admin && session.identity.role !== "admin" || write && session.identity.role === "viewer") return res.status(403).json({ error: "Your workspace role does not allow this action" });

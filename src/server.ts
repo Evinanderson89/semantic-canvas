@@ -26,7 +26,8 @@ import { joinCandidates, probeJoins, profileTables } from "./modeler/introspect.
 import { propose } from "./modeler/propose.ts";
 import { proposalIssues, proposalToExtension, proposalToYaml } from "./modeler/yaml.ts";
 import { driftOf, extendProposal } from "./modeler/extend.ts";
-import { writeExtension } from "./sources/extensions.ts";
+import { updateExtension, writeExtension } from "./sources/extensions.ts";
+import { proposalProblems } from "./modeler/proposals.ts";
 import { draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -539,7 +540,7 @@ app.post("/api/modeler/drafts/:id/publish", safe(async (req, res) => {
     // Extending a source: the base model file is never touched; the additions go to an extension merged over it.
     const target = sources.find((s) => s.id === d.proposal.extends);
     if (!target) return res.status(404).json({ error: `the source this draft extends, ${d.proposal.extends}, is no longer configured` });
-    const path = await writeExtension(target.id, proposalToExtension(d.proposal));
+    const path = await writeExtension(target.id, proposalToExtension(d.proposal, { by: identityOf(req)?.name ?? actorOf(req), at: new Date().toISOString() }));
     const reload = await hotReload();
     const published: Draft = { ...d, publishedAt: new Date().toISOString(), sourceId: target.id, updatedAt: new Date().toISOString() };
     await writeDraft(published);
@@ -671,6 +672,58 @@ app.delete("/api/sources/:id", safe(async (req, res) => {
  * and disconnect their own entries; only an admin publishes one into the
  * governed catalogue. The lake itself is never touched from here.
  */
+// ---- Proposed metrics (docs/modeler.md, "Proposed metrics"): an editor names an aggregate; admins publish it to viewers ----
+const proposeMetricSchema = z.object({
+  name: z.string().max(64), label: z.string().max(200), baseTable: z.string().max(128), expression: z.string().max(4000),
+  description: z.string().max(2000).optional(), filter: z.string().max(4000).nullable().optional(),
+}).strict();
+
+app.post("/api/sources/:sourceId/metrics", safe(async (req, res) => {
+  const source = connectedSource(req);
+  if (source.status !== "ready" || !source.model || !source.conn) return res.status(503).json({ error: "This source is not ready." });
+  const p = proposeMetricSchema.parse(req.body);
+  const problems = proposalProblems(source.model, p);
+  if (problems.length) return res.status(400).json({ error: problems[0], problems });
+  const who = identityOf(req)?.name ?? "local", whoId = actorOf(req), at = new Date().toISOString();
+  // One probe against the warehouse before anything is stored: the expression has to compile and run.
+  const candidate: Model = { ...source.model, metrics: { ...source.model.metrics, [p.name]: { name: p.name, label: p.label, baseTable: p.baseTable, expression: p.expression, filter: p.filter ?? null, synonyms: [], reviewed: false } } };
+  try {
+    const sql = compileTile(candidate, source.conn, { id: "probe", metrics: [p.name], dimensions: [], layout: { x: 0, y: 0, w: 1, h: 1 } }, { probe: true });
+    await source.conn.execute(sql, 1, `probe:${whoId}:${at}`);
+  } catch (e: any) { return res.status(422).json({ error: `The warehouse refused it: ${String(e?.message ?? e).split("\n")[0]}`, problems: [] }); }
+  await updateExtension(source.id, (ext) => ({ ...ext, metrics: { ...ext.metrics, [p.name]: {
+    label: p.label.trim(), base_table: p.baseTable, expression: p.expression.trim(), ...(p.description?.trim() ? { description: p.description.trim() } : {}), ...(p.filter?.trim() ? { filter: p.filter.trim() } : {}),
+    reviewed: false, origin: { kind: "proposal", by: who, by_id: whoId, at } } } }));
+  telemetry.log("audit.metric_proposed", { actor: whoId, source: source.id, metric: p.name, table: p.baseTable });
+  await hotReload();
+  res.json({ metric: sources.find((s) => s.id === source.id)?.model?.metrics[p.name] ?? null });
+}));
+
+app.post("/api/sources/:sourceId/metrics/:name/publish", safe(async (req, res) => {
+  const source = connectedSource(req), name = String(req.params.name);
+  const m = source.model?.metrics[name];
+  if (!m?.origin || m.origin.kind !== "proposal") return res.status(404).json({ error: `no proposed metric "${name}" on ${source.id}` });
+  if (m.reviewed !== false) return res.status(409).json({ error: `${name} is already published.` });
+  const who = identityOf(req)?.name ?? "local", at = new Date().toISOString();
+  await updateExtension(source.id, (ext) => ({ ...ext, metrics: { ...ext.metrics, [name]: { ...ext.metrics[name], reviewed: true, origin: { ...ext.metrics[name].origin!, published_by: who, published_at: at } } } }));
+  telemetry.log("audit.metric_published", { actor: actorOf(req), source: source.id, metric: name });
+  await hotReload();
+  res.json({ metric: sources.find((s) => s.id === source.id)?.model?.metrics[name] ?? null });
+}));
+
+/** The proposer may withdraw an unpublished proposal; an administrator may remove any metric added in Canvas. */
+app.delete("/api/sources/:sourceId/metrics/:name", safe(async (req, res) => {
+  const source = connectedSource(req), name = String(req.params.name);
+  const m = source.model?.metrics[name];
+  if (!m?.origin) return res.status(404).json({ error: m ? `${name} comes from the base model; edit it there.` : `no metric "${name}" on ${source.id}` });
+  const mine = m.origin.byId === actorOf(req) && m.reviewed === false;
+  if (roleOf(req) !== "admin" && !mine) return res.status(403).json({ error: "Only the person who proposed it can withdraw it before it is published; after that, an administrator." });
+  await updateExtension(source.id, (ext) => { const { [name]: _gone, ...rest } = ext.metrics; return { ...ext, metrics: rest }; });
+  telemetry.log("audit.metric_removed", { actor: actorOf(req), source: source.id, metric: name, published: m.reviewed !== false });
+  await hotReload();
+  res.json({ ok: true, name });
+}));
+
 function connectedSource(req: any): Source {
   const id = String(req.params.sourceId);
   if (!canUseSource(identityOf(req), id)) throw Object.assign(new Error("This source is not available to your account"), { status: 403 });

@@ -1314,3 +1314,9 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .modeler-status.new{color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
 .modeler-warnings li.err{color:var(--neg)}
 .modeler-drift{margin-top:14px}
+.propose-metric-cta{display:flex;align-items:center;gap:10px;margin:0 0 16px}
+.propose-metric{margin:0 0 18px}
+.propose-columns{font-size:11px;color:var(--ink-3);line-height:1.5;word-break:break-word}
+.propose-problems{margin:8px 0 0;padding-left:18px;line-height:1.6}
+.metric-actions{display:inline-flex;gap:6px;align-items:center;margin-left:auto}
+.mrow-top .use{margin-left:0}
