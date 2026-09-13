@@ -1,6 +1,7 @@
 import type { CatalogTable } from "../connectors/types.ts";
 import type { Model } from "../semantic/model.ts";
 import { normalizeType, type Proposal, type ProposedMetric } from "./propose.ts";
+import { metricOf } from "../semantic/model.ts";
 
 /**
  * Extending a model that already exists (docs/modeler.md, "Extend"): the
@@ -115,7 +116,7 @@ export function extendProposal(p: Proposal, model: Model, extendsSource: string)
   });
   const metrics: ProposedMetric[] = p.metrics.flatMap((m): ProposedMetric[] => {
     if (!known.has(m.baseTable)) return [{ ...m, status: "new" as const }];
-    if (model.metrics[m.name]) return [];
+    if (metricOf(model, m.name)) return [];
     const used = metricsByTable.get(m.baseTable);
     const cols = [...columnsIn(m.expression)];
     if (used?.has(`expr:${norm(m.expression)}`)) return []; // the same aggregate exists under another name

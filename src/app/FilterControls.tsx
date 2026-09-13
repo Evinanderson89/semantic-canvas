@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { DashboardFilter, DashboardSpec, FilterPresentation, FilterValue } from "../compiler/spec.ts";
 import { FILTER_PRESENTATIONS } from "../compiler/schema.ts";
-import { calendarOf, fieldReachable, prettifyModelName, todayOf, type Model } from "../semantic/model.ts";
+import { metricOf, calendarOf, fieldReachable, prettifyModelName, todayOf, type Model } from "../semantic/model.ts";
 import { fieldKind, hasFilterValue, presentationOf, suggestedBindings } from "./filters.ts";
 import { PRESETS, PRESET_IDS, resolvePreset } from "./datePresets.ts";
 import { tabOf, tabsOf } from "./tabs.ts";
@@ -37,9 +37,9 @@ export function FilterDesigner({ spec, model, tabId, existing, onSave, onDelete,
       <div className="binding-heading"><b>Connected charts</b><span>{filter.bindings.length} of {charts.length} charts</span></div>
       <p className="muted">Matching fields connect automatically. Map a different field only when it represents the same thing.</p>
       <div className="binding-list">{charts.map(t => {
-        const reachable = fields.filter(f => fieldKind(model, f) === filter.control && fieldReachable(model, model.metrics[t.metrics[0]]?.baseTable ?? "", f));
+        const reachable = fields.filter(f => fieldKind(model, f) === filter.control && fieldReachable(model, metricOf(model, t.metrics[0])?.baseTable ?? "", f));
         const binding = filter.bindings.find(b => b.tileId === t.id);
-        return <label className="binding-row" key={t.id}><span><b>{t.title || t.metrics.map(m => model.metrics[m]?.label ?? m).join(", ")}</b><small>{tabsOf(spec).find(tab => tab.id === tabOf(spec, t))?.title}</small></span>
+        return <label className="binding-row" key={t.id}><span><b>{t.title || t.metrics.map(m => metricOf(model, m)?.label ?? m).join(", ")}</b><small>{tabsOf(spec).find(tab => tab.id === tabOf(spec, t))?.title}</small></span>
           <select aria-label={`Connect ${t.title || t.id}`} value={binding?.field ?? ""} onChange={e => setFilter({ ...filter, bindings: [...filter.bindings.filter(b => b.tileId !== t.id), ...(e.target.value ? [{ tileId: t.id, field: e.target.value }] : [])] })}>
             <option value="">Not connected</option>{reachable.map(f => <option key={f} value={f}>{prettifyModelName(f.split(".")[1])} · {prettifyModelName(f.split(".")[0].replace(/^(dim|fct)_/, ""))}</option>)}
           </select></label>;
@@ -59,7 +59,7 @@ export function FilterControl({ filter, value, onChange, spec, model, queryConte
     if (filter.control !== "select") return;
     setLoading(true); setError("");
     const binding = filter.bindings.find(b => b.field === filter.field), tile = spec.tiles.find(t => t.id === binding?.tileId);
-    const base = tile ? model.metrics[tile.metrics[0]]?.baseTable : filter.field.split(".")[0];
+    const base = tile ? metricOf(model, tile.metrics[0])?.baseTable : filter.field.split(".")[0];
     const ac = new AbortController();
     fetch(`/api/values?field=${encodeURIComponent(filter.field)}&base=${encodeURIComponent(base ?? "")}`, { signal: ac.signal }).then(readResponse).then(d => { setOptions(d.values); setLoading(false); }).catch(e => { if (!ac.signal.aborted) { setError(e.message); setLoading(false); } });
     return () => ac.abort();

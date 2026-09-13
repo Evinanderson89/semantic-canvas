@@ -1,5 +1,5 @@
 import type { Connector } from "../connectors/types.ts";
-import { joinPath, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, timeColumnOf, computedMetricIssue, calendarOf, type Metric, type Model } from "../semantic/model.ts";
+import { metricOf, joinPath, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, timeColumnOf, computedMetricIssue, calendarOf, type Metric, type Model } from "../semantic/model.ts";
 import type { FilterSpec, TileSpec, ValidationIssue } from "./spec.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -20,7 +20,7 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
   const bases = new Set<string>();
   const timeDims = (tile.dimensions ?? []).filter((d) => d.includes(":"));
   for (const name of tile.metrics ?? []) {
-    const m = model.metrics[name];
+    const m = metricOf(model, name);
     if (!m) { issues.push({ tile: id, problem: `unknown metric "${name}"` }); continue; }
     const defect = computedMetricIssue(model, m);
     if (defect) { issues.push({ tile: id, problem: defect }); continue; }
@@ -35,7 +35,7 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
     bases.add(m.baseTable);
     if (metricType(m) === "cumulative" && !timeDims.length) issues.push({ tile: id, problem: `${m.label} is cumulative: it needs a time dimension to run along` });
     if (isCrossTableRatio(model, m)) {
-      const den = model.metrics[m.denominator!];
+      const den = metricOf(model, m.denominator!);
       if ((tile.metrics ?? []).length > 1) issues.push({ tile: id, problem: `${m.label} divides ${m.baseTable} by ${den.baseTable}; a ratio across two tables is charted on its own tile` });
       if (timeDims.length && !timeColumnOf(model, den.baseTable)) issues.push({ tile: id, problem: `${den.baseTable} has no date column to align ${m.label}'s denominator on` });
       for (const dim of tile.dimensions ?? []) {
@@ -72,12 +72,12 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
   for (const f of tile.where ?? []) {
     if (f.source === "dimension" && (f.field.includes(":") || !fieldReachable(model, base, f.field)))
       issues.push({ tile: id, problem: `unknown or unreachable filter field "${f.field}"` });
-    if (f.source === "metric" && (!tile.metrics.includes(f.field) || model.metrics[f.field]?.baseTable !== base))
+    if (f.source === "metric" && (!tile.metrics.includes(f.field) || metricOf(model, f.field)?.baseTable !== base))
       issues.push({ tile: id, problem: `metric filter "${f.field}" must name a selected metric on this table` });
   }
   if (tile.compare && tile.compare !== "none" && !(tile.dimensions ?? []).some((d) => d.includes(":")))
     issues.push({ tile: id, problem: "period comparison requires a time dimension" });
-  if ((tile.where ?? []).some((f) => f.source === "metric") && new Set((tile.metrics ?? []).map((n) => model.metrics[n]?.filter ?? null)).size > 1)
+  if ((tile.where ?? []).some((f) => f.source === "metric") && new Set((tile.metrics ?? []).map((n) => metricOf(model, n)?.filter ?? null)).size > 1)
     issues.push({ tile: id, problem: "aggregate filters across metrics with different always-on filters are not yet supported" });
   if ((tile.dimensions ?? []).filter((d) => d.includes(":")).length > 1 && tile.compare && tile.compare !== "none")
     issues.push({ tile: id, problem: "period comparison requires exactly one time dimension" });
@@ -111,7 +111,7 @@ export function parseDimension(dim: string) {
 export function compileTile(model: Model, conn: Connector, tile: TileSpec, options: { probe?: boolean; role?: string } = {}): string {
   const issues = validateTile(model, tile, options);
   if (issues.length) throw new Error(issues.map((i) => i.problem).join("; "));
-  const tileMetrics = tile.metrics.map((n) => model.metrics[n]);
+  const tileMetrics = tile.metrics.map((n) => metricOf(model, n));
   if (tileMetrics.some((m) => !m)) throw new Error("compileTile called with an unvalidated tile");
   const q = conn.quote.bind(conn);
   const across = tileMetrics.find((m) => isCrossTableRatio(model, m));
@@ -285,7 +285,7 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
  */
 function compileAcross(model: Model, conn: Connector, tile: TileSpec, ratio: Metric): { sql: string; groupCols: string[] } {
   const q = conn.quote.bind(conn);
-  const num = model.metrics[ratio.numerator!], den = model.metrics[ratio.denominator!];
+  const num = metricOf(model, ratio.numerator!), den = metricOf(model, ratio.denominator!);
   const sideDims = (base: string) => (tile.dimensions ?? []).map((d) => {
     const { grain, table, column } = parseDimension(d);
     if (!grain) return d;
@@ -447,7 +447,7 @@ export function buildPredicate(
   const q = conn.quote.bind(conn);
   let ref: string;
   if (f.source === "metric") {
-    const m = model.metrics[f.field];
+    const m = metricOf(model, f.field);
     if (!m || m.baseTable !== base) throw new Error(`unknown or incompatible filter metric: ${f.field}`);
     // Filtering an aggregate is a HAVING, so the metric's own always-on filter
     // is already applied by the surrounding query -- do not re-apply it here.

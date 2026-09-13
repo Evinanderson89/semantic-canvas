@@ -32,6 +32,14 @@ metrics:
 
 `base_table` may be left out; it is the first component's. Components must be **simple** metrics (one level: a ratio of derived metrics is refused with a sentence). A derived expression stays on one table; a ratio may cross two. A definition that does not hold fails the model load with the metric named.
 
+## The built-in row count
+
+Every table has one measure nobody declares: how many rows. It is named `rows:<table>` (`rows:fct_events`), labelled "Rows of fct_events", and compiles to `COUNT(*)` over the table with the tile's dimensions, filters and time grain applied like any simple metric. Its time dimension is the table's first partition key, so `rows:fct_events` by `month:event_time` counts events per month.
+
+It exists so that **a dimension can be picked before a metric**. In Add a tile, the Dimensions column lists every table's group-by columns from the start; choosing one names the table and the tile counts its rows until a declared metric is chosen (the way Tableau's "Number of Records" works). "Row count" also appears at the top of the metrics list once a table is chosen. Unselecting the last metric while a breakdown remains falls back to the row count rather than emptying the tile.
+
+The row count is synthesized on lookup (`metricOf(model, name)`), never stored in `model.metrics`: the catalogue, the Metric Registry, the wizards and the "N metrics" counts keep listing what people declared. A viewer cannot count rows of an ingested table an administrator has not published, for the same reason they cannot query its metrics.
+
 ## How they compile
 
 - **Same table** (ratio, derived, cumulative): the grouped query computes the simple components (hidden as `__m_<name>` when the tile did not ask for them); one more `SELECT` over the grouped rows forms the value. A ratio is `CAST(a AS DOUBLE) / NULLIF(b, 0)`; a derived metric is its expression with metric names replaced by the columns; a cumulative metric is `SUM(x) OVER (PARTITION BY <other dimensions> ORDER BY <time> ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` (or `N-1 PRECEDING` for a window). Always-on filters, HAVING, edge-completeness flags, period-over-period and the limit apply exactly as for simple metrics.

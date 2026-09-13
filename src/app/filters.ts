@@ -1,5 +1,5 @@
 import type { DashboardFilter, DashboardSpec, FilterSpec, FilterValue, TileSpec } from "../compiler/spec.ts";
-import { fieldReachable, isTemporal, isNumeric, DEFAULT_CALENDAR, type Calendar, type Model } from "../semantic/model.ts";
+import { metricOf, fieldReachable, isTemporal, isNumeric, DEFAULT_CALENDAR, type Calendar, type Model } from "../semantic/model.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { tabOf, tabsOf } from "./tabs.ts";
 import { resolvePreset } from "./datePresets.ts";
@@ -12,7 +12,7 @@ export function fieldKind(model: Model, field: string): DashboardFilter["control
 }
 export function suggestedBindings(spec: DashboardSpec, model: Model, field: string, scope: "tab" | "report", tab: string) {
   return spec.tiles.filter(t => (t.kind ?? "metric") === "metric" && (scope === "report" || tabOf(spec, t) === tab)
-    && fieldReachable(model, model.metrics[t.metrics[0]]?.baseTable ?? "", field)).map(t => ({ tileId: t.id, field }));
+    && fieldReachable(model, metricOf(model, t.metrics[0])?.baseTable ?? "", field)).map(t => ({ tileId: t.id, field }));
 }
 export const presentationOf = (f: Pick<DashboardFilter, "control" | "presentation">) => f.presentation ?? FILTER_PRESENTATIONS[f.control][0];
 export const hasFilterValue = (v: FilterValue) => !!v.preset || !!v.values?.length || v.min != null && v.min !== "" || v.max != null && v.max !== "";
@@ -48,7 +48,7 @@ export function validateDashboard(model: Model, spec: DashboardSpec) {
     if (new Set(f.bindings.map(b => b.tileId)).size !== f.bindings.length) issue(f.id, "A chart can only have one binding per filter");
     for (const b of f.bindings) {
       const t = spec.tiles.find(t => t.id === b.tileId);
-      if (!t || (t.kind ?? "metric") !== "metric" || !fieldReachable(model, model.metrics[t.metrics[0]]?.baseTable ?? "", b.field)
+      if (!t || (t.kind ?? "metric") !== "metric" || !fieldReachable(model, metricOf(model, t.metrics[0])?.baseTable ?? "", b.field)
         || fieldKind(model, b.field) !== f.control || f.scope === "tab" && tabOf(spec, t) !== f.tabId) issue(f.id, "Filter binding must match a reachable field on a chart in scope");
     }
     if (f.presentation && !(FILTER_PRESENTATIONS[f.control] as readonly string[]).includes(f.presentation)) issue(f.id, "Filter presentation does not match its control");

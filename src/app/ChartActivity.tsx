@@ -7,6 +7,7 @@ import { makeFormatter, resolveFormat } from "../format/format.ts";
 import { readResponse } from "./http.ts";
 import { useSession } from "./Session.tsx";
 import type { ChartPreferences } from "./ChartPreferences.tsx";
+import { metricOf } from "../semantic/model.ts";
 
 type Panel = "comments" | "alerts";
 const Context = createContext<{ summary: ActivitySummary; preferences: ChartPreferences; open: (tileId: string, panel: Panel) => void } | null>(null);
@@ -74,7 +75,7 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
   const [operator, setOperator] = useState<AlertInput["operator"]>("above"), [threshold, setThreshold] = useState("");
   const [sensitivity, setSensitivity] = useState<AlertInput["sensitivity"]>("balanced"), [direction, setDirection] = useState<AlertInput["direction"]>("both");
   const [interval, setIntervalMinutes] = useState<15 | 60 | 1440>(60), [preview, setPreview] = useState<Evaluation | null>(null);
-  const title = tile.title ?? tile.metrics.map(m => model.metrics[m]?.label ?? m).join(", ");
+  const title = tile.title ?? tile.metrics.map(m => metricOf(model, m)?.label ?? m).join(", ");
   const url = dashboardId ? `/api/chart-activity/${encodeURIComponent(dashboardId)}/${encodeURIComponent(tile.id)}` : "";
   const fmt = resolveFormat(model, { ...tile, metrics: [metric] }), format = makeFormatter(fmt), percent = fmt.number === "percent";
   const blocked = !dashboardId || dirty;
@@ -149,7 +150,7 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
           {!supported && <div className="activity-save-note"><strong>This chart needs a single series</strong><p>Remove the category breakdown, or use a total, to watch a metric without mixing different groups.</p></div>}
           {alert && !editing ? <>
             <div className="watch-heading"><span className={`watch-status${alert.enabled ? " enabled" : ""}`}><i />{alert.enabled ? "Watching for you" : "Paused"}</span><button className="activity-text-button" disabled={busy || blocked} onClick={edit}>Edit alert</button></div>
-            <h4 className="watch-rule-name">{model.metrics[alert.metric]?.label ?? alert.metric}</h4>
+            <h4 className="watch-rule-name">{metricOf(model, alert.metric)?.label ?? alert.metric}</h4>
             <p className="activity-muted">{alert.mode === "anomaly" ? `Unusual changes · ${alert.sensitivity} sensitivity` : `${alert.operator === "above" ? "Above" : "Below"} ${alertFormat(alert.threshold!)}`} · {alert.intervalMinutes === 1440 ? "Daily" : alert.intervalMinutes === 60 ? "Hourly" : "Every 15 minutes"}</p>
             {alert.evaluation ? <EvaluationCard evaluation={alert.evaluation} format={alertFormat} /> : <div className="activity-empty compact"><ActivityIcon kind="alerts" /><p>Ready for its first check.</p></div>}
             <div className="watch-actions"><button disabled={busy || blocked || !alert.enabled} onClick={() => void action(() => request("/alerts/check", "POST"))}>{busy ? "Working…" : "Check now"}</button><button disabled={busy || blocked} onClick={() => void action(() => request("/alert", "PATCH", { version: alert.version, enabled: !alert.enabled }))}>{alert.enabled ? "Pause" : "Resume"}</button><button className="activity-text-button" disabled={busy || blocked} onClick={() => void action(() => request("/alert", "DELETE", { version: alert.version }))}>Remove</button></div>
@@ -158,7 +159,7 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
             {alert.events.map(event => <article className={`watch-event${event.read ? "" : " unread"}`} key={event.id}><div><strong>{event.value === undefined ? "Unusual change" : alertFormat(event.value)}</strong><time>{dateLabel(event.checkedAt)}</time></div><p>{event.reason}</p><span>{event.period}</span></article>)}
           </> : <form className="watch-form" onSubmit={e => { e.preventDefault(); void action(async () => { await request("/alert", "PUT", { rule: rule(), revision, version: alert?.version ?? 0 }); setEditing(false); setPreview(null); if (alert?.enabled !== false) await request("/alerts/check", "POST"); }); }}>
             <fieldset disabled={busy || blocked || !supported}>
-              <label>Metric<select value={metric} onChange={e => { setMetric(e.target.value); setThreshold(""); }}>{tile.metrics.map(m => <option key={m} value={m}>{model.metrics[m]?.label ?? m}</option>)}</select></label>
+              <label>Metric<select value={metric} onChange={e => { setMetric(e.target.value); setThreshold(""); }}>{tile.metrics.map(m => <option key={m} value={m}>{metricOf(model, m)?.label ?? m}</option>)}</select></label>
               <div className="watch-type-options" role="group" aria-label="Alert type">
                 <button type="button" aria-pressed={mode === "anomaly"} disabled={!tile.dimensions.some(d => d.includes(":"))} onClick={() => setMode("anomaly")}><span>Unusual change</span><small>Learn the recent pattern</small></button>
                 <button type="button" aria-pressed={mode === "threshold"} onClick={() => setMode("threshold")}><span>Threshold</span><small>Choose a clear boundary</small></button>

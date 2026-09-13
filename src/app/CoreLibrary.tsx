@@ -9,6 +9,7 @@ import { readResponse } from "./http.ts";
 import { StudioDialog } from "./StudioDialog.tsx";
 import { Popover } from "./Popover.tsx";
 import { useSession } from "./Session.tsx";
+import { metricOf } from "../semantic/model.ts";
 
 const empty: CoreLibrary = { folders: [], items: [] };
 export function useCoreLibrary(context: string) {
@@ -158,7 +159,7 @@ export function ViewComposition({ view, model }: { view: Pick<LibraryView, "spec
   const metrics = [...new Set(view.spec.tiles.flatMap(t => t.metrics))];
   return <div className="view-composition"><svg viewBox={`0 0 ${view.canvas.width} ${view.canvas.height}`} role="img" aria-label={`Layout of ${view.name || "saved view"}`}>
     {view.spec.tiles.map(t => <rect key={t.id} x={t.layout.x} y={t.layout.y} width={t.layout.w} height={t.layout.h} rx={6} fill={t.kind === "heading" ? "var(--accent)" : t.kind === "text" ? "var(--line-2)" : "var(--accent-soft)"} stroke="var(--line-2)" />)}
-  </svg><div><strong>{view.name || "Untitled view"}</strong>{view.description && <p>{view.description}</p>}<small>{metrics.length ? metrics.map(m => model.metrics[m]?.label ?? m).join(" · ") : "Labels and canvas elements"}</small><small>{view.spec.filters?.length ? `${view.spec.filters.length} saved filters · ` : ""}{view.spec.tiles.length} tiles · Live catalogue metrics</small></div></div>;
+  </svg><div><strong>{view.name || "Untitled view"}</strong>{view.description && <p>{view.description}</p>}<small>{metrics.length ? metrics.map(m => metricOf(model, m)?.label ?? m).join(" · ") : "Labels and canvas elements"}</small><small>{view.spec.filters?.length ? `${view.spec.filters.length} saved filters · ` : ""}{view.spec.tiles.length} tiles · Live catalogue metrics</small></div></div>;
 }
 
 export function ViewPreviewDialog({ item, model, canInsert, onInsert, onOpen, onClose }: {

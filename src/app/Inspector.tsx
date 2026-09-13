@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { SparkOptions, TileSpec } from "../compiler/spec.ts";
 import { DEFAULT_SPARK } from "../compiler/spec.ts";
-import { semanticHints, type Model } from "../semantic/model.ts";
+import { metricOf, semanticHints, type Model } from "../semantic/model.ts";
 import { FONT_LABELS, FONT_STACKS, PALETTES, inferNumberStyle, mergeTextFormat,
          type FormatSpec, type NumberStyle } from "../format/format.ts";
 import { recommend, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
@@ -24,7 +24,7 @@ export function Inspector({ model, tile, onChange, onClose }: {
   const kind = tile.chart ?? inferChart(model, tile);
   const isKpi = kind === "kpi";
   const bare = (tile.dimensions ?? []).map((d) => (d.includes(":") ? d.split(":")[1] : d));
-  const base = tile.metrics.length ? model.metrics[tile.metrics[0]]?.baseTable : null;
+  const base = tile.metrics.length ? metricOf(model, tile.metrics[0])?.baseTable : null;
 
   useEffect(() => {
     if (!base || !bare.length) { setProfiles([]); return; }
@@ -43,7 +43,7 @@ export function Inspector({ model, tile, onChange, onClose }: {
   return (
     <aside className="inspector">
       <div className="ins-head">
-        <b>{tile.title ?? tile.metrics.join(", ")}</b>
+        <b>{tile.title ?? tile.metrics.map((m) => metricOf(model, m)?.label ?? m).join(", ")}</b>
         <button className="x" aria-label="Close inspector" onClick={onClose}>✕</button>
       </div>
 

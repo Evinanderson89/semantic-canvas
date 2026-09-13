@@ -11,7 +11,7 @@ import { pickImage } from "./imagePicker.ts";
 import { inferChart } from "../suggest/chartRules.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
-import { semanticHints, timeColumnOf } from "../semantic/model.ts";
+import { metricOf, semanticHints, timeColumnOf } from "../semantic/model.ts";
 import { dataAsOf } from "./connected.tsx";
 import type { FilterSpec } from "../compiler/spec.ts";
 import { drillInto, type DrillEntry, type DrillGrain } from "./drill.ts";
@@ -86,7 +86,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   // One key covering everything the query depends on. `where` and `limit` were
   // missing before, so changing a filter left the tile showing the previous
   // result with no sign it was stale.
-  const base = model.metrics[spec.metrics[0]]?.baseTable ?? null;
+  const base = metricOf(model, spec.metrics[0])?.baseTable ?? null;
   // A connected table is a snapshot; every tile on it says how old (docs/connected-canvas.md).
   const connected = base ? model.tables[base]?.connected : undefined;
   const activeDrill = drill?.at(-1) ?? null;
@@ -193,7 +193,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   // model to infer a style from) and handed down for the secondary axis.
   const secondaryFmt = kind === "combo" && spec.metrics.length > 1
     ? resolveFormat(model, { ...spec, metrics: [spec.metrics[1]] }) : undefined;
-  const title = spec.title ?? spec.metrics.map((m) => model.metrics[m]?.label ?? m).join(", ");
+  const title = spec.title ?? spec.metrics.map((m) => metricOf(model, m)?.label ?? m).join(", ");
 
   const runExplain = () => {
     setExplain({ status: "loading", text: "" });
@@ -373,7 +373,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
             {ruleSuggestion !== "checking" && noiseSuggestion && (
               <div className="beautify-suggestion">
                 <p className="explain-body">
-                  <b>{model.metrics[noiseSuggestion.measure]?.label ?? noiseSuggestion.measure}</b> swings
+                  <b>{metricOf(model, noiseSuggestion.measure)?.label ?? noiseSuggestion.measure}</b> swings
                   noisily at the {noiseSuggestion.grain} grain — hard to read as a trend. Try {noiseSuggestion.next} instead.
                 </p>
                 <button className="primary small" onClick={applyCoarsen}>
@@ -459,7 +459,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         )}
         {state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
           kind === "kpi" && timeDimIndex >= 0
-            ? <Kpi label={title} actions={<ChartActivityButtons tileId={spec.id} />} grain={grain} direction={model.metrics[spec.metrics[0]]?.direction}
+            ? <Kpi label={title} actions={<ChartActivityButtons tileId={spec.id} />} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
                    previous={query.compare && query.compare !== "none" ? state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)] ?? null : undefined}
                    comparisonLabel={spec.compare === "yoy" ? "same period last year" : "prior period"}
                    series={(state.rows ?? []).filter((r: any[]) => r[state.columns.indexOf(dimAlias(dimensions[timeDimIndex]))] != null).map((r: any[]) =>

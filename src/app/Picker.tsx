@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { isUnreviewed, semanticHints, type Model } from "../semantic/model.ts";
+import { dimensionsOf, isRowCount, isUnreviewed, metricOf, rowCountName, semanticHints, type Model } from "../semantic/model.ts";
 import type { ChartKind, FilterSpec, TileSpec } from "../compiler/spec.ts";
 import { recommend, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
 
@@ -43,7 +43,9 @@ export function Picker({ model, onAdd, onClose }: {
     if (where.length) setDrawerH((h) => Math.max(h, Math.min(150 + where.length * 110, 460)));
   }, [where.length]);
 
-  const base = metrics.length ? model.metrics[metrics[0]].baseTable : null;
+  const base = metrics.length ? metricOf(model, metrics[0])?.baseTable ?? null : null;
+  /** The tile counts rows rather than a declared metric: what a dimension picked first gives you. */
+  const counting = metrics.length === 1 && isRowCount(metrics[0]);
 
   const available: Field[] = useMemo(() => {
     if (!base) return [];
@@ -59,8 +61,35 @@ export function Picker({ model, onAdd, onClose }: {
     return [...own, ...joined];
   }, [base, model]);
 
+  /** Before a table is chosen: every table's group-by columns, so a person can start from a dimension, the way Tableau lets you. */
+  const byTable = useMemo(() => Object.values(model.tables).map((t) => ({
+    table: t.name, grain: t.grain,
+    fields: dimensionsOf(t).map((c): Field => ({ key: c.name, label: c.name, hint: c.type, numeric: isNum(c.type), temporal: isTime(c.type) })),
+  })).filter((g) => g.fields.length), [model]);
+
   const toggle = (arr: string[], v: string, set: (x: string[]) => void) =>
     set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
+
+  /**
+   * Choosing a metric keeps the breakdown when the table stays the same. A
+   * declared metric replaces the row count; unselecting the last metric
+   * while a breakdown remains falls back to counting rows, so a tile never
+   * loses its dimensions just because the measure changed.
+   */
+  const pickMetric = (name: string) => {
+    const table = metricOf(model, name).baseTable;
+    let next = metrics.includes(name) ? metrics.filter((x) => x !== name) : [...metrics.filter((x) => !isRowCount(x)), name];
+    if (!next.length && dims.length) next = [rowCountName(table)];
+    const nextBase = next.length ? metricOf(model, next[0]).baseTable : null;
+    setMetrics(next);
+    if (nextBase !== base) { setDims([]); setWhere([]); }
+  };
+
+  /** A dimension picked before any metric names the table; the tile counts its rows until a metric is chosen. */
+  const pickFirstDimension = (table: string, d: Field) => {
+    setMetrics([rowCountName(table)]);
+    setDims([d.temporal ? `month:${d.key}` : d.key]);
+  };
 
   /**
    * Dropping decides the filter's shape, the way Tableau decides continuous vs
@@ -110,10 +139,10 @@ export function Picker({ model, onAdd, onClose }: {
             <h3>{stage === "fields" ? "Add a tile" : "Choose a visualization"}</h3>
             <div className="sub">
               {stage === "viz"
-                ? `${metrics.length} measure${metrics.length === 1 ? "" : "s"}` +
+                ? (counting ? `Row count of ${base}` : `${metrics.length} measure${metrics.length === 1 ? "" : "s"}`) +
                   (dims.length ? ` by ${dims.map((d) => d.split(":").pop()).join(", ")}` : ", no breakdown")
-                : base ? `Dimensions reachable from ${base} — drag any field into Filters`
-                       : "Pick a metric first"}
+                : base ? `${counting ? `Counting rows of ${base}` : `Dimensions reachable from ${base}`} — drag any field into Filters`
+                       : "Pick a metric, or a dimension to count rows by"}
             </div>
           </div>
           <span className="spacer" />
@@ -130,6 +159,12 @@ export function Picker({ model, onAdd, onClose }: {
         {stage === "fields" && <div className="cols">
           <div className="col">
             <h5>Metrics · {Object.keys(model.metrics).length}</h5>
+            {base && (
+              <button className={"opt count" + (counting ? " on" : "")} data-testid="row-count"
+                onClick={() => pickMetric(rowCountName(base))}>
+                Row count<small>COUNT(*) · {model.tables[base]?.grain ?? `one row per ${base} row`}</small>
+              </button>
+            )}
             {Object.values(model.metrics).map((m) => {
               const disabled = base != null && m.baseTable !== base;
               return (
@@ -138,15 +173,24 @@ export function Picker({ model, onAdd, onClose }: {
                     JSON.stringify({ field: m.name, source: "metric", numeric: true }))}
                   className={"opt" + (metrics.includes(m.name) ? " on" : "")}
                   style={disabled ? { opacity: 0.35 } : undefined} disabled={disabled}
-                  onClick={() => toggle(metrics, m.name, (v) => { setMetrics(v); setDims([]); setWhere([]); })}>
+                  onClick={() => pickMetric(m.name)}>
                   {m.label}<small>{m.name} · {m.baseTable}{isUnreviewed(model, m) ? " · Ingested, unreviewed" : ""}</small>
                 </button>
               );
             })}
           </div>
           <div className="col">
-            <h5>Dimensions</h5>
-            {!base && <div className="muted">—</div>}
+            <h5>Dimensions{base ? "" : " · by table"}</h5>
+            {!base && byTable.map((g) => (
+              <div key={g.table} className="dim-group">
+                <div className="dim-table" title={g.grain ?? undefined}>{g.table}</div>
+                {g.fields.map((d) => (
+                  <button key={d.key} className="opt" onClick={() => pickFirstDimension(g.table, d)}>
+                    {d.label}{d.temporal ? " (by month)" : ""}<small>{d.hint}</small>
+                  </button>
+                ))}
+              </div>
+            ))}
             {available.map((d) => (
               <button key={d.key} draggable
                 onDragStart={(e) => e.dataTransfer.setData("application/x-field",
@@ -215,7 +259,7 @@ function FilterPill({ f, base, model, onPatch, onRemove }: {
   const [open, setOpen] = useState(true);
   const [values, setValues] = useState<{ value: any; n: number }[] | null>(null);
   const [extent, setExtent] = useState<{ min: number; max: number } | null>(null);
-  const label = f.source === "metric" ? model.metrics[f.field]?.label ?? f.field : f.field;
+  const label = f.source === "metric" ? metricOf(model, f.field)?.label ?? f.field : f.field;
 
   useEffect(() => {
     if (f.source === "metric") return;

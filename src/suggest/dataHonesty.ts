@@ -1,6 +1,6 @@
 import type { FilterSpec, TileSpec } from "../compiler/spec.ts";
 import { parseDimension } from "../compiler/compile.ts";
-import { isTemporal, type Model } from "../semantic/model.ts";
+import { metricOf, isTemporal, type Model } from "../semantic/model.ts";
 
 /**
  * Data-honesty rules (docs/data-honesty-review.md): the ways a time series
@@ -96,7 +96,7 @@ export function reviewDataHonesty(input: HonestyInput): HonestyFinding[] {
   const { tile, model, columns, rows, partial, timeDimension, where = [], today } = input;
   const { grain, table, column } = parseDimension(timeDimension);
   if (!grain) return [];
-  const metric = model.metrics[tile.metrics[0]];
+  const metric = metricOf(model, tile.metrics[0]);
   if (!metric) return [];
   const owner = table ?? metric.baseTable;
   const tbl = model.tables[owner];
@@ -114,7 +114,7 @@ export function reviewDataHonesty(input: HonestyInput): HonestyFinding[] {
   const dataThrough = iso(addDays(newestEnd, -1));
   const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
   const lag = Math.max(0, Math.floor(tbl.reportingLagDays ?? 0));
-  const title = tile.title ?? tile.metrics.map((m) => model.metrics[m]?.label ?? m).join(", ");
+  const title = tile.title ?? tile.metrics.map((m) => metricOf(model, m)?.label ?? m).join(", ");
   const findings: HonestyFinding[] = [];
 
   // Rows dated after today: the newest buckets are not real periods, the
@@ -196,12 +196,12 @@ export function unsettledFilter(tileId: string, fix: Extract<HonestyFix, { kind:
 /** Whether the compiler would treat this dimension's table as a snapshot (nothing to be partial about). Exported for tests and callers that skip such tiles. */
 export function isPeriodKeyed(model: Model, tile: TileSpec, timeDimension: string): boolean {
   const { grain, table, column } = parseDimension(timeDimension);
-  const metric = model.metrics[tile.metrics[0]];
+  const metric = metricOf(model, tile.metrics[0]);
   if (!grain || !metric) return false;
   const owner = table ?? metric.baseTable;
   const tbl = model.tables[owner];
   const pk = tbl?.primaryKey ? tbl.columns.find((c) => c.name === tbl.primaryKey) : undefined;
-  const native = tile.metrics.some((m) => model.metrics[m]?.timeGrains?.includes(grain as never));
+  const native = tile.metrics.some((m) => metricOf(model, m)?.timeGrains?.includes(grain as never));
   return native || (!!pk && isTemporal(pk) && pk.name === column);
 }
 

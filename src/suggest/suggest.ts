@@ -1,5 +1,5 @@
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
-import { timeColumnOf, metricsByTable, prettifyModelName, reviewedModel, isLineage, type Model, type Metric, type Table } from "../semantic/model.ts";
+import { metricOf, timeColumnOf, metricsByTable, prettifyModelName, reviewedModel, isLineage, type Model, type Metric, type Table } from "../semantic/model.ts";
 import type { Brief } from "./match.ts";
 
 function categoricalDims(t: Table | undefined): string[] {
@@ -15,7 +15,7 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
   const subject = opts.table && byTable[opts.table] ? opts.table : Object.entries(byTable).sort((a,b) => b[1].length - a[1].length)[0]?.[0];
   if (!subject) return { title: prettifyModelName(model.name), tiles: [] };
   const metrics = [...byTable[subject]].sort((a,b) => (b.importance ?? 0) - (a.importance ?? 0));
-  const selected = (opts.metrics ?? []).map(n => model.metrics[n]).filter(Boolean);
+  const selected = (opts.metrics ?? []).map(n => metricOf(model, n)).filter(Boolean);
   const cap = opts.audience === "analyst" ? 6 : opts.audience === "operator" ? 4 : 3;
   const headline = (selected.length ? selected : metrics).slice(0, cap);
   const tiles: TileSpec[] = [];

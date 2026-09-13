@@ -1,6 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
 import type { Metric, Model, Origin } from "../semantic/model.ts";
-import { isUnreviewed, isUnreviewedTable, metricsByTable } from "../semantic/model.ts";
+import { metricOf, isUnreviewed, isUnreviewedTable, metricsByTable } from "../semantic/model.ts";
 import { prettyTable } from "./Sidebar.tsx";
 import { Provenance, UnreviewedBadge } from "./connected.tsx";
 import { useSession } from "./Session.tsx";
@@ -133,8 +133,8 @@ export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "
             <div className="metric-topic">{prettyTable(m.baseTable)}</div>
             <details className="metric-definition"><summary>View definition</summary>
             <code className="metric-id">{m.name}</code>
-            {m.type === "ratio" ? <pre className="expr">{model.metrics[m.numerator ?? ""]?.label ?? m.numerator} ÷ {model.metrics[m.denominator ?? ""]?.label ?? m.denominator}{model.metrics[m.denominator ?? ""]?.baseTable !== m.baseTable ? `  (across ${m.baseTable} and ${model.metrics[m.denominator ?? ""]?.baseTable}, each on its own date)` : ""}</pre>
-            : m.type === "cumulative" ? <pre className="expr">running total of {model.metrics[m.metric ?? ""]?.label ?? m.metric}{m.window ? ` over the last ${m.window} periods` : " from the first period shown"}</pre>
+            {m.type === "ratio" ? <pre className="expr">{metricOf(model, m.numerator ?? "")?.label ?? m.numerator} ÷ {metricOf(model, m.denominator ?? "")?.label ?? m.denominator}{metricOf(model, m.denominator ?? "")?.baseTable !== m.baseTable ? `  (across ${m.baseTable} and ${metricOf(model, m.denominator ?? "")?.baseTable}, each on its own date)` : ""}</pre>
+            : m.type === "cumulative" ? <pre className="expr">running total of {metricOf(model, m.metric ?? "")?.label ?? m.metric}{m.window ? ` over the last ${m.window} periods` : " from the first period shown"}</pre>
             : m.type === "derived" ? <pre className="expr">{m.expression}   (over metrics)</pre>
             : <pre className="expr">{m.expression}</pre>}
             {m.filter && <div className="afilter mono">always: {m.filter}</div>}

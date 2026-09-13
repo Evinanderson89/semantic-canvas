@@ -4,6 +4,7 @@ import type { Model } from "../semantic/model.ts";
 import { suggestDashboard } from "../suggest/suggest.ts";
 import { demoDashboard, demoDashboardAvailable } from "../suggest/demo.ts";
 import { validateDashboard } from "../app/filters.ts";
+import { metricOf } from "../semantic/model.ts";
 
 export const LIBRARY_FOLDERS = [
   { key: "company", name: "Company overview", parent: null },
@@ -43,7 +44,7 @@ export function filterStylesStarter(): DashboardSpec {
     ] };
 }
 export function folderForDashboard(model: Model, spec: { tiles: { metrics: string[] }[] }): string | null {
-  const base = spec.tiles.flatMap(t => t.metrics).map(m => model.metrics[m]?.baseTable).find(Boolean);
+  const base = spec.tiles.flatMap(t => t.metrics).map(m => metricOf(model, m)?.baseTable).find(Boolean);
   return TOPICS.find(([table]) => table === base)?.[1] ?? null;
 }
 /** Only offer the bundled business examples when their catalogue is present. No queries or result rows are stored. */

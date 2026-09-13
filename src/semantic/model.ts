@@ -128,6 +128,30 @@ export interface SemanticAdapter {
 
 // ---------------------------------------------------------------- helpers --
 
+/**
+ * The built-in measure every table has without anyone declaring it: how many
+ * rows. Named "rows:<table>" so it can never collide with a declared metric,
+ * and synthesized on lookup rather than stored in model.metrics, so the
+ * catalogue, the registry and the wizards keep listing what people declared.
+ * It is what a tile counts when someone picks a dimension before a metric
+ * (Tableau's "Number of Records").
+ */
+export const ROW_COUNT_PREFIX = "rows:";
+export const rowCountName = (table: string) => `${ROW_COUNT_PREFIX}${table}`;
+export const isRowCount = (name: string) => name.startsWith(ROW_COUNT_PREFIX);
+export function rowCountMetric(model: Pick<Model, "tables">, table: string): Metric | undefined {
+  const t = model.tables[table];
+  if (!t) return undefined;
+  return { name: rowCountName(table), label: `Rows of ${table}`, baseTable: table, expression: "COUNT(*)", filter: null, synonyms: [],
+    description: t.grain ? `How many rows: ${t.grain}.` : `How many rows of ${table}.`,
+    timeDimension: t.partitionKeys[0] ? `${table}.${t.partitionKeys[0]}` : undefined };
+}
+/** A metric by name: declared in the model, or the built-in row count of a table. Every lookup of a tile's metric goes through here.
+ *  Typed like the map index it replaces (`model.metrics[name]`): callers that already check for absence keep doing so with `?.`. */
+export function metricOf(model: Pick<Model, "tables" | "metrics">, name: string): Metric {
+  return (model.metrics[name] ?? (isRowCount(name) ? rowCountMetric(model, name.slice(ROW_COUNT_PREFIX.length)) : undefined)) as Metric;
+}
+
 export const isUnreviewedTable = (t: Table | undefined) => t?.connected?.status === "unreviewed";
 export const isUnreviewed = (model: Model, m: Metric) => m.reviewed === false || isUnreviewedTable(model.tables[m.baseTable]);
 
@@ -199,11 +223,11 @@ export function joinPath(model: Model, from: string, to: string): { joins: Join[
  */
 export function semanticHints(model: Model, measures: string[]): string {
   const parts: string[] = [];
-  const base = measures.length ? model.metrics[measures[0]]?.baseTable : null;
+  const base = measures.length ? metricOf(model, measures[0])?.baseTable : null;
   const table = base ? model.tables[base] : null;
   if (table) { if (table.description) parts.push(table.description); parts.push(...table.synonyms); }
   for (const name of measures) {
-    const metric = model.metrics[name];
+    const metric = metricOf(model, name);
     if (!metric) continue;
     if (metric.description) parts.push(metric.description);
     parts.push(...metric.synonyms);
@@ -282,23 +306,23 @@ export const metricType = (m: Metric): MetricType => m.type ?? "simple";
 /** Metric names a derived expression refers to: every identifier that is a metric of the model. */
 export function derivedReferences(model: Model, expression: string): string[] {
   const names = new Set<string>();
-  for (const m of expression.replace(/'(?:[^']|'')*'/g, "''").matchAll(/(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)(?!\s*\()/g)) if (model.metrics[m[1]]) names.add(m[1]);
+  for (const m of expression.replace(/'(?:[^']|'')*'/g, "''").matchAll(/(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)(?!\s*\()/g)) if (metricOf(model, m[1])) names.add(m[1]);
   return [...names];
 }
 
 /** The simple metrics a metric is computed from (itself, when simple). One level deep: components are simple. */
 export function metricComponents(model: Model, m: Metric): Metric[] {
   switch (metricType(m)) {
-    case "ratio": return [model.metrics[m.numerator ?? ""], model.metrics[m.denominator ?? ""]].filter(Boolean);
-    case "derived": return derivedReferences(model, m.expression).map((n) => model.metrics[n]).filter(Boolean);
-    case "cumulative": return [model.metrics[m.metric ?? ""]].filter(Boolean);
+    case "ratio": return [metricOf(model, m.numerator ?? ""), metricOf(model, m.denominator ?? "")].filter(Boolean);
+    case "derived": return derivedReferences(model, m.expression).map((n) => metricOf(model, n)).filter(Boolean);
+    case "cumulative": return [metricOf(model, m.metric ?? "")].filter(Boolean);
     default: return [m];
   }
 }
 
 /** A ratio whose denominator lives on another table than its numerator: compiled as two grouped queries joined on the dimensions. */
 export const isCrossTableRatio = (model: Model, m: Metric) =>
-  metricType(m) === "ratio" && !!m.numerator && !!m.denominator && model.metrics[m.numerator]?.baseTable !== model.metrics[m.denominator]?.baseTable;
+  metricType(m) === "ratio" && !!m.numerator && !!m.denominator && metricOf(model, m.numerator)?.baseTable !== metricOf(model, m.denominator)?.baseTable;
 
 /** Problems with a computed metric's definition, in words; null when it is sound. */
 export function computedMetricIssue(model: Model, m: Metric): string | null {
@@ -306,7 +330,7 @@ export function computedMetricIssue(model: Model, m: Metric): string | null {
   if (t === "simple") return null;
   const simple = (name: string | undefined, what: string) => {
     if (!name) return `${m.name}: ${what} is required.`;
-    const c = model.metrics[name];
+    const c = metricOf(model, name);
     if (!c) return `${m.name}: ${what} names an unknown metric "${name}".`;
     if (metricType(c) !== "simple") return `${m.name}: ${what} must be a simple metric; "${name}" is ${metricType(c)}.`;
     return null;
@@ -314,13 +338,13 @@ export function computedMetricIssue(model: Model, m: Metric): string | null {
   if (t === "ratio") {
     const issue = simple(m.numerator, "numerator") ?? simple(m.denominator, "denominator");
     if (issue) return issue;
-    if (m.baseTable !== model.metrics[m.numerator!].baseTable) return `${m.name}: a ratio's base table is its numerator's (${model.metrics[m.numerator!].baseTable}).`;
+    if (m.baseTable !== metricOf(model, m.numerator!).baseTable) return `${m.name}: a ratio's base table is its numerator's (${metricOf(model, m.numerator!).baseTable}).`;
     return null;
   }
   if (t === "cumulative") return simple(m.metric, "metric") ?? (m.window !== undefined && (!Number.isInteger(m.window) || m.window < 1) ? `${m.name}: window is a whole number of periods.` : null);
   const refs = derivedReferences(model, m.expression);
   if (!refs.length) return `${m.name}: a derived metric's expression names other metrics (revenue - cost).`;
-  for (const r of refs) { const issue = simple(r, `"${r}"`); if (issue) return issue; if (model.metrics[r].baseTable !== m.baseTable) return `${m.name}: "${r}" is on ${model.metrics[r].baseTable}, not ${m.baseTable}; a derived metric stays on one table (a ratio may cross tables).`; }
+  for (const r of refs) { const issue = simple(r, `"${r}"`); if (issue) return issue; if (metricOf(model, r).baseTable !== m.baseTable) return `${m.name}: "${r}" is on ${metricOf(model, r).baseTable}, not ${m.baseTable}; a derived metric stays on one table (a ratio may cross tables).`; }
   if (/;|--|\/\*|\bselect\b/i.test(m.expression)) return `${m.name}: a derived expression is arithmetic over metric names.`;
   return null;
 }

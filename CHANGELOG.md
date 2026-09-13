@@ -2,6 +2,7 @@
 
 ## Unreleased — CoreCanvas Library and Gateway integration
 
+- Added a built-in row count for every table so Add a tile can start from a dimension: the Dimensions column lists every table's columns up front, a dimension picked first counts rows (`rows:<table>`, `COUNT(*)`), and "Row count" sits at the top of the metrics list once a table is chosen.
 - Added persistent source-scoped folders, reusable view snapshots, starter dashboards and library setup/migration, replacing Explore by topic.
 - Added personal chart-chat and notification display preferences, off by default, without deleting existing activity.
 - Added verified Gateway session support and navigation back to the shared app launcher.

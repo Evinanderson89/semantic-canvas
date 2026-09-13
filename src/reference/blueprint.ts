@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { dashboardSchema } from "../compiler/schema.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
-import { fieldReachable, timeColumnOf, type Model } from "../semantic/model.ts";
+import { metricOf, fieldReachable, timeColumnOf, type Model } from "../semantic/model.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { fieldKind, suggestedBindings, validateDashboard } from "../app/filters.ts";
 
@@ -23,7 +23,7 @@ export type ReferenceItem = z.infer<typeof referenceItemSchema>;
 export type ReferenceMapping = Record<string, string>;
 const normalize = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 export function metricMatches(model: Model, text: string): string[] {
-  if (model.metrics[text]) return [text];
+  if (metricOf(model, text)) return [text];
   return Object.values(model.metrics).filter(m => [m.name, m.label, ...m.synonyms].some(s => normalize(s) === normalize(text))).map(m => m.name);
 }
 export function fieldMatches(model: Model, text: string): string[] {
@@ -62,14 +62,14 @@ export function buildReference(blueprint: Blueprint, mapping: ReferenceMapping, 
         }
       } else {
         const metrics = item.metrics.map((_, i) => mapping[`${item.id}:m${i}`]), fields = item.dimensions.map((_, i) => mapping[`${item.id}:d${i}`]);
-        const valid = metrics.length > 0 && metrics.every(m => !!model.metrics[m]) && fields.every(f => !!f && fieldReachable(model, model.metrics[metrics[0]]?.baseTable ?? "", f));
+        const valid = metrics.length > 0 && metrics.every(m => !!metricOf(model, m)) && fields.every(f => !!f && fieldReachable(model, metricOf(model, metrics[0])?.baseTable ?? "", f));
         if (valid) {
           const dimensions = fields.map(f => fieldKind(model, f) === "date" && item.grain !== "none" ? `${item.grain}:${f}` : f);
           const tile: TileSpec = { ...base, metrics, dimensions, chart: item.chart, layout: { ...layout, h: Math.max(item.chart === "kpi" ? 156 : 240, layout.h) } };
-          const native = model.metrics[metrics[0]].timeGrains;
+          const native = metricOf(model, metrics[0]).timeGrains;
           let adjusted = "";
           if (!dimensions.length && native?.length) {
-            const time = timeColumnOf(model, model.metrics[metrics[0]].baseTable);
+            const time = timeColumnOf(model, metricOf(model, metrics[0]).baseTable);
             if (time) { tile.dimensions = [`${native[0]}:${time}`]; adjusted = `Uses the metric’s native ${native[0]} reporting period.`; }
           }
           const issues = validateTile(model, tile);

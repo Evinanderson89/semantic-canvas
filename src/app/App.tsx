@@ -31,7 +31,7 @@ import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
 import { applyLayout } from "../canvas/layouts.ts";
 import { downloadPng, slugForFilename } from "./export.ts";
-import { calendarOf, prettifyModelName, todayOf, type Model } from "../semantic/model.ts";
+import { metricOf, calendarOf, prettifyModelName, todayOf, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
 import { readResponse } from "./http.ts";
@@ -645,7 +645,7 @@ export function App() {
         ) : !dash && view === "registry" ? (
           <MetricRegistry model={model} initialTable={registryTable} sourceId={activeSourceId ?? ""}
             onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} onUse={(m) => {
-            const t = model.metrics[m].baseTable;
+            const t = metricOf(model, m).baseTable;
             setView("home"); build({ table: t, metrics: [m], audience: "operator", grain });
           }} />
         ) : !dash && view === "model" ? (
