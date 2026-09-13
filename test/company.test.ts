@@ -46,6 +46,15 @@ async function login(sub: string, groups: string[]): Promise<Login> {
 }
 const headers = (s: Login) => ({ cookie: s.cookie, "x-sc-csrf": s.csrf, "content-type": "application/json" });
 
+const base = { adapter: "duckglue", model: resolve("sample-data/warehouse.yaml"), connector: { type: "duckdb", lakeRoot: resolve("sample-data/lake"), poolSize: 1 } };
+/** Every case that changes the registry puts it back: the two sources the suite started with, nothing else. No case depends on the one before it. */
+async function restoreRegistry(admin: Login) {
+  const current = (await (await call("/api/sources", { headers: headers(admin) })).json()).sources.map((s: any) => s.id) as string[];
+  // Add before removing: the last source cannot be deleted, by design.
+  for (const id of ["public", "private"]) if (!current.includes(id)) { const add = await call("/api/sources", { method: "POST", headers: headers(admin), body: JSON.stringify({ ...base, id, label: id }) }); expect(add.status, await add.clone().text()).toBe(200); }
+  for (const id of current) if (!["public", "private"].includes(id)) { const gone = await call(`/api/sources/${id}`, { method: "DELETE", headers: headers(admin) }); expect(gone.status, await gone.clone().text()).toBe(200); }
+  expect((await (await call("/api/sources", { headers: headers(admin) })).json()).sources.map((s: any) => s.id).sort()).toEqual(["private", "public"]);
+}
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "sc-company-"));
   await writeFile(join(root, "openssl.cnf"), "[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n[dn]\nCN=127.0.0.1\n[v3]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\nkeyUsage=digitalSignature,keyEncipherment,keyCertSign\n");
@@ -63,7 +72,6 @@ beforeAll(async () => {
   await new Promise<void>(r => provider.listen(0, "127.0.0.1", r)); issuer = `https://127.0.0.1:${(provider.address() as any).port}/`;
   const port = await freePort(); url = `http://127.0.0.1:${port}`;
   await writeFile(join(root, "access.yaml"), YAML.stringify(policy));
-  const base = { adapter: "duckglue", model: resolve("sample-data/warehouse.yaml"), connector: { type: "duckdb", lakeRoot: resolve("sample-data/lake"), poolSize: 1 } };
   await writeFile(join(root, "sources.yaml"), YAML.stringify({ sources: [{ ...base, id: "public" }, { ...base, id: "private" }] }));
   appProcess = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], { env: { ...process.env, NODE_EXTRA_CA_CERTS: join(root, "cert.pem"), SC_MODE: "team", SC_HOST: "127.0.0.1", SC_PUBLIC_URL: `https://${host}`, SC_OIDC_ISSUER: issuer, SC_OIDC_CLIENT_ID: "canvas", SC_OIDC_CLIENT_SECRET: clientSecret, SC_ACCESS_PATH: join(root, "access.yaml"), SC_DATA_DIR: join(root, "data"), SC_ENV_PATH: join(root, ".env"), SOURCES_PATH: join(root, "sources.yaml"), RLS_PATH: resolve("security/policies.yaml"), PORT: String(port), SC_SERVE_UI: "false" }, stdio: ["ignore", "pipe", "pipe"] });
   appProcess.stdout?.on("data", d => output += d); appProcess.stderr?.on("data", d => output += d);
@@ -248,12 +256,16 @@ it("provisions the first source from an empty registry and keeps its uploaded mo
   const concurrent = await Promise.all(["second-source", "third-source"].map(id => call("/api/sources", { method: "POST", headers: headers(s), body: JSON.stringify({ id, adapter: "duckglue", model: path, connector: { type: "duckdb", lakeRoot: resolve("sample-data/lake"), poolSize: 1 } }) })));
   expect(concurrent.map(r => r.status)).toEqual([200, 200]);
   expect(YAML.parse(await readFile(join(root, "sources.yaml"), "utf8")).sources.map((s: any) => s.id)).toEqual(["first-source", "second-source", "third-source"]);
+  // Sources added to an empty registry stay editable: the file is written in block style, which PUT and DELETE read.
+  expect(await readFile(join(root, "sources.yaml"), "utf8")).toMatch(/^  - id: first-source$/m);
+  const edit = await call("/api/sources/second-source", { method: "PUT", headers: headers(s), body: JSON.stringify({ label: "Second, renamed", adapter: "duckglue", model: path, connector: { type: "duckdb", poolSize: 1 } }) });
+  expect(edit.status, await edit.clone().text()).toBe(200);
+  await restoreRegistry(s);
 });
 it("Modeler: an admin proposes a model from a source's warehouse, reviews it, and publishes it as a new source; editors are refused", async () => {
   const admin = await login("modeler-admin", ["admins"]), editor = await login("modeler-editor", ["editors"]);
   expect((await call("/api/modeler/drafts", { headers: headers(editor) })).status).toBe(403);
-  // The previous case re-provisioned the registry; read from whichever source is ready now.
-  const from = (await (await call("/api/sources", { headers: headers(admin) })).json()).active as string;
+  const from = "public";
   const created = await call("/api/modeler/drafts", { method: "POST", headers: headers(admin), body: JSON.stringify({ id: "lake-model", label: "Lake, modelled", fromSource: from }) });
   expect(created.status, await created.clone().text()).toBe(200);
   const draft = await created.json();
@@ -278,10 +290,11 @@ it("Modeler: an admin proposes a model from a source's warehouse, reviews it, an
   const model = await (await call("/api/model", { headers: { ...headers(admin), "x-sc-source": "lake-model" } })).json();
   expect(Object.keys(model.tables)).toEqual(expect.arrayContaining(["dim_users", "fct_web_sessions"]));
   expect((await call("/api/modeler/drafts/lake-model/publish", { method: "POST", headers: headers(editor) })).status).toBe(403);
+  await restoreRegistry(admin);
 }, 60_000); // profiling every table in the sample lake takes seconds on a CI runner
 it("Modeler, extend: proposes only what a source's model lacks, publishes it as an extension over the untouched base, and drift names what the warehouse lost", async () => {
   const admin = await login("extend-admin", ["admins"]);
-  const from = (await (await call("/api/sources", { headers: headers(admin) })).json()).active as string;
+  const from = "public";
   const before = await (await call("/api/model", { headers: { ...headers(admin), "x-sc-source": from } })).json();
   // The sample model covers the whole sample lake, so the extension can only be a reporting lag and gap metrics.
   const created = await call("/api/modeler/drafts", { method: "POST", headers: headers(admin), body: JSON.stringify({ id: "lake-more", label: "Lake, extended", extend: from }) });
@@ -320,12 +333,7 @@ it("Modeler, extend: proposes only what a source's model lacks, publishes it as 
 }, 60_000);
 it("Proposed metrics: an editor proposes an aggregate, charts it at once, viewers cannot see it until an admin publishes it; bad proposals are refused in words", async () => {
   const editor = await login("propose-editor", ["editors"]), viewer = await login("propose-viewer", ["viewers"]), admin = await login("propose-admin", ["admins"]);
-  // Editors and viewers are granted "public" only; an earlier case re-provisioned the registry without it, so put it back.
   const from = "public";
-  if (!(await (await call("/api/sources", { headers: headers(admin) })).json()).sources.some((s: any) => s.id === from)) {
-    const add = await call("/api/sources", { method: "POST", headers: headers(admin), body: JSON.stringify({ id: from, label: "Public", adapter: "duckglue", model: resolve("sample-data/warehouse.yaml"), connector: { type: "duckdb", lakeRoot: resolve("sample-data/lake"), poolSize: 1 } }) });
-    expect(add.status, await add.clone().text()).toBe(200);
-  }
   const propose = (s: Login, body: unknown) => call(`/api/sources/${from}/metrics`, { method: "POST", headers: headers(s), body: JSON.stringify(body) });
   expect((await propose(viewer, { name: "x", label: "x", baseTable: "fct_web_sessions", expression: "COUNT(*)" })).status).toBe(403);
   const bad = await propose(editor, { name: "long_sessions", label: "Long sessions", baseTable: "fct_web_sessions", expression: "COUNT(*) FILTER (WHERE dim_users.country = 'US')" });

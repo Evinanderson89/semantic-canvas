@@ -416,7 +416,9 @@ async function addSource(input: { id: string; label: string; adapter: string; mo
     if (document.errors.length) throw new Error("Fix the source configuration before adding a source");
     const existing = document.get("sources");
     const added = YAML.parse("sources:\n" + yamlBlock).sources[0];
-    if (YAML.isSeq(existing)) existing.add(added);
+    // A registry that started as `sources: []` is a flow sequence; entries added to it would be written on one
+    // line, which the block reader behind PUT and DELETE cannot find. Block style keeps every entry editable.
+    if (YAML.isSeq(existing)) { existing.flow = false; existing.add(added); }
     else if (existing == null || YAML.isScalar(existing) && existing.value == null) document.set("sources", [added]);
     else throw new Error("sources must be a list");
     await writeConfig(SOURCES_PATH, document.toString({ lineWidth: 0 }));
