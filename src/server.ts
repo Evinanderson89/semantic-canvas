@@ -1097,7 +1097,7 @@ app.get("/api/profile", safe(async (req, res) => {
     const [t, c] = field.includes(".") ? field.split(".", 2) : [base, field];
     const col = modelOf(req).tables[t]?.columns.find((x) => x.name === c);
     if (!col) continue;
-    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req));
+    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req), identityOf(req)?.policy);
     let cardinality: number | null = null;
     let sample: string[] = [];
     try {
@@ -1135,7 +1135,7 @@ app.get("/api/values", safe(async (req, res) => {
   if (!table || !table.columns.some((x) => x.name === c))
     return res.status(400).json({ error: `unknown field ${field}` });
   try {
-    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req));
+    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req), identityOf(req)?.policy);
     const sql = `SELECT value, count(*) AS n FROM ${relation} ` +
                 `GROUP BY 1 ORDER BY n DESC LIMIT 500`;
     const r = await connOf(req).execute(sql, 500);
@@ -1154,7 +1154,7 @@ app.get("/api/extent", safe(async (req, res) => {
   if (!table || !table.columns.some((x) => x.name === c))
     return res.status(400).json({ error: `unknown field ${field}` });
   try {
-    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req));
+    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req), identityOf(req)?.policy);
     const r = await connOf(req).execute(
       `SELECT min(value), max(value) FROM ${relation}`, 1);
     res.json({ min: r.rows[0]?.[0] ?? null, max: r.rows[0]?.[1] ?? null });
@@ -1193,7 +1193,7 @@ app.post("/api/query", safe(async (req, res) => {
     const who = principalOf(req);
     // RLS is applied here, server-side, on top of whatever the client sent. A
     // client that strips its filters still gets a scoped query.
-    const scope = requireScope(model, base, rls, who);
+    const scope = requireScope(model, base, rls, who, identityOf(req)?.policy);
     const scoped = { ...tile, where: [...(tile.where ?? []), ...scope.filters] };
     const sql = compileTile(model, connOf(req), scoped, { probe: true, role });
     const out = await connOf(req).execute(sql, resultLimit(tile) + 1, `${who?.id ?? "anon"}:${req.header("x-sc-refresh") ?? ""}`);

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { alertInputSchema, commentInputSchema, type ActivityRecord, type AlertInput, type AlertRule, type CommentThread, type Evaluation } from "./model.ts";
 import { evaluateAlert } from "./evaluate.ts";
 import { dueAlerts, listActivity, loadDashboard, mutateActivity, StoreConflict } from "../store/store.ts";
-import { identityOf, canUseSource, type CompanyAuth } from "../security/auth.ts";
+import { identityOf, canUseSource, type CompanyAuth, type GatewayPolicyRule } from "../security/auth.ts";
 import type { Principal, RlsConfig } from "../security/rls.ts";
 import { requireScope } from "../security/queryScope.ts";
 import type { Source } from "../sources/registry.ts";
@@ -31,10 +31,12 @@ export function mountChartActivity(app: Express, deps: {
     if (!document) throw failure("Dashboard not found in this source", 404);
     const tileId = String(req.params.tileId ?? ""), tile = document.spec.tiles.find(t => t.id === tileId);
     if (needsTile && (!tile || tile.kind && tile.kind !== "metric")) throw failure("Save this chart before adding comments or alerts", 404);
-    if (tile) requireScope(source.model!, source.model!.metrics[tile.metrics[0]]?.baseTable, deps.rls(), who);
+    if (tile) requireScope(source.model!, source.model!.metrics[tile.metrics[0]]?.baseTable, deps.rls(), who, identityOf(req)?.policy);
     return { source, who, document, tile: tile!, scope: { source: source.id, dashboardId, audience: audience(who) }, ownerId: owner(req) };
   }
-  function chartQuery(source: Source, document: DashboardSpec, tile: TileSpec, rule: AlertInput, who: Principal | null) {
+  // A watch is evaluated later with no request, so it cannot carry the gateway's per-request data policy. Rather than
+  // evaluate it unscoped, creating one is refused while a gateway policy applies to the chart's table.
+  function chartQuery(source: Source, document: DashboardSpec, tile: TileSpec, rule: AlertInput, who: Principal | null, policy: GatewayPolicyRule[] = []) {
     if (!tile.metrics.includes(rule.metric)) throw failure("Choose a metric from this saved chart");
     if (tile.dimensions.length > 1 || tile.dimensions.length === 1 && !tile.dimensions[0].includes(":")) throw failure("Alerts need a total or a time series with no category breakdown");
     if (rule.mode === "anomaly" && tile.dimensions.length !== 1) throw failure("Anomaly checks need a time-series chart");
@@ -42,7 +44,8 @@ export function mountChartActivity(app: Express, deps: {
     const query = { ...visibleQuery(source.model!, { ...tile, metrics: [rule.metric] }, [...(document.crossFilters ?? []), ...filtersForTile(document, tile, defaults)]), compare: "none" as const, limit: 1000, layout: tile.layout };
     const issues = validateTile(source.model!, query);
     if (issues.length) throw failure("The saved chart needs valid semantic fields before it can be watched");
-    const scoped = requireScope(source.model!, source.model!.metrics[rule.metric].baseTable, deps.rls(), who);
+    const scoped = requireScope(source.model!, source.model!.metrics[rule.metric].baseTable, deps.rls(), who, policy);
+    if (scoped.filters.some((f) => f.id.startsWith("gateway:"))) throw failure("A data policy set at the gateway applies to this chart. Watches run in the background without your session, so they cannot carry it yet; ask an administrator.", 403);
     return { ...query, where: [...(query.where ?? []), ...scoped.filters] };
   }
   const fingerprint = (query: ReturnType<typeof chartQuery>, source: Source) => hash({ query: { metrics: query.metrics, dimensions: query.dimensions, where: query.where }, model: source.model });
@@ -96,13 +99,13 @@ export function mountChartActivity(app: Express, deps: {
   app.post(base + "/:tileId/alerts/preview", deps.safe(async (req, res) => {
     const ctx = await context(req), input = z.object({ rule: alertInputSchema, revision: versionSchema }).strict().parse(req.body);
     if (input.revision !== ctx.document.revision) throw new StoreConflict("Save or reopen the latest dashboard before testing an alert");
-    const query = chartQuery(ctx.source, ctx.document.spec, ctx.tile, input.rule, ctx.who);
+    const query = chartQuery(ctx.source, ctx.document.spec, ctx.tile, input.rule, ctx.who, identityOf(req)?.policy);
     res.json({ evaluation: await evaluate(ctx.source, query, input.rule, ctx.who) });
   }));
   app.put(base + "/:tileId/alert", deps.safe(async (req, res) => {
     const ctx = await context(req), input = z.object({ rule: alertInputSchema, revision: versionSchema, version: versionSchema }).strict().parse(req.body);
     if (input.revision !== ctx.document.revision) throw new StoreConflict("Save or reopen the latest dashboard before creating an alert");
-    const query = chartQuery(ctx.source, ctx.document.spec, ctx.tile, input.rule, ctx.who);
+    const query = chartQuery(ctx.source, ctx.document.spec, ctx.tile, input.rule, ctx.who, identityOf(req)?.policy);
     await mutateActivity(ctx.scope, ctx.tile.id, rows => {
       const current = rows.find(r => r.type === "alert" && r.ownerId === ctx.ownerId), old = current?.body as AlertRule | undefined;
       if ((old?.version ?? 0) !== input.version) throw new StoreConflict("This alert changed. Close and reopen it before editing");

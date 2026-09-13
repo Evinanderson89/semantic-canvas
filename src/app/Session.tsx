@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
-export interface WorkspaceSession { mode: "local" | "team"; authenticated: boolean; canEdit: boolean; canAdmin: boolean; csrf?: string; gatewayUrl?: string; expiresAt?: number; user?: { id: string; name: string; role: string } }
+export interface WorkspaceSession { mode: "local" | "team"; authenticated: boolean; canEdit: boolean; canAdmin: boolean; csrf?: string; gatewayUrl?: string; expiresAt?: number; user?: { id: string; name: string; role: string };
+  /** Row-level rules the gateway set for this person (gateway-platform/docs/policy.md); every chart is filtered by them. */
+  policy?: { field: string; mode: "only" | "not"; values: string[] }[] }
 const local: WorkspaceSession = { mode: "local", authenticated: true, canEdit: true, canAdmin: true };
 const Context = createContext(local);
 export const useSession = () => useContext(Context);

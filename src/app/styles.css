@@ -1320,3 +1320,4 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .propose-problems{margin:8px 0 0;padding-left:18px;line-height:1.6}
 .metric-actions{display:inline-flex;gap:6px;align-items:center;margin-left:auto}
 .mrow-top .use{margin-left:0}
+.data-policy{display:block;margin-top:3px;font-size:10.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}

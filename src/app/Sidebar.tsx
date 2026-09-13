@@ -101,6 +101,7 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
           Settings
         </button>
         <div className="workspace-caption"><span title={session.mode === "team" ? "Access is managed by your company" : "Roles are simulations on this computer, not authentication"}>{session.mode === "team" ? `Company workspace · ${session.user?.role}` : "Local alpha · Role preview"}</span>
+          {session.policy?.length ? <span className="data-policy" title={"Set at the gateway for your groups. Every chart is filtered by it; a chart that cannot apply it is refused.\n" + session.policy.map((r) => `${r.field} ${r.mode === "only" ? "only" : "not"} ${r.values.join(", ")}`).join("\n")}>Data policy: {session.policy.map((r) => `${r.field.split(".").pop()} ${r.mode === "only" ? "in" : "not in"} ${r.values.slice(0, 3).join(", ")}${r.values.length > 3 ? "…" : ""}`).join("; ")}</span> : null}
           <button className="theme-toggle" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} appearance`}
             title={`Switch to ${theme === "light" ? "dark" : "light"} appearance`} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
             {theme === "light" ? "◐" : "◑"}
