@@ -86,3 +86,11 @@ it('reads the signed data policy the gateway adds, ignores a forged or foreign o
  expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`}})).json()).policy).toBeUndefined();
  await new Promise<void>(r=>s.close(()=>r()));
 });
+it('refuses a request that carries a policy it has no secret to verify, rather than serving it unscoped',async()=>{
+ const {server:s,url:u}=await serve({groupsClaim:'groups',bindings});
+ const jwt=await token();
+ const r=await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':'eyJ2IjoxfQ','x-gateway-policy-sig':'AA'}});
+ expect(r.status).toBe(503);expect((await r.json()).error).toContain('SC_GATEWAY_POLICY_SECRET');
+ expect((await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`}})).status).toBe(200);
+ await new Promise<void>(r=>s.close(()=>r()));
+});

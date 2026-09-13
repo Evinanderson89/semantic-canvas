@@ -118,7 +118,8 @@ export async function pooledDuckdb(
       let names: string[];
       if (root.startsWith("s3://")) {
         const r = await self.execute(`SELECT DISTINCT regexp_extract(file, '^${root.replace(/'/g, "''")}/([^/]+)/', 1) AS t FROM glob('${root.replace(/'/g, "''")}/*/**/*.parquet') ORDER BY t`, 5000, "catalog");
-        names = r.rows.map((x: unknown[]) => String(x[0])).filter(Boolean);
+        // Only identifier-shaped prefixes are tables; anything else would be spliced into read_parquet's string literal.
+        names = r.rows.map((x: unknown[]) => String(x[0])).filter((n) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && !n.startsWith("_"));
       } else {
         const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
         names = entries.filter((e) => e.isDirectory() && /^[A-Za-z_][A-Za-z0-9_]*$/.test(e.name) && !e.name.startsWith("_")).map((e) => e.name).sort();
