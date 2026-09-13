@@ -976,6 +976,9 @@ app.post("/api/reference/analyze", safe(async (req, res) => {
   finally { res.off("close", stop); }
 }));
 
+/** Said plainly, as a 503, so the person (and the CLI) know what to do, rather than a 500 that says nothing. */
+const NO_AI = "The AI agent is not set up on this Canvas. An administrator can add an Anthropic key under Connections, or set ANTHROPIC_API_KEY.";
+
 app.get("/api/agent/status", safe((_req, res) => res.json({
   configured: Boolean(ai?.apiKey && ai.provider === "anthropic"), provider: ai?.provider ?? "anthropic", model: ai?.model ?? "claude-opus-5",
 })));
@@ -1013,7 +1016,7 @@ app.delete("/api/agent/key", safe(async (_req, res) => {
 }));
 
 app.post("/api/agent/chat", safe(async (req, res) => {
-  if (!ai) return res.status(503).json({ error: "no ai provider configured -- add an ai: block to sources.yaml" });
+  if (!ai?.apiKey) return res.status(503).json({ error: NO_AI });
   const conversationId = String(req.body?.conversationId ?? "").trim();
   const message = String(req.body?.message ?? "").trim();
   if (!conversationId) return res.status(400).json({ error: "conversationId is required" });
@@ -1036,7 +1039,7 @@ app.post("/api/agent/chat", safe(async (req, res) => {
  * not a conversation, so there's no conversationId or history here.
  */
 app.post("/api/agent/explain", safe(async (req, res) => {
-  if (!ai) return res.status(503).json({ error: "no ai provider configured -- add an ai: block to sources.yaml" });
+  if (!ai?.apiKey) return res.status(503).json({ error: NO_AI });
   const body = req.body ?? {};
   const metrics = Array.isArray(body.metrics) ? body.metrics : [];
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
@@ -1057,7 +1060,7 @@ app.post("/api/agent/explain", safe(async (req, res) => {
  * same one-shot, read-only shape (see suggestImprovements).
  */
 app.post("/api/agent/beautify", safe(async (req, res) => {
-  if (!ai) return res.status(503).json({ error: "no ai provider configured -- add an ai: block to sources.yaml" });
+  if (!ai?.apiKey) return res.status(503).json({ error: NO_AI });
   const body = req.body ?? {};
   const metrics = Array.isArray(body.metrics) ? body.metrics : [];
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
@@ -1080,7 +1083,7 @@ app.post("/api/agent/beautify", safe(async (req, res) => {
  * displaying it.
  */
 app.post("/api/agent/dashboard-story", safe(async (req, res) => {
-  if (!ai) return res.status(503).json({ error: "no ai provider configured -- add an ai: block to sources.yaml" });
+  if (!ai?.apiKey) return res.status(503).json({ error: NO_AI });
   const body = req.body ?? {};
   const tiles: DashboardTileSummary[] = Array.isArray(body.tiles) ? body.tiles.map((t: any) => ({
     id: String(t.id ?? ""), title: String(t.title ?? ""), kind: String(t.kind ?? ""),
