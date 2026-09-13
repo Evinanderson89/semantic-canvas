@@ -6,7 +6,7 @@ import { duckglueAdapter } from "../src/semantic/duckglue.ts";
 import { duckdbConnector } from "../src/connectors/duckdb.ts";
 import { compileTile, splitPartialPeriods, validateTile } from "../src/compiler/compile.ts";
 import { demoDashboard, demoDashboardAvailable } from "../src/suggest/demo.ts";
-import { metricsByTable, isTemporal, type Model } from "../src/semantic/model.ts";
+import { isCrossTableRatio, metricsByTable, isTemporal, type Model } from "../src/semantic/model.ts";
 import type { Connector } from "../src/connectors/types.ts";
 import type { TileSpec } from "../src/compiler/spec.ts";
 
@@ -68,6 +68,8 @@ describe.skipIf(!available)("every metric in the real model compiles and runs", 
   it("each metric, on its own", async () => {
     for (const [name, m] of Object.entries(model.metrics)) {
       if (m.timeGrains) expect(validateTile(model, tile({ metrics: [name] }))).not.toEqual([]);
+      // A cumulative metric runs along time and says so without one.
+      if (m.type === "cumulative") { expect(validateTile(model, tile({ metrics: [name] }))[0]?.problem).toMatch(/cumulative/); await mustRun(tile({ metrics: [name], dimensions: [`month:${timeColumn(model.tables[m.baseTable])}`] }), `metric ${name}`); continue; }
       await mustRun(tile({ metrics: [name], dimensions: m.timeGrains ? [`${m.timeGrains[0]}:${m.timeDimension}`] : [] }), `metric ${name}`);
     }
   }, 120_000);
@@ -84,8 +86,10 @@ describe.skipIf(!available)("every metric in the real model compiles and runs", 
   it("every PAIR of metrics that shares a base table", async () => {
     // This is the case that broke in production: two metrics on one table whose
     // always-on filters and expression shapes have to coexist in one query.
-    for (const [table, ms] of Object.entries(metricsByTable(model))) {
+    for (const [table, all] of Object.entries(metricsByTable(model))) {
       const tcol = timeColumn(model.tables[table]);
+      // A ratio across two tables is charted on its own tile (docs/metric-types.md); every other kind pairs.
+      const ms = all.filter((m) => !isCrossTableRatio(model, m));
       for (let i = 0; i < ms.length; i++)
         for (let j = i + 1; j < ms.length; j++)
           await mustRun(
@@ -104,9 +108,14 @@ describe.skipIf(!available)("every metric in the real model compiles and runs", 
         (model.tables[j.right]?.columns ?? [])
           .filter((c) => /^(string|varchar|bool)/i.test(c.type) && !/_id$/.test(c.name))
           .map((c) => `${j.right}.${c.name}`));
+      const first = ms.find((m) => !m.type) ?? ms[0];
       for (const dim of [...local, ...joined])
-        await mustRun(tile({ metrics: [ms[0].name], dimensions: [dim] }),
-                      `${ms[0].name} by ${dim}`);
+        await mustRun(tile({ metrics: [first.name], dimensions: [dim] }),
+                      `${first.name} by ${dim}`);
+      // Computed metrics take the same cuts: a same-table one every dimension, a cross-table one the joined (qualified) ones.
+      for (const m of ms.filter((x) => x.type && x.type !== "cumulative"))
+        for (const dim of isCrossTableRatio(model, m) ? joined.filter((d) => model.joins.some((j) => j.left === model.metrics[m.denominator!].baseTable && d.startsWith(`${j.right}.`))) : [...local, ...joined])
+          await mustRun(tile({ metrics: [m.name], dimensions: [dim] }), `${m.name} by ${dim}`);
     }
   }, 300_000);
 });

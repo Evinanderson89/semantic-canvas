@@ -1,5 +1,5 @@
 import type { Connector } from "../connectors/types.ts";
-import { findJoin, fieldReachable, isTemporal, metricGrainIssue, joinPairs, type Model } from "../semantic/model.ts";
+import { findJoin, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, timeColumnOf, computedMetricIssue, type Metric, type Model } from "../semantic/model.ts";
 import type { FilterSpec, TileSpec, ValidationIssue } from "./spec.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -18,15 +18,33 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
   if (!tile.metrics?.length) issues.push({ tile: id, problem: "no metrics" });
 
   const bases = new Set<string>();
+  const timeDims = (tile.dimensions ?? []).filter((d) => d.includes(":"));
   for (const name of tile.metrics ?? []) {
     const m = model.metrics[name];
     if (!m) { issues.push({ tile: id, problem: `unknown metric "${name}"` }); continue; }
-    // Ingested tables stay out of viewers' reach until an admin publishes them (docs/connected-canvas.md).
-    if (options.role === "viewer" && (m.reviewed === false || model.tables[m.baseTable]?.connected?.status === "unreviewed"))
-      issues.push({ tile: id, problem: `"${name}" is ingested but not yet published; an administrator must review ${m.baseTable} before viewers can query it` });
+    const defect = computedMetricIssue(model, m);
+    if (defect) { issues.push({ tile: id, problem: defect }); continue; }
+    // A computed metric is checked through the simple metrics it is made of.
+    for (const c of metricComponents(model, m)) {
+      // Ingested tables stay out of viewers' reach until an admin publishes them (docs/connected-canvas.md).
+      if (options.role === "viewer" && (c.reviewed === false || m.reviewed === false || model.tables[c.baseTable]?.connected?.status === "unreviewed"))
+        issues.push({ tile: id, problem: `"${name}" is ingested but not yet published; an administrator must review ${c.baseTable} before viewers can query it` });
+      const grainIssue = metricGrainIssue(c, tile.dimensions ?? []);
+      if (grainIssue) issues.push({ tile: id, problem: grainIssue });
+    }
     bases.add(m.baseTable);
-    const grainIssue = metricGrainIssue(m, tile.dimensions ?? []);
-    if (grainIssue) issues.push({ tile: id, problem: grainIssue });
+    if (metricType(m) === "cumulative" && !timeDims.length) issues.push({ tile: id, problem: `${m.label} is cumulative: it needs a time dimension to run along` });
+    if (isCrossTableRatio(model, m)) {
+      const den = model.metrics[m.denominator!];
+      if ((tile.metrics ?? []).length > 1) issues.push({ tile: id, problem: `${m.label} divides ${m.baseTable} by ${den.baseTable}; a ratio across two tables is charted on its own tile` });
+      if (timeDims.length && !timeColumnOf(model, den.baseTable)) issues.push({ tile: id, problem: `${den.baseTable} has no date column to align ${m.label}'s denominator on` });
+      for (const dim of tile.dimensions ?? []) {
+        const { grain, table } = parseDimension(dim);
+        if (grain) continue;
+        if (!table) issues.push({ tile: id, problem: `${m.label} crosses two tables: name the dimension's table (${dim} → table.${dim})` });
+        else if (table !== den.baseTable && !findJoin(model, den.baseTable, table)) issues.push({ tile: id, problem: `no join from ${den.baseTable} to ${table}, which ${m.label}'s denominator needs` });
+      }
+    }
   }
   if (bases.size > 1)
     issues.push({ tile: id, problem: `metrics span ${[...bases].join(" and ")}; one tile is one base table` });
@@ -78,8 +96,54 @@ export function parseDimension(dim: string) {
 export function compileTile(model: Model, conn: Connector, tile: TileSpec, options: { probe?: boolean; role?: string } = {}): string {
   const issues = validateTile(model, tile, options);
   if (issues.length) throw new Error(issues.map((i) => i.problem).join("; "));
-  const metrics = tile.metrics.map((n) => model.metrics[n]);
-  if (metrics.some((m) => !m)) throw new Error("compileTile called with an unvalidated tile");
+  const tileMetrics = tile.metrics.map((n) => model.metrics[n]);
+  if (tileMetrics.some((m) => !m)) throw new Error("compileTile called with an unvalidated tile");
+  const q = conn.quote.bind(conn);
+  const across = tileMetrics.find((m) => isCrossTableRatio(model, m));
+
+  // The grouped query computes simple metrics only. A computed metric names
+  // the simple ones it needs; those ride along as hidden columns (aliased
+  // __m_<name> when the tile did not ask for them) and the computed value is
+  // formed in one more SELECT over the grouped rows, where a window (for a
+  // running total) or a division (for a ratio) is plain SQL.
+  const physical = new Map<string, { metric: Metric; alias: string }>();
+  for (const m of tileMetrics) for (const c of metricComponents(model, m)) if (!physical.has(c.name)) physical.set(c.name, { metric: c, alias: tile.metrics.includes(c.name) ? c.name : `__m_${c.name}` });
+
+  let sql: string, groupCols: string[], edge: { alias: string; ref: string; grain: string } | null;
+  if (across) {
+    ({ sql, groupCols } = compileAcross(model, conn, tile, across));
+    edge = null; // each side keeps its own edges; the ratio of two partially observed periods is left to the person's date filter
+  } else {
+    const core = compileCore(model, conn, tile, [...physical.values()]);
+    ({ sql, groupCols, edge } = core);
+    if (tileMetrics.some((m) => metricType(m) !== "simple")) {
+      const timeDim = (tile.dimensions ?? []).find((d) => d.includes(":"));
+      const timeAlias = timeDim ? q(`${parseDimension(timeDim).column}_${timeDim.split(":")[0]}`) : null;
+      const col = (name: string) => q(physical.get(name)!.alias);
+      const value = (m: Metric): string => {
+        switch (metricType(m)) {
+          case "ratio": return `CAST(${col(m.numerator!)} AS DOUBLE) / NULLIF(${col(m.denominator!)}, 0)`;
+          case "derived": return m.expression.replace(/'(?:[^']|'')*'/g, (s) => s).replace(/(?<![A-Za-z0-9_."])([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_"]|\s*\()/g, (w) => (physical.has(w) ? col(w) : w));
+          case "cumulative": {
+            const others = groupCols.filter((c) => c !== timeAlias);
+            const frame = m.window ? `ROWS BETWEEN ${m.window - 1} PRECEDING AND CURRENT ROW` : "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW";
+            return `SUM(${col(m.metric!)}) OVER (${others.length ? `PARTITION BY ${others.join(", ")} ` : ""}ORDER BY ${timeAlias} ${frame})`;
+          }
+          default: return col(m.name);
+        }
+      };
+      const cols = [...groupCols, ...tileMetrics.map((m) => `${value(m)} AS ${q(m.name)}`), ...(edge ? ['"__edge_min"', '"__edge_max"'] : [])];
+      sql = `SELECT ${cols.join(",\n       ")}\nFROM (\n${sql}\n) AS __grouped`;
+    }
+  }
+
+  return finishTile(model, conn, tile, tileMetrics, sql, groupCols, edge, options);
+}
+
+/** The grouped SELECT for one base table: dimensions, the simple metrics given (each under its alias), and the hidden edge columns. */
+function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { metric: Metric; alias: string }[]): { sql: string; groupCols: string[]; edge: { alias: string; ref: string; grain: string } | null } {
+  const metrics = physical.map((p) => p.metric);
+  const aliasOf = new Map(physical.map((p) => [p.metric.name, p.alias]));
   const base = metrics[0].baseTable;
   assertIdent(base);
   const q = conn.quote.bind(conn);
@@ -151,7 +215,7 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
     groups.set(k, [...(groups.get(k) ?? []), m]);
   }
 
-  const sel = (ms: typeof metrics) => ms.map((m) => `${m.expression} AS ${q(m.name)}`);
+  const sel = (ms: typeof metrics) => ms.map((m) => `${m.expression} AS ${q(aliasOf.get(m.name) ?? m.name)}`);
   const clause = (kw: string, parts: string[]) =>
     parts.length ? `\n${kw} ${parts.join(" AND ")}` : "";
 
@@ -183,12 +247,54 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
       : names.slice(1).map((n) => `\nCROSS JOIN ${n}`).join("");
     const metricCols = metrics.map((m) => {
       const owner = [...groups.values()].findIndex((ms) => ms.includes(m));
-      return `${names[owner]}.${q(m.name)} AS ${q(m.name)}`;
+      const a = q(aliasOf.get(m.name) ?? m.name);
+      return `${names[owner]}.${a} AS ${a}`;
     });
     const edgeCols = edge ? [`${names[0]}."__edge_min" AS "__edge_min"`, `${names[0]}."__edge_max" AS "__edge_max"`] : [];
     sql = `WITH ${ctes.join(",\n")}\n` +
       `SELECT ${[...groupCols.map((c) => `${key(c, names)} AS ${c}`), ...metricCols, ...edgeCols].join(", ")}\nFROM ${names[0]}${join}`;
   }
+  return { sql, groupCols, edge };
+}
+
+/**
+ * A ratio whose denominator lives on another table: each side is its own
+ * grouped query over its own table, joined on the dimension values. The time
+ * axis is each side's own date column (sessions by session date, signups by
+ * signup date); a categorical dimension must be reachable from both. Every
+ * filter, the row-level ones included, has to apply on both sides, or the
+ * ratio is refused rather than half-scoped.
+ */
+function compileAcross(model: Model, conn: Connector, tile: TileSpec, ratio: Metric): { sql: string; groupCols: string[] } {
+  const q = conn.quote.bind(conn);
+  const num = model.metrics[ratio.numerator!], den = model.metrics[ratio.denominator!];
+  const sideDims = (base: string) => (tile.dimensions ?? []).map((d) => {
+    const { grain, table, column } = parseDimension(d);
+    if (!grain) return d;
+    const own = table === base || (!table && model.tables[base].columns.some((c) => c.name === column)) ? column : timeColumnOf(model, base)?.split(".")[1];
+    if (!own) throw new Error(`${base} has no date column to align ${ratio.label} on`);
+    return `${grain}:${own}`;
+  });
+  for (const f of tile.where ?? []) {
+    if (f.source !== "dimension") throw new Error(`${ratio.label} crosses two tables; an aggregate filter cannot apply to both`);
+    if (!fieldReachable(model, den.baseTable, f.field) || !fieldReachable(model, num.baseTable, f.field)) throw new Error(`the filter on ${f.field} cannot be applied to both ${num.baseTable} and ${den.baseTable}, which ${ratio.label} needs`);
+  }
+  const side = (m: Metric, name: string) => compileCore(model, conn, { ...tile, metrics: [m.name], dimensions: sideDims(m.baseTable) }, [{ metric: m, alias: name }]);
+  const n = side(num, "__num"), d = side(den, "__den");
+  // Both sides group by the same dimensions in the same order; only a time column's alias may differ.
+  const dims = (tile.dimensions ?? []).map((dim, i) => {
+    const { grain, column } = parseDimension(dim);
+    return { out: q(grain ? `${column}_${grain}` : column), n: n.groupCols[i], d: d.groupCols[i] };
+  });
+  const sql = `WITH __n AS (\n${n.sql}\n), __d AS (\n${d.sql}\n)\n` +
+    `SELECT ${[...dims.map((x) => `COALESCE(__n.${x.n}, __d.${x.d}) AS ${x.out}`), `CAST(__n."__num" AS DOUBLE) / NULLIF(__d."__den", 0) AS ${q(ratio.name)}`].join(", ")}\n` +
+    `FROM __n FULL OUTER JOIN __d ON ${dims.length ? dims.map((x) => `__n.${x.n} IS NOT DISTINCT FROM __d.${x.d}`).join(" AND ") : "TRUE"}`;
+  return { sql, groupCols: dims.map((x) => x.out) };
+}
+
+/** Edge flags, period-over-period, ordering and the limit: the same tail for every kind of metric. */
+function finishTile(model: Model, conn: Connector, tile: TileSpec, metrics: Metric[], sql: string, groupCols: string[], edge: { alias: string; ref: string; grain: string } | null, options: { probe?: boolean }): string {
+  const q = conn.quote.bind(conn);
 
   // Edge completeness. Observed dates cannot prove a bucket is complete (a
   // monthly snapshot legitimately has one row on the first), but they can

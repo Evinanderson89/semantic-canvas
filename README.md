@@ -69,7 +69,7 @@ Open **Connections** to add, edit or select a source, or edit `sources.yaml`. A 
 
 | Adapter | Supported import | Explicitly unsupported |
 | --- | --- | --- |
-| `duckglue` | Bundled YAML model, trusted metric expressions and declared joins | Multi-hop or ambiguous joins |
+| `duckglue` | Bundled YAML model, trusted metric expressions and declared joins; ratio, derived and cumulative metrics (`docs/metric-types.md`) | Multi-hop or ambiguous joins |
 | `dbt` | Simple metrics backed by supported column aggregates in `semantic_manifest.json` | Ratio, derived, cumulative and conversion metrics; metric filters; non-additive measures; computed dimensions |
 | `snowflake-semantic` | Plain-column fields, table-level metrics, composite join keys, left/inner joins, database/schema qualification | Computed fields, named filters, top-level derived metrics, repeated physical table names with different aliases |
 
