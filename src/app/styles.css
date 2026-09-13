@@ -1,10 +1,10 @@
 /* Warm paper, forest accents, and an optional low-glare dark studio. */
 :root{
   color-scheme:light;
-  --ground:#f4f3ee;--panel:#fffefa;--surface:#fffefa;--surface-2:#eeeee7;
-  --line:#e2e3da;--line-2:#cdd1c5;
-  --ink:#252e29;--ink-2:#59645c;--ink-3:#737e74;
-  --accent:#35664e;--accent-soft:#e6eee4;
+  --ground:#f5f6f5;--panel:#ffffff;--surface:#ffffff;--surface-2:#eceeec;
+  --line:#e1e4e2;--line-2:#c9cfcb;
+  --ink:#151b18;--ink-2:#535d58;--ink-3:#6f7873;
+  --accent:#2f5b47;--accent-soft:#e9efeb;
   --pos:#287653;--neg:#b64b41;
   --sidebar:220px;--inspector:0px;
   --shadow:0 12px 36px -12px #253a2824;
@@ -872,7 +872,7 @@ button:disabled { cursor:default; opacity:.5; }
 .pop, .dash-beautify-pop { box-shadow:var(--shadow); }
 .entry { max-width:1040px;width:100%;margin:0 auto;padding:60px 56px 20px; }
 .entry h2 { font-size:clamp(34px,4.4vw,58px);letter-spacing:-.045em;line-height:1.08;margin:22px 0 20px;font-weight:500; }
-.entry h2 em { font-family:Georgia,"Times New Roman",serif;font-weight:400;color:var(--accent); }
+.entry h2 em { font-style:normal;font-weight:450;color:var(--ink-3);letter-spacing:-.02em; }
 .entry .lede { font-size:14px;line-height:1.75;max-width:48ch;color:var(--ink-2);margin:0; }
 .model-summary { display:flex;align-items:center;flex-wrap:wrap;gap:7px;font-size:11px;color:var(--ink-2);margin:22px 0 32px; }
 .model-summary > span:last-child { color:var(--ink-3); }

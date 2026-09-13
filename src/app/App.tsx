@@ -877,23 +877,23 @@ export function App() {
 function Entry({ model, onSuggest, onScratch, onReference }: any) {
   return (
     <div className="entry">
-      <div className="eyebrow">Your analytics studio</div>
-      <h2>Give your data<br /><em>a point of view.</em></h2>
-      <p className="lede">A space to explore what matters, compose a dashboard, and tell the story behind the numbers.</p>
+      <div className="eyebrow">Semantic Canvas</div>
+      <h2>Dashboards from<br /><em>governed metrics.</em></h2>
+      <p className="lede">Ask a question, sketch a layout, or start blank. Every chart comes from a metric your team published, and the review says what it leaves out.</p>
       <div className="model-summary"><span className="dot ready" />{prettifyModelName(model.name)}<span>· {Object.keys(model.metrics).length} metrics ready to explore</span></div>
       <div className="paths">
         <button className="path suggested" onClick={onSuggest}>
           <span className="path-glyph" aria-hidden="true">✧</span>
           <h3>Suggest a dashboard <span>↗</span></h3>
-          <p>Start with a question. Find a useful set of metrics, trends, and comparisons.</p>
+          <p>Start from a question. It proposes the metrics, trends and breakdowns, and you confirm before anything is built.</p>
         </button>
         <button className="path" onClick={onScratch}>
           <span className="path-glyph" aria-hidden="true">+</span>
           <h3>Start from scratch <span>↗</span></h3>
-          <p>Make room for your own perspective. Add charts, notes, and a clear narrative.</p>
+          <p>An empty canvas. Add charts, headings and notes; arrange them yourself.</p>
         </button>
         <button className="path reference-path" aria-label="Recreate from reference" onClick={onReference}>
-          <span className="path-glyph" aria-hidden="true">▧</span><div><h3>Recreate from reference <span>↗</span></h3><p>A sketch, photo or PDF. Your layout, brought to life with catalogue metrics.</p></div>
+          <span className="path-glyph" aria-hidden="true">▧</span><div><h3>Recreate from reference <span>↗</span></h3><p>A sketch, photo or PDF becomes a layout on catalogue metrics. Unmatched boxes stay placeholders, never guesses.</p></div>
         </button>
       </div>
     </div>
