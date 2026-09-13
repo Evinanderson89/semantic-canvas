@@ -24,7 +24,9 @@ import { metricIssues, publishSchema, readOverlay, registerSchema, summarize, wr
 import { connectConnector } from "./sources/registry.ts";
 import { joinCandidates, probeJoins, profileTables } from "./modeler/introspect.ts";
 import { propose } from "./modeler/propose.ts";
-import { proposalIssues, proposalToYaml } from "./modeler/yaml.ts";
+import { proposalIssues, proposalToExtension, proposalToYaml } from "./modeler/yaml.ts";
+import { driftOf, extendProposal } from "./modeler/extend.ts";
+import { writeExtension } from "./sources/extensions.ts";
 import { draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -427,7 +429,35 @@ async function addSource(input: { id: string; label: string; adapter: string; mo
 const draftCreateSchema = z.object({
   id: z.string().regex(SLUG, "id must be lowercase letters, digits and hyphens, starting with a letter"), label: z.string().min(1).max(200),
   connector: z.record(z.string(), z.unknown()).optional(), fromSource: z.string().regex(SLUG).optional(),
-}).strict().refine((b) => Boolean(b.connector) !== Boolean(b.fromSource), "Give a connector or a source to read, not both");
+  /** Read the warehouse behind this source and propose only what its model is missing; publishing extends that source. */
+  extend: z.string().regex(SLUG).optional(),
+}).strict().refine((b) => [b.connector, b.fromSource, b.extend].filter(Boolean).length === 1, "Give one of: a connector, a source to read, or a source to extend");
+
+/** Dashboards in a source that chart any of these metrics: what a drift finding would break for readers. */
+async function dashboardsUsing(source: Source, metrics: Set<string>): Promise<{ id: string; name: string; metrics: string[] }[]> {
+  if (!metrics.size || !source.model) return [];
+  const scope = { source: source.id, model: source.model.name };
+  const out: { id: string; name: string; metrics: string[] }[] = [];
+  for (const d of await listDashboards(scope)) {
+    const doc = await loadDashboard(d.id, scope).catch(() => null);
+    if (!doc) continue;
+    const used = [...new Set(doc.spec.tiles.flatMap((t) => t.metrics ?? []).filter((m) => metrics.has(m)))].sort();
+    if (used.length) out.push({ id: d.id, name: d.name, metrics: used });
+  }
+  return out;
+}
+
+/** Drift: what the model declares that the warehouse no longer has, and what that breaks. Reads the catalogue only; runs any time. */
+app.get("/api/modeler/drift", safe(async (req, res) => {
+  const id = String(req.query.source ?? "");
+  const s = sources.find((x) => x.id === id);
+  if (!s || s.status !== "ready" || !s.conn || !s.model) return res.status(404).json({ error: `no ready source "${id}"` });
+  if (!s.conn.catalog) return res.status(400).json({ error: "This connector cannot list its tables, so drift cannot be checked." });
+  const catalog = await s.conn.catalog();
+  const drift = driftOf(s.model, catalog);
+  const dashboards = await dashboardsUsing(s, new Set(drift.flatMap((f) => f.metrics)));
+  res.json({ source: s.id, checkedAt: new Date().toISOString(), tables: catalog.length, drift, dashboards });
+}));
 
 app.get("/api/modeler/drafts", safe(async (_req, res) => res.json({ drafts: (await listDrafts()).map(summarizeDraft) })));
 
@@ -435,11 +465,12 @@ app.post("/api/modeler/drafts", safe(async (req, res) => {
   const input = draftCreateSchema.parse(req.body ?? {});
   if (await readDraft(input.id)) return res.status(409).json({ error: `a draft named "${input.id}" already exists` });
   if (sources.some((s) => s.id === input.id)) return res.status(409).json({ error: `a source named "${input.id}" already exists; choose another id` });
-  let conn: Connector, stored: Draft["connector"], fromSource: string | undefined, borrowed = false;
-  if (input.fromSource) {
-    const s = sources.find((x) => x.id === input.fromSource);
-    if (!s || s.status !== "ready" || !s.conn) return res.status(404).json({ error: `no ready source "${input.fromSource}"` });
+  let conn: Connector, stored: Draft["connector"], fromSource: string | undefined, borrowed = false, extending: Source | undefined;
+  if (input.fromSource || input.extend) {
+    const s = sources.find((x) => x.id === (input.fromSource ?? input.extend));
+    if (!s || s.status !== "ready" || !s.conn || !s.model) return res.status(404).json({ error: `no ready source "${input.fromSource ?? input.extend}"` });
     conn = s.conn; fromSource = s.id; borrowed = true;
+    if (input.extend) extending = s;
   } else {
     const connectorType = String((input.connector as any)?.type ?? "");
     const built = buildConnector(connectorType, input.connector, {});
@@ -460,10 +491,12 @@ app.post("/api/modeler/drafts", safe(async (req, res) => {
     const profiles = await profileTables(conn, catalog);
     const probes = await probeJoins(conn, profiles, joinCandidates(profiles));
     const now = new Date().toISOString();
+    const fresh = propose({ id: input.id, label: input.label, tables: profiles, probes });
     const draft: Draft = { id: input.id, label: input.label, connector: stored, fromSource, createdAt: now, createdBy: actorOf(req), updatedAt: now, publishedAt: null, sourceId: null,
-      proposal: propose({ id: input.id, label: input.label, tables: profiles, probes }) };
+      proposal: extending ? extendProposal(fresh, extending.model!, extending.id) : fresh,
+      ...(extending ? { drift: driftOf(extending.model!, catalog) } : {}) };
     await writeDraft(draft);
-    telemetry.log("audit.modeler_drafted", { actor: actorOf(req), id: draft.id, tables: profiles.length, probes: probes.length });
+    telemetry.log("audit.modeler_drafted", { actor: actorOf(req), id: draft.id, tables: profiles.length, probes: probes.length, extends: extending?.id });
     res.json(draft);
   } finally { if (!borrowed) await conn!.close().catch(() => {}); }
 }));
@@ -502,6 +535,18 @@ app.post("/api/modeler/drafts/:id/publish", safe(async (req, res) => {
   if (!d) return res.status(404).json({ error: `no draft "${req.params.id}"` });
   const issues = proposalIssues(d.proposal);
   if (issues.length) return res.status(400).json({ error: issues[0], issues });
+  if (d.proposal.extends) {
+    // Extending a source: the base model file is never touched; the additions go to an extension merged over it.
+    const target = sources.find((s) => s.id === d.proposal.extends);
+    if (!target) return res.status(404).json({ error: `the source this draft extends, ${d.proposal.extends}, is no longer configured` });
+    const path = await writeExtension(target.id, proposalToExtension(d.proposal));
+    const reload = await hotReload();
+    const published: Draft = { ...d, publishedAt: new Date().toISOString(), sourceId: target.id, updatedAt: new Date().toISOString() };
+    await writeDraft(published);
+    const source = sources.find((s) => s.id === target.id);
+    telemetry.log("audit.modeler_extended", { actor: actorOf(req), id: d.id, source: target.id, tables: Object.keys(source?.model?.tables ?? {}).length, metrics: Object.keys(source?.model?.metrics ?? {}).length });
+    return res.json({ draft: summarizeDraft(published), source: source ? describeSource(source) : null, path, sources: reload.sources, extended: true });
+  }
   const path = await writeAuthored(d.id, proposalToYaml(d.proposal));
   const already = sources.find((s) => s.id === d.id);
   let reload: Awaited<ReturnType<typeof hotReload>>;

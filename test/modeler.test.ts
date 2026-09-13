@@ -110,3 +110,91 @@ describe("modeler on the sample lake", () => {
     expect(r.rows.length).toBeGreaterThan(0);
   });
 });
+
+// Extending a model that exists, and drift against it: nothing the model
+// says is changed; what it lacks is proposed; what the warehouse lost is named.
+import { driftOf, extendProposal, metricsUsing } from "../src/modeler/extend.ts";
+import { mergeExtension, extensionSchema } from "../src/sources/extensions.ts";
+import { proposalToExtension } from "../src/modeler/yaml.ts";
+import { model as fixtureModel } from "./fixtures.ts";
+import YAML from "yaml";
+
+describe("extend", () => {
+  const profiles: TableProfile[] = [
+    { name: "fct_sales", rows: 500, columns: [col("sale_id", "string", 500, { distinct: 500 }), col("user_id", "string", 500, { distinct: 40 }), col("plan_id", "string", 500, { distinct: 3 }), col("amount", "double", 500, { distinct: 300 }), col("sold_on", "date", 500, { distinct: 90 }), col("discount", "double", 500, { distinct: 20 })] },
+    { name: "dim_users", rows: 40, columns: [col("user_id", "string", 40, { distinct: 40 }), col("country", "string", 40, { distinct: 5 })] },
+    { name: "dim_plans", rows: 3, columns: [col("plan_id", "string", 3, { distinct: 3 }), col("tier", "string", 3, { distinct: 3 })] },
+    { name: "fct_refunds", rows: 60, columns: [col("refund_id", "string", 60, { distinct: 60 }), col("sale_id", "string", 60, { distinct: 55 }), col("refunded_on", "date", 60, { distinct: 30 }), col("amount", "double", 60, { distinct: 50 })] },
+  ];
+  it("keeps what the model has, proposes what it lacks, and asks for what it cannot know", () => {
+    const fresh = propose({ id: "x", label: "X", tables: profiles, probes: [
+      { left: "fct_sales", leftOn: "user_id", right: "dim_users", rightOn: "user_id", leftRows: 500, matched: 500 },
+      { left: "fct_refunds", leftOn: "sale_id", right: "fct_sales", rightOn: "sale_id", leftRows: 60, matched: 60 }] });
+    const p = extendProposal(fresh, fixtureModel, "t");
+    expect(p.extends).toBe("t");
+    const byName = Object.fromEntries(p.tables.map((t) => [t.name, t]));
+    expect(byName.fct_sales).toMatchObject({ status: "existing", include: false, grain: "one row per sale" });
+    expect(byName.fct_sales.evidence).toContain("No reporting lag declared");
+    expect(byName.dim_users).toMatchObject({ status: "existing", include: false });
+    expect(byName.fct_refunds).toMatchObject({ status: "new", include: true, grain: "one row per refund_id" });
+    // fct_sales -> dim_users is declared; fct_refunds -> fct_sales is not.
+    expect(p.joins.find((j) => j.left === "fct_sales" && j.right === "dim_users")).toMatchObject({ status: "existing", include: false });
+    expect(p.joins.find((j) => j.left === "fct_refunds")).toMatchObject({ status: "new", include: true });
+    // Metrics: revenue already sums amount, so total_amount on fct_sales is not a gap; discount has no metric, so it is; refunds are new.
+    expect(p.metrics.find((m) => m.name === "total_amount" && m.baseTable === "fct_sales")).toBeUndefined();
+    expect(p.metrics.find((m) => m.name === "total_discount")).toMatchObject({ status: "gap", include: false });
+    expect(p.metrics.find((m) => m.name === "refunds_count")).toMatchObject({ status: "new", include: true });
+    expect(p.metrics.find((m) => m.name === "users_count")).toBeUndefined();
+    expect(p.model.description).toContain("1 table not in the model");
+    expect(proposalIssues(p)).toEqual([]);
+  });
+  it("writes only the additions as an extension that merges over the base model without touching it", async () => {
+    const fresh = propose({ id: "x", label: "X", tables: profiles, probes: [{ left: "fct_refunds", leftOn: "sale_id", right: "fct_sales", rightOn: "sale_id", leftRows: 60, matched: 60 }] });
+    const p = extendProposal(fresh, fixtureModel, "t");
+    p.tables.find((t) => t.name === "fct_sales")!.reportingLag = 2;
+    p.metrics.find((m) => m.name === "total_discount")!.include = true;
+    const yaml = proposalToExtension(p);
+    expect(yaml).not.toContain("dim_users:");
+    expect(yaml).toContain("fct_refunds:");
+    expect(yaml).toContain("reporting_lag: 2");
+    const ext = extensionSchema.parse(YAML.parse(yaml));
+    expect(Object.keys(ext.tables)).toEqual(["fct_refunds"]);
+    expect(ext.patches).toEqual({ fct_sales: { reporting_lag: 2 } });
+    expect(ext.joins).toEqual([{ left: "fct_refunds", left_on: "sale_id", right: "fct_sales", right_on: "sale_id", type: "left" }]);
+    const merged = mergeExtension(fixtureModel, ext, "t");
+    expect(merged.tables.fct_sales.grain).toBe("one row per sale");
+    expect(merged.tables.fct_sales.reportingLagDays).toBe(2);
+    expect(merged.tables.fct_refunds.grain).toBe("one row per refund_id");
+    expect(merged.metrics.revenue.expression).toBe("SUM(fct_sales.amount)");
+    expect(merged.metrics.total_discount.baseTable).toBe("fct_sales");
+    expect(merged.metrics.refunds_count).toBeDefined();
+    expect(merged.joins).toHaveLength(fixtureModel.joins.length + 1);
+    expect(mergeExtension(fixtureModel, null, "t")).toBe(fixtureModel);
+    // A base name always wins.
+    const shadow = mergeExtension(fixtureModel, { ...ext, metrics: { revenue: { label: "x", base_table: "fct_sales", expression: "1" } } }, "t");
+    expect(shadow.metrics.revenue.expression).toBe("SUM(fct_sales.amount)");
+  });
+  it("refuses an extension with nothing to add", () => {
+    const p = extendProposal(propose({ id: "x", label: "X", tables: profiles.slice(0, 3) }), fixtureModel, "t");
+    p.metrics.forEach((m) => (m.include = false));
+    expect(proposalIssues(p)).toEqual(["Nothing to add: include a table, a join, a metric, or set a reporting lag on a modelled table."]);
+  });
+});
+
+describe("drift", () => {
+  it("names columns gone or retyped and the metrics they break; ignores what still matches", () => {
+    const catalog = [
+      { name: "fct_sales", columns: [{ name: "sale_id", type: "VARCHAR" }, { name: "user_id", type: "VARCHAR" }, { name: "plan_id", type: "VARCHAR" }, { name: "sold_on", type: "TIMESTAMP" }] },
+      { name: "dim_users", columns: [{ name: "user_id", type: "VARCHAR" }, { name: "country", type: "VARCHAR" }] },
+    ];
+    const d = driftOf(fixtureModel, catalog);
+    expect(d.map((f) => [f.kind, f.table, f.column])).toEqual([
+      ["column_missing", "fct_sales", "amount"], ["type_changed", "fct_sales", "sold_on"], ["table_missing", "dim_plans", null]]);
+    expect(d[0].metrics).toEqual(["arpu", "live_revenue", "revenue"]);
+    expect(d[0].text).toBe("fct_sales.amount is gone from the warehouse; arpu, live_revenue, revenue break.");
+    expect(d[1]).toMatchObject({ declared: "date", actual: "TIMESTAMP", metrics: [] });
+    expect(d[2].text).toContain("dim_plans is in the model but not in the warehouse");
+    expect(metricsUsing(fixtureModel, "fct_sales", "user_id")).toEqual(["arpu"]);
+    expect(driftOf(fixtureModel, [...catalog.map((c) => c.name === "fct_sales" ? { ...c, columns: [...c.columns, { name: "amount", type: "DOUBLE" }].map((x) => x.name === "sold_on" ? { ...x, type: "DATE" } : x) } : c), { name: "dim_plans", columns: [{ name: "plan_id", type: "VARCHAR" }, { name: "tier", type: "VARCHAR" }] }])).toEqual([]);
+  });
+});

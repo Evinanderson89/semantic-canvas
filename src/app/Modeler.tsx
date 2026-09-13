@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { readResponse } from "./http.ts";
 import type { Proposal, ProposedJoin, ProposedMetric, ProposedTable } from "../modeler/propose.ts";
+import type { DriftFinding } from "../modeler/extend.ts";
+import { DriftCheck, DriftPanel } from "./ModelerExtend.tsx";
 
 /**
  * The Modeler (docs/modeler.md): from a warehouse's own catalogue to a
@@ -8,8 +10,8 @@ import type { Proposal, ProposedJoin, ProposedMetric, ProposedTable } from "../m
  * proposes with evidence; this screen is where a person agrees, corrects,
  * or leaves things out. Admins only, like everything that adds a source.
  */
-interface DraftSummary { id: string; label: string; createdAt: string; createdBy: string; updatedAt: string; publishedAt: string | null; sourceId: string | null; fromSource: string | null; connector: string | null; tables: number; joins: number; metrics: number; warnings: number }
-interface Draft { id: string; label: string; fromSource?: string; connector?: Record<string, unknown>; createdAt: string; createdBy: string; updatedAt: string; publishedAt: string | null; sourceId: string | null; proposal: Proposal }
+interface DraftSummary { id: string; label: string; createdAt: string; createdBy: string; updatedAt: string; publishedAt: string | null; sourceId: string | null; fromSource: string | null; connector: string | null; extends: string | null; drift: number; tables: number; joins: number; metrics: number; warnings: number }
+interface Draft { id: string; label: string; fromSource?: string; connector?: Record<string, unknown>; createdAt: string; createdBy: string; updatedAt: string; publishedAt: string | null; sourceId: string | null; proposal: Proposal; drift?: DriftFinding[] }
 type SourceRow = { id: string; label: string; status: "ready" | "error"; connector?: string | null };
 
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^[^a-z]+/, "").slice(0, 40);
@@ -28,9 +30,10 @@ export function Modeler({ sources, onPublished }: { sources: SourceRow[]; onPubl
     <div className="explore modeler">
       <span className="eyebrow">Modeler</span>
       <h1>A semantic model, from the warehouse itself.</h1>
-      <p className="lede">Point the Modeler at a lake or a warehouse. It reads the catalogue, measures what is unique and what joins to what, and proposes tables, joins and metrics with the evidence beside each. You review, correct, and publish; the result is an ordinary model file and a source anyone can chart against.</p>
+      <p className="lede">Point the Modeler at a lake or a warehouse. It reads the catalogue, measures what is unique and what joins to what, and proposes tables, joins and metrics with the evidence beside each. You review, correct, and publish; the result is an ordinary model file and a source anyone can chart against. Already have a model? Extend it: the Modeler proposes only what it is missing, and never edits what you wrote.</p>
       {error && <p className="conn-err" role="alert">{error}</p>}
       <NewDraft sources={sources} onCreated={(d) => { setDrafts(null); setOpen(d); }} />
+      <DriftCheck sources={sources} />
       <h4 className="ex-h">Drafts</h4>
       {drafts === null ? <p className="conn-meta">Loading…</p> : drafts.length === 0 ? <p className="conn-meta">No drafts yet. Start one above.</p> : (
         <div className="joins">
@@ -38,8 +41,8 @@ export function Modeler({ sources, onPublished }: { sources: SourceRow[]; onPubl
             <button key={d.id} className="join mono modeler-row" onClick={() => openDraft(d.id)}>
               <span>{d.label}</span><em>&nbsp;{d.id}</em>
               <span className="arrow">·</span>
-              <span>{d.tables} tables, {d.joins} joins, {d.metrics} metrics{d.warnings ? `, ${d.warnings} to check` : ""}</span>
-              <i>{d.publishedAt ? `published as ${d.sourceId}` : "draft"}</i>
+              <span>{d.extends ? `extends ${d.extends}: ` : ""}{d.tables} tables, {d.joins} joins, {d.metrics} metrics{d.warnings ? `, ${d.warnings} to check` : ""}{d.drift ? `, ${d.drift} drift` : ""}</span>
+              <i>{d.publishedAt ? (d.extends ? `added to ${d.sourceId}` : `published as ${d.sourceId}`) : "draft"}</i>
             </button>
           ))}
         </div>
@@ -50,7 +53,7 @@ export function Modeler({ sources, onPublished }: { sources: SourceRow[]; onPubl
 
 function NewDraft({ sources, onCreated }: { sources: SourceRow[]; onCreated: (d: Draft) => void }) {
   const ready = sources.filter((s) => s.status === "ready");
-  const [mode, setMode] = useState<"source" | "lake" | "snowflake">(ready.length ? "source" : "lake");
+  const [mode, setMode] = useState<"extend" | "source" | "lake" | "snowflake">(ready.length ? "extend" : "lake");
   const [label, setLabel] = useState(""), [id, setId] = useState(""), [idTouched, setIdTouched] = useState(false);
   const [fromSource, setFromSource] = useState(ready[0]?.id ?? "");
   const [lake, setLake] = useState({ lakeRoot: "", awsProfile: "", awsRegion: "" });
@@ -61,7 +64,7 @@ function NewDraft({ sources, onCreated }: { sources: SourceRow[]; onCreated: (d:
     const connector = mode === "lake" ? { type: "duckdb", lakeRoot: lake.lakeRoot, awsProfile: lake.awsProfile || undefined, awsRegion: lake.awsRegion || undefined, poolSize: 2 }
       : mode === "snowflake" ? { type: "snowflake", ...Object.fromEntries(Object.entries(snow).filter(([, v]) => v)), poolSize: 2 } : undefined;
     try {
-      const d = await fetch("/api/modeler/drafts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, label: label || id, ...(mode === "source" ? { fromSource } : { connector }) }) }).then(readResponse);
+      const d = await fetch("/api/modeler/drafts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, label: label || id, ...(mode === "source" ? { fromSource } : mode === "extend" ? { extend: fromSource } : { connector }) }) }).then(readResponse);
       onCreated(d);
     } catch (err: any) { setError(err.message); } finally { setBusy(false); }
   };
@@ -69,17 +72,19 @@ function NewDraft({ sources, onCreated }: { sources: SourceRow[]; onCreated: (d:
     <form className="cform" onSubmit={submit} aria-label="New model">
       <div className="cform-grid">
         <label className="ctl"><span>Label</span><input required value={label} placeholder="Orders warehouse" onChange={(e) => { setLabel(e.target.value); if (!idTouched) setId(slugify(e.target.value)); }} /></label>
-        <label className="ctl"><span>Source ID</span><input required pattern="[a-z][a-z0-9-]*" value={id} placeholder="orders-warehouse" onChange={(e) => { setId(slugify(e.target.value)); setIdTouched(true); }} /></label>
-        <label className="ctl span2"><span>Read from</span>
+        <label className="ctl"><span>{mode === "extend" ? "Draft ID" : "Source ID"}</span><input required pattern="[a-z][a-z0-9-]*" value={id} placeholder="orders-warehouse" onChange={(e) => { setId(slugify(e.target.value)); setIdTouched(true); }} /></label>
+        <label className="ctl span2"><span>What to do</span>
           <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-            {ready.length > 0 && <option value="source">The warehouse behind an existing source</option>}
+            {ready.length > 0 && <option value="extend">Extend a source's model: propose only what it is missing</option>}
+            {ready.length > 0 && <option value="source">Model the warehouse behind an existing source, as a new source</option>}
             <option value="lake">A Parquet lake (a directory, or s3://)</option>
             <option value="snowflake">A Snowflake database and schema</option>
           </select>
         </label>
-        {mode === "source" && <label className="ctl span2"><span>Source</span>
+        {(mode === "source" || mode === "extend") && <label className="ctl span2"><span>Source</span>
           <select value={fromSource} onChange={(e) => setFromSource(e.target.value)}>{ready.map((s) => <option key={s.id} value={s.id}>{s.label} ({s.id})</option>)}</select>
         </label>}
+        {mode === "extend" && <p className="span2 conn-meta">The warehouse is read and diffed against the model this source already has. Tables, joins and metrics the model declares are kept as they are; what it lacks is proposed; publishing adds to this source through an extension file, so the base model is never edited.</p>}
         {mode === "lake" && <>
           <label className="ctl span2"><span>Lake root</span><input required value={lake.lakeRoot} placeholder="~/data/lake or s3://bucket/lake" onChange={(e) => setLake({ ...lake, lakeRoot: e.target.value })} /></label>
           {(lake.lakeRoot.startsWith("s3://") || lake.awsProfile) && <>
@@ -128,34 +133,40 @@ function DraftReview({ draft: initial, onBack, onPublished }: { draft: Draft; on
       setDone(r.source?.id ?? draft.id); setDraft({ ...draft, publishedAt: new Date().toISOString(), sourceId: draft.id }); setIssues([]); onPublished(draft.id);
     } catch (e: any) { setError(e.message); if (Array.isArray(e.body?.issues)) setIssues(e.body.issues); } finally { setBusy(null); }
   };
-  const included = new Set(p.tables.filter((t) => t.include).map((t) => t.name));
+  const extending = p.extends;
+  const included = new Set(p.tables.filter((t) => t.include || (extending && t.status === "existing")).map((t) => t.name));
+  const badge = (s?: string) => s === "existing" ? <span className="active-badge modeler-status">in the model</span> : s === "gap" ? <span className="active-badge warn modeler-status">suggested</span> : extending ? <span className="active-badge modeler-status new">new</span> : null;
   return (
     <div className="explore modeler">
       <button className="link" onClick={onBack}>← All drafts</button>
-      <span className="eyebrow">{draft.publishedAt ? `Published as source ${draft.sourceId}` : "Draft"} · read from {draft.fromSource ?? String(draft.connector?.type ?? "")}</span>
+      <span className="eyebrow">{draft.publishedAt ? (extending ? `Added to source ${draft.sourceId}` : `Published as source ${draft.sourceId}`) : "Draft"} · {extending ? `extends ${extending}` : `read from ${draft.fromSource ?? String(draft.connector?.type ?? "")}`}</span>
       <h1><input className="modeler-title" value={draft.label} aria-label="Model label" onChange={(e) => { setDraft({ ...draft, label: e.target.value }); setDirty(true); }} /></h1>
       <p className="lede">{p.model.description}</p>
       {p.warnings.length > 0 && <div className="beautify-suggestion modeler-warnings"><div className="eyebrow">To check</div><ul>{p.warnings.map((w) => <li key={w}>{w}</li>)}</ul></div>}
+      {extending && <><h4 className="ex-h">Drift</h4><DriftPanel drift={draft.drift ?? []} /></>}
 
       <h4 className="ex-h">Tables</h4>
       {p.tables.map((t) => (
         <details key={t.name} className="tbl-card" open={t.include && (!t.grain || t.kind === "unknown")}>
           <summary>
-            <input type="checkbox" checked={t.include} aria-label={`Include ${t.name}`} onClick={(e) => e.stopPropagation()} onChange={(e) => table(t.name, { include: e.target.checked })} />
-            <b className="mono">{t.name}</b>
+            {t.status !== "existing" && <input type="checkbox" checked={t.include} aria-label={`Include ${t.name}`} onClick={(e) => e.stopPropagation()} onChange={(e) => table(t.name, { include: e.target.checked })} />}
+            <b className="mono">{t.name}</b>{badge(t.status)}
             <span className="grain">{t.grain || <i>grain not known</i>}</span>
             <span className="cnt mono">{t.rows.toLocaleString()} rows · {t.columns.length} cols · {t.kind}</span>
           </summary>
           <div className="tbl-body">
             <p className="tbl-body-p"><b>Evidence:</b> {t.evidence}</p>
-            <div className="cform-grid">
+            {t.status === "existing" ? <div className="cform-grid">
+              <label className="ctl"><span>Reporting lag (days before a period is complete)</span><input type="number" min={0} max={365} value={t.reportingLag ?? ""} placeholder="0" onChange={(e) => table(t.name, { reportingLag: e.target.value === "" ? undefined : Number(e.target.value) })} /></label>
+              <p className="conn-meta">Everything else about this table is the model's own and is not changed here.</p>
+            </div> : <div className="cform-grid">
               <label className="ctl span2"><span>Grain (what one row is)</span><input value={t.grain} placeholder="one row per order" onChange={(e) => table(t.name, { grain: e.target.value })} /></label>
               <label className="ctl"><span>Kind</span><select value={t.kind} onChange={(e) => table(t.name, { kind: e.target.value as ProposedTable["kind"] })}><option value="fact">fact (events, transactions)</option><option value="dimension">dimension (who, what, where)</option><option value="unknown">not sure</option></select></label>
               <label className="ctl"><span>Time column</span><select value={t.timeColumn ?? ""} onChange={(e) => table(t.name, { timeColumn: e.target.value || null })}><option value="">none</option>{t.columns.filter((c) => /date|timestamp/.test(c.type)).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}</select></label>
               <label className="ctl"><span>Reporting lag (days before a period is complete)</span><input type="number" min={0} max={365} value={t.reportingLag ?? ""} placeholder="0" onChange={(e) => table(t.name, { reportingLag: e.target.value === "" ? undefined : Number(e.target.value) })} /></label>
               <label className="ctl"><span>Primary key</span><input value={t.primaryKey ?? ""} readOnly /></label>
               <label className="ctl span2"><span>Description</span><input value={t.description} placeholder="What this table holds, for people and the agent" onChange={(e) => table(t.name, { description: e.target.value })} /></label>
-            </div>
+            </div>}
             <table><thead><tr><th>Column</th><th>Type</th></tr></thead><tbody>{t.columns.map((c) => <tr key={c.name}><td className="mono">{c.name}{c.name === t.primaryKey && <span className="pk">KEY</span>}</td><td className="mono t">{c.type}</td></tr>)}</tbody></table>
           </div>
         </details>
@@ -165,8 +176,8 @@ function DraftReview({ draft: initial, onBack, onPublished }: { draft: Draft; on
       {p.joins.length === 0 ? <p className="conn-meta">No join candidates: no column of one table is named like another table's key.</p> : (
         <div className="joins">{p.joins.map((j, i) => (
           <div key={i} className={"join mono" + (!included.has(j.left) || !included.has(j.right) ? " dim" : "")}>
-            <input type="checkbox" checked={j.include} aria-label={`Include join ${j.left}.${j.leftOn} to ${j.right}.${j.rightOn}`} onChange={(e) => join(i, { include: e.target.checked })} />
-            <span>{j.left}</span><em>.{j.leftOn}</em><span className="arrow">→</span><span>{j.right}</span><em>.{j.rightOn}</em>
+            {j.status !== "existing" && <input type="checkbox" checked={j.include} aria-label={`Include join ${j.left}.${j.leftOn} to ${j.right}.${j.rightOn}`} onChange={(e) => join(i, { include: e.target.checked })} />}
+            <span>{j.left}</span><em>.{j.leftOn}</em><span className="arrow">→</span><span>{j.right}</span><em>.{j.rightOn}</em>{badge(j.status)}
             <span className="modeler-evidence">{j.evidence}</span>
             <i className={j.resolution !== null && j.resolution < 0.95 ? "warn" : ""}>{pct(j.resolution)}</i>
           </div>
@@ -180,7 +191,7 @@ function DraftReview({ draft: initial, onBack, onPublished }: { draft: Draft; on
             <td><input type="checkbox" checked={m.include} aria-label={`Include metric ${m.name}`} onChange={(e) => metric(i, { include: e.target.checked })} /></td>
             <td><input className="mono" value={m.name} aria-label="Metric name" onChange={(e) => metric(i, { name: e.target.value })} /></td>
             <td><input value={m.label} aria-label="Metric label" onChange={(e) => metric(i, { label: e.target.value })} /></td>
-            <td className="mono">{m.baseTable}</td>
+            <td className="mono">{m.baseTable}{badge(m.status)}</td>
             <td><input className="mono" value={m.expression} aria-label="Metric expression" onChange={(e) => metric(i, { expression: e.target.value })} /></td>
             <td className="modeler-evidence">{m.evidence}</td>
           </tr>
@@ -189,13 +200,13 @@ function DraftReview({ draft: initial, onBack, onPublished }: { draft: Draft; on
 
       {issues.length > 0 && <div className="beautify-suggestion modeler-warnings"><div className="eyebrow">Before publishing</div><ul>{issues.map((w) => <li key={w}>{w}</li>)}</ul></div>}
       {error && <p className="conn-err" role="alert">{error}</p>}
-      {done && <p className="conn-meta" role="status">Published. <b>{done}</b> is a source now: open Metric Registry to chart against it, or Connections to see it listed.</p>}
+      {done && <p className="conn-meta" role="status">{extending ? <>Added to <b>{done}</b>. The base model file was not touched; the additions live in an extension merged over it.</> : <>Published. <b>{done}</b> is a source now: open Metric Registry to chart against it, or Connections to see it listed.</>}</p>}
       <div className="story-actions">
         <button className="tgl" onClick={save} disabled={busy !== null || !dirty}>{busy === "save" ? "Saving…" : dirty ? "Save draft" : "Saved"}</button>
-        <button className="primary small" onClick={publish} disabled={busy !== null}>{busy === "publish" ? "Publishing…" : draft.publishedAt ? "Publish again" : "Publish as a source"}</button>
+        <button className="primary small" onClick={publish} disabled={busy !== null}>{busy === "publish" ? "Publishing…" : extending ? (draft.publishedAt ? `Update ${extending}` : `Add to ${extending}`) : draft.publishedAt ? "Publish again" : "Publish as a source"}</button>
         <a className="link" href={`/api/modeler/drafts/${encodeURIComponent(draft.id)}/yaml`} target="_blank" rel="noreferrer">View as YAML</a>
       </div>
-      <small className="conn-meta">Publishing writes the model file under the server's data directory and adds the source. Tables you leave out, and joins or metrics that name them, are not written.</small>
+      <small className="conn-meta">{extending ? "Publishing writes an extension file beside the base model: only what you include here, and a reporting lag on modelled tables. The base model is never edited." : "Publishing writes the model file under the server's data directory and adds the source. Tables you leave out, and joins or metrics that name them, are not written."}</small>
     </div>
   );
 }

@@ -33,9 +33,13 @@ export interface TableProfile {
 /** A join the profiler checked: of the left column's non-null values, how many resolve on the right. */
 export interface JoinProbe { left: string; leftOn: string; right: string; rightOn: string; leftRows: number; matched: number }
 
+/** In an extension draft: what the base model already has (`existing`, never written), what it lacks (`new`), a metric the data suggests for a modelled table (`gap`). */
+export type ItemStatus = "new" | "existing" | "gap";
+
 export interface ProposedTable {
   name: string;
   include: boolean;
+  status?: ItemStatus;
   kind: "fact" | "dimension" | "unknown";
   grain: string;
   /** Why the grain says what it says. */
@@ -54,6 +58,7 @@ export interface ProposedJoin {
   left: string; leftOn: string; right: string; rightOn: string;
   type: "left" | "inner";
   include: boolean;
+  status?: ItemStatus;
   evidence: string;
   /** Share of left keys that resolve, when probed. */
   resolution: number | null;
@@ -66,6 +71,7 @@ export interface ProposedMetric {
   expression: string;
   description: string;
   include: boolean;
+  status?: ItemStatus;
   /** Why it was proposed. */
   evidence: string;
 }
@@ -76,6 +82,8 @@ export interface Proposal {
   joins: ProposedJoin[];
   metrics: ProposedMetric[];
   warnings: string[];
+  /** Set when the proposal extends a source's existing model rather than making a new one. */
+  extends?: string;
 }
 
 const ID_LIKE = /(^|_)(id|key|code|uuid)$/i;
