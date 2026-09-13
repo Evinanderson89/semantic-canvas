@@ -9,6 +9,7 @@ import { snowflakeSemanticAdapter } from "../semantic/snowflakeSemantic.ts";
 import { pooledDuckdb } from "../connectors/pool.ts";
 import { snowflakeConnector } from "../connectors/snowflake.ts";
 import { mergeOverlay, readOverlay } from "./connected.ts";
+import { mergeExtension, readExtension } from "./extensions.ts";
 
 /**
  * The source registry.
@@ -78,7 +79,8 @@ export async function connectOne(s: SourceConfig): Promise<Source> {
     const loaded = await adapter.load(expand(s.model));
     if (!loaded) throw new Error(`adapter "${s.adapter}" did not recognise ${s.model}`);
     // Tables Ingest registered sit in a per-source overlay, never in the base model file.
-    const model = mergeOverlay(loaded, await readOverlay(s.id), s.id);
+    // Tables Ingest registered, then what the Modeler added: both in overlays, the base file untouched.
+    const model = mergeExtension(mergeOverlay(loaded, await readOverlay(s.id), s.id), await readExtension(s.id), s.id);
     const conn = await connectConnector(s.connector);
     return { ...base, status: "ready", model, conn,
              connectMs: Math.round(performance.now() - t0) };

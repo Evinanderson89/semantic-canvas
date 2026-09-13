@@ -278,4 +278,43 @@ it("Modeler: an admin proposes a model from a source's warehouse, reviews it, an
   const model = await (await call("/api/model", { headers: { ...headers(admin), "x-sc-source": "lake-model" } })).json();
   expect(Object.keys(model.tables)).toEqual(expect.arrayContaining(["dim_users", "fct_web_sessions"]));
   expect((await call("/api/modeler/drafts/lake-model/publish", { method: "POST", headers: headers(editor) })).status).toBe(403);
-});
+}, 60_000); // profiling every table in the sample lake takes seconds on a CI runner
+it("Modeler, extend: proposes only what a source's model lacks, publishes it as an extension over the untouched base, and drift names what the warehouse lost", async () => {
+  const admin = await login("extend-admin", ["admins"]);
+  const from = (await (await call("/api/sources", { headers: headers(admin) })).json()).active as string;
+  const before = await (await call("/api/model", { headers: { ...headers(admin), "x-sc-source": from } })).json();
+  // The sample model covers the whole sample lake, so the extension can only be a reporting lag and gap metrics.
+  const created = await call("/api/modeler/drafts", { method: "POST", headers: headers(admin), body: JSON.stringify({ id: "lake-more", label: "Lake, extended", extend: from }) });
+  expect(created.status, await created.clone().text()).toBe(200);
+  const draft = await created.json();
+  expect(draft.proposal.extends).toBe(from);
+  expect(draft.drift).toEqual([]);
+  // The sample model covers every table in the sample lake, so nothing is new: every table is kept as the model has it.
+  for (const t of draft.proposal.tables) expect(t.status, t.name).toBe(before.tables[t.name] ? "existing" : "new");
+  expect(draft.proposal.tables.every((t: any) => t.status === "existing" && t.include === false)).toBe(true);
+  // Joins the model declares are kept; a join it never declared between two of its tables is exactly what "missing" means.
+  expect(draft.proposal.joins.every((j: any) => j.status === "existing" ? !j.include : j.evidence.startsWith("Not in the model, though both tables are"))).toBe(true);
+  expect(draft.proposal.metrics.every((m: any) => m.status === (before.tables[m.baseTable] ? "gap" : "new"))).toBe(true);
+  draft.proposal.metrics.forEach((m: any) => { if (m.status === "new") m.include = false; });
+  draft.proposal.joins.forEach((j: any) => { if (j.status === "new") j.include = false; });
+  expect((await call("/api/modeler/drafts/lake-more", { method: "PUT", headers: headers(admin), body: JSON.stringify({ proposal: draft.proposal }) })).status).toBe(200);
+  const empty = await call("/api/modeler/drafts/lake-more/publish", { method: "POST", headers: headers(admin) });
+  expect(empty.status).toBe(400); expect((await empty.json()).issues[0]).toContain("Nothing to add");
+  draft.proposal.tables.find((t: any) => t.name === "fct_web_sessions").reportingLag = 3;
+  const gap = draft.proposal.metrics.find((m: any) => m.status === "gap"); gap.include = true;
+  expect((await call("/api/modeler/drafts/lake-more", { method: "PUT", headers: headers(admin), body: JSON.stringify({ proposal: draft.proposal }) })).status).toBe(200);
+  const published = await call("/api/modeler/drafts/lake-more/publish", { method: "POST", headers: headers(admin) });
+  expect(published.status, await published.clone().text()).toBe(200);
+  const result = await published.json();
+  expect(result.extended).toBe(true); expect(result.source.id).toBe(from);
+  expect(result.path).toContain(join(root, "data", "models", "extensions", `${from}.yaml`));
+  const after = await (await call("/api/model", { headers: { ...headers(admin), "x-sc-source": from } })).json();
+  expect(Object.keys(after.tables).sort()).toEqual(Object.keys(before.tables).sort());
+  expect(after.tables.fct_web_sessions.reportingLagDays).toBe(3);
+  expect(after.metrics[gap.name]).toMatchObject({ baseTable: gap.baseTable, expression: gap.expression });
+  expect(Object.keys(after.metrics).length).toBe(Object.keys(before.metrics).length + 1);
+  const drift = await call(`/api/modeler/drift?source=${from}`, { headers: headers(admin) });
+  expect(drift.status, await drift.clone().text()).toBe(200);
+  expect(await drift.json()).toMatchObject({ source: from, drift: [], dashboards: [] });
+  expect((await call(`/api/modeler/drift?source=${from}`, { headers: headers(await login("extend-editor", ["editors"])) })).status).toBe(403);
+}, 60_000);

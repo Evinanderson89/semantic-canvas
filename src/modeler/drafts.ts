@@ -18,15 +18,17 @@ const ident = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(128);
 const proposalSchema = z.object({
   model: z.object({ name: z.string().min(1).max(200), description: z.string().max(4000) }).strict(),
   tables: z.array(z.object({
-    name: ident, include: z.boolean(), kind: z.enum(["fact", "dimension", "unknown"]), grain: z.string().max(400), evidence: z.string().max(2000),
+    name: ident, include: z.boolean(), status: z.enum(["new", "existing", "gap"]).optional(), kind: z.enum(["fact", "dimension", "unknown"]), grain: z.string().max(400), evidence: z.string().max(2000),
     primaryKey: ident.nullable(), description: z.string().max(4000), synonyms: z.array(z.string().max(120)).max(50), timeColumn: ident.nullable(),
     reportingLag: z.number().int().min(0).max(365).optional(),
     columns: z.array(z.object({ name: ident, type: z.string().min(1).max(64), description: z.string().max(2000) }).strict()).max(1000), rows: z.number().int().nonnegative(),
   }).strict()).max(500),
-  joins: z.array(z.object({ left: ident, leftOn: ident, right: ident, rightOn: ident, type: z.enum(["left", "inner"]), include: z.boolean(), evidence: z.string().max(2000), resolution: z.number().min(0).max(1).nullable() }).strict()).max(2000),
-  metrics: z.array(z.object({ name: z.string().max(128), label: z.string().max(200), baseTable: ident, expression: z.string().max(4000), description: z.string().max(2000), include: z.boolean(), evidence: z.string().max(2000) }).strict()).max(2000),
+  joins: z.array(z.object({ left: ident, leftOn: ident, right: ident, rightOn: ident, type: z.enum(["left", "inner"]), include: z.boolean(), status: z.enum(["new", "existing", "gap"]).optional(), evidence: z.string().max(2000), resolution: z.number().min(0).max(1).nullable() }).strict()).max(2000),
+  metrics: z.array(z.object({ name: z.string().max(128), label: z.string().max(200), baseTable: ident, expression: z.string().max(4000), description: z.string().max(2000), include: z.boolean(), status: z.enum(["new", "existing", "gap"]).optional(), evidence: z.string().max(2000) }).strict()).max(2000),
   warnings: z.array(z.string().max(2000)).max(500),
+  extends: z.string().regex(ID).optional(),
 }).strict();
+const driftSchema = z.array(z.object({ table: ident, column: ident.nullable(), kind: z.enum(["table_missing", "column_missing", "type_changed"]), declared: z.string().max(64).nullable(), actual: z.string().max(64).nullable(), metrics: z.array(z.string().max(128)).max(1000), text: z.string().max(2000) }).strict()).max(5000);
 export const draftSchema = z.object({
   id: z.string().regex(ID), label: z.string().min(1).max(200),
   /** The connector as sources.yaml holds it, or the source whose connector the draft borrows. */
@@ -34,6 +36,8 @@ export const draftSchema = z.object({
   createdAt: z.string(), createdBy: z.string().max(200), updatedAt: z.string(),
   publishedAt: z.string().nullable(), sourceId: z.string().regex(ID).nullable(),
   proposal: proposalSchema,
+  /** For an extension draft: what the warehouse no longer has that the model declares, as read when the draft was made. */
+  drift: driftSchema.optional(),
 }).strict();
 export type Draft = z.infer<typeof draftSchema>;
 /** What a person may change on review: the proposal itself, and the label. */
@@ -79,7 +83,7 @@ export async function writeAuthored(id: string, yaml: string) {
 /** The list view: never the proposal body. */
 export const summarizeDraft = (d: Draft) => ({
   id: d.id, label: d.label, createdAt: d.createdAt, createdBy: d.createdBy, updatedAt: d.updatedAt, publishedAt: d.publishedAt, sourceId: d.sourceId,
-  fromSource: d.fromSource ?? null, connector: d.connector ? String(d.connector.type ?? "") : null,
+  fromSource: d.fromSource ?? null, connector: d.connector ? String(d.connector.type ?? "") : null, extends: d.proposal.extends ?? null, drift: (d.drift ?? []).length,
   tables: d.proposal.tables.filter((t) => t.include).length, joins: d.proposal.joins.filter((j) => j.include).length, metrics: d.proposal.metrics.filter((m) => m.include).length, warnings: d.proposal.warnings.length,
 });
 export type Draft_ = Draft;

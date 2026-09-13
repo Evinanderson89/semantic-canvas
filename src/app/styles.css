@@ -1310,3 +1310,7 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .modeler-metrics td input{width:100%;font-size:12px;padding:4px 6px;border:1px solid var(--line);border-radius:5px;background:var(--surface);color:inherit;min-width:90px}
 .modeler-metrics td{vertical-align:middle;padding:4px 6px}
 .modeler .cform-grid{margin:8px 0 14px}
+.modeler-status{margin-left:6px;font-size:10px}
+.modeler-status.new{color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.modeler-warnings li.err{color:var(--neg)}
+.modeler-drift{margin-top:14px}
