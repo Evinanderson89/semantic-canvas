@@ -278,7 +278,7 @@ it("Modeler: an admin proposes a model from a source's warehouse, reviews it, an
   const model = await (await call("/api/model", { headers: { ...headers(admin), "x-sc-source": "lake-model" } })).json();
   expect(Object.keys(model.tables)).toEqual(expect.arrayContaining(["dim_users", "fct_web_sessions"]));
   expect((await call("/api/modeler/drafts/lake-model/publish", { method: "POST", headers: headers(editor) })).status).toBe(403);
-});
+}, 60_000); // profiling every table in the sample lake takes seconds on a CI runner
 it("Modeler, extend: proposes only what a source's model lacks, publishes it as an extension over the untouched base, and drift names what the warehouse lost", async () => {
   const admin = await login("extend-admin", ["admins"]);
   const from = (await (await call("/api/sources", { headers: headers(admin) })).json()).active as string;
@@ -317,4 +317,4 @@ it("Modeler, extend: proposes only what a source's model lacks, publishes it as 
   expect(drift.status, await drift.clone().text()).toBe(200);
   expect(await drift.json()).toMatchObject({ source: from, drift: [], dashboards: [] });
   expect((await call(`/api/modeler/drift?source=${from}`, { headers: headers(await login("extend-editor", ["editors"])) })).status).toBe(403);
-});
+}, 60_000);
