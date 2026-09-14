@@ -18,6 +18,8 @@ import { Canvas } from "../canvas/Canvas.tsx";
 import { EditBar } from "./EditBar.tsx";
 import { Popover } from "./Popover.tsx";
 import { DashboardBeautify } from "./DashboardBeautify.tsx";
+import { AiRedesign } from "./AiRedesign.tsx";
+import { validateRedesign } from "../suggest/redesign.ts";
 import { InsertMenu } from "./InsertMenu.tsx";
 import { Interview } from "./Interview.tsx";
 import { AgentQuestions } from "./AgentQuestions.tsx";
@@ -86,6 +88,7 @@ export function App() {
   const [zoom, setZoom] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [interview, setInterview] = useState(false);
+  const [aiRedesign, setAiRedesign] = useState(false);
   // /modeler is the Modeler's own address on the gateway (registered as its own app); the SPA serves it like any path.
   const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library" | "modeler">(() => location.pathname.replace(/\/+$/, "") === "/modeler" ? "modeler" : "home");
   // ?source=&table= from an "Open in Semantic Canvas" link: read once, applied when the sources (then the model) are known, and stripped.
@@ -717,7 +720,7 @@ export function App() {
               {(book!.filters ?? []).filter(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)).map(f => <FilterControl key={f.id} compact filter={f} value={filterValues[f.id] ?? f.defaultValue ?? {}} onChange={v => setFilterValues(values => ({ ...values, [f.id]: v }))} spec={book!} model={model} activeTab={currentTab(book!, activeTabId).id} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onEdit={!canvas.locked ? () => setFilterEditing(f.id) : undefined} />)}
             </div>}
             {!canvas.locked && (
-              <EditBar model={model} canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit} onSettings={() => setSettingsOpen(true)}
+              <EditBar model={model} canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit} onSettings={() => setSettingsOpen(true)} onRedesign={() => setAiRedesign(true)}
                        selected={selected} tiles={dash.tiles}
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
@@ -858,6 +861,14 @@ export function App() {
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
+      {aiRedesign && dash && session.canEdit && <AiRedesign key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
+        onClose={() => setAiRedesign(false)} onConfigure={() => { setAiRedesign(false); setView("connections"); }}
+        queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))}
+        onApply={(proposal, expected) => {
+          if (!session.canEdit || canvas.locked || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Generate a fresh redesign first."); return false; }
+          try { const next = validateRedesign(dash, canvas, proposal, model); compose(next.spec, next.canvas); setNotice("Redesign applied. One undo restores the previous version."); return true; }
+          catch (e: any) { setNotice(`Could not apply redesign: ${e.message}`); return false; }
+        }} />}
       <AgentChat key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} document={dash && session.canEdit ? { spec: dash, canvas, selected } : null}
         onApply={(proposal, expected) => {
           if (!session.canEdit || !dash || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Request a fresh proposal before applying it."); return false; }

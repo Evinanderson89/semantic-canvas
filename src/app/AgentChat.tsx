@@ -120,13 +120,15 @@ export function AgentChat({ document, onApply }: {
   );
 }
 
-function describeAction(action: CanvasProposal["actions"][number], document?: DashboardSpec) {
+export function describeAction(action: CanvasProposal["actions"][number], document?: DashboardSpec) {
   const label = (id: string) => { const tile = document?.tiles.find(t => t.id === id); return tile?.title ?? tile?.text ?? tile?.metrics.join(", ") ?? id; };
   switch (action.type) {
     case "rename": return `Dashboard title: ${action.title}`;
     case "title": return `Rename “${label(action.id)}” to “${action.title}”`;
     case "note": return `Text in “${label(action.id)}”: ${action.text}`;
     case "chart": return `Show “${label(action.id)}” as ${action.chart}`;
+    case "query": return `Update “${label(action.id)}”${action.metrics ? ` using ${action.metrics.join(", ")}` : ""}${action.dimensions ? ` with ${action.dimensions.length ? action.dimensions.join(", ") : "no breakdown"}` : ""}${action.compare ? `; comparison: ${action.compare}` : ""}`;
+    case "place": return `Resize or reposition “${label(action.id)}”${action.section !== undefined ? " and update its section" : ""}`;
     case "arrange": return `${LAYOUTS.find(layout => layout.name === action.layout)?.label ?? action.layout}; keep sections and pinned positions`;
     case "add": return `Add ${action.tile.title ?? action.tile.text ?? action.tile.metrics.join(", ")} (${action.tile.kind ?? action.tile.chart ?? "chart"})`;
     case "remove": return `Remove “${label(action.id)}”`;

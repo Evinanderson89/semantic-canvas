@@ -13,7 +13,8 @@ const ARRANGEMENTS = [
   { id: "executive", label: "Build an executive dashboard", description: "Headline numbers first, one leading trend, then compact supporting charts." },
 ] as const;
 
-export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify, onSettings }: {
+export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify, onSettings, onRedesign }: {
+  onRedesign: () => void;
   model: Model;
   canvas: CanvasSpec; onCanvas: (c: CanvasSpec) => void;
   zoom: number; onZoom: (z: number) => void; onFit: () => void;
@@ -125,6 +126,7 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
           <div className="arrange-preview-scroll">
           <div className="eyebrow">COMPOSITION PREVIEW</div>
           <h3>What should this layout do?</h3>
+          <button className="ai-arrange-option" onClick={() => { close(); onRedesign(); }}><span className="eyebrow">Powered by AI</span><b>Reimagine with AI</b><span>See a better version with improved charts, comparisons, and storytelling. Preview, then apply.</span><strong>Explore the possibilities →</strong></button>
           <div className="arrangement-options" role="group" aria-label="Arrangement purpose">{ARRANGEMENTS.map(option => <button key={option.id} aria-label={option.label} aria-pressed={arrangement === option.id} onClick={() => setArrangement(option.id)}><b>{option.label}</b><span>{option.description}</span></button>)}</div>
           <p><b>{intent.label}</b>{addedSections > 0 ? ` · Adds ${addedSections} section headings.` : " · Keeps your existing sections."} Your notes and pinned sections stay intact.</p>
           {!tiles.length && <p>Add charts to the canvas, then choose how they should read together.</p>}
