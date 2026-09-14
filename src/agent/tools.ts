@@ -2,7 +2,7 @@ import { loopbackRequest } from "../security/loopback.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { dashboardSchema, canvasSchema, filterSchema } from "../compiler/schema.ts";
 import { z } from "zod";
-import { LAYOUTS } from "../canvas/layouts.ts";
+import { LAYOUTS, LAYOUT_NAMES } from "../canvas/layouts.ts";
 import { reviewedModel } from "../semantic/model.ts";
 
 /**
@@ -136,7 +136,7 @@ export const TOOLS: ToolSpec[] = [
     description: "Repack a saved dashboard's tiles into a clean layout -- auto-picks the best-fitting named layout (see list_layouts) unless you force one, and grows the canvas if needed. Call this after save_dashboard rather than hand-computing tile positions.",
     inputSchema: {
       id: z.string(), source: z.string().optional(), revision: z.number().int().positive().optional(),
-      layout: z.enum(["grid", "exec-summary"]).optional().describe("Force a specific layout; omit to auto-pick the best fit"),
+      layout: z.enum(LAYOUT_NAMES).optional().describe("Choose story for a vertical walkthrough, executive for headline numbers with compact support, or omit to tidy automatically"),
     },
     handler: async ({ id, layout, source, revision }) =>
       api(`/api/dashboards/${encodeURIComponent(id)}/arrange`, { method: "POST", body: { layout, revision }, source }),

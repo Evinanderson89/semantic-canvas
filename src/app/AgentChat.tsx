@@ -1,4 +1,5 @@
 import { rememberDecision, reviewGoals, type ReviewDecision } from "../suggest/reviewSession.ts";
+import { LAYOUTS } from "../canvas/layouts.ts";
 import { fingerprint } from "./document.ts";
 import { readResponse } from "./http.ts";
 import type { DashboardSpec } from "../compiler/spec.ts";
@@ -126,7 +127,7 @@ function describeAction(action: CanvasProposal["actions"][number], document?: Da
     case "title": return `Rename “${label(action.id)}” to “${action.title}”`;
     case "note": return `Text in “${label(action.id)}”: ${action.text}`;
     case "chart": return `Show “${label(action.id)}” as ${action.chart}`;
-    case "arrange": return `Arrange sections using ${action.layout === "exec-summary" ? "headline rows" : "a clean grid"}; keep pinned positions`;
+    case "arrange": return `${LAYOUTS.find(layout => layout.name === action.layout)?.label ?? action.layout}; keep sections and pinned positions`;
     case "add": return `Add ${action.tile.title ?? action.tile.text ?? action.tile.metrics.join(", ")} (${action.tile.kind ?? action.tile.chart ?? "chart"})`;
     case "remove": return `Remove “${label(action.id)}”`;
   }

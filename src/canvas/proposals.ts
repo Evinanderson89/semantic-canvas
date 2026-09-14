@@ -4,7 +4,7 @@ import { validateTile } from "../compiler/compile.ts";
 import type { DashboardSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
 import type { CanvasSpec } from "./presets.ts";
-import { applyLayout } from "./layouts.ts";
+import { applyLayout, LAYOUT_NAMES } from "./layouts.ts";
 
 const text = z.string().min(1).max(1000);
 export const proposalSchema = z.object({
@@ -14,7 +14,7 @@ export const proposalSchema = z.object({
     z.object({ type: z.literal("title"), id: text, title: text }).strict(),
     z.object({ type: z.literal("note"), id: text, text: z.string().max(100000) }).strict(),
     z.object({ type: z.literal("chart"), id: text, chart: z.enum(["line", "area", "bar", "barH", "table", "kpi", "stat", "scatter", "smallMultiples"]) }).strict(),
-    z.object({ type: z.literal("arrange"), layout: z.enum(["grid", "exec-summary"]) }).strict(),
+    z.object({ type: z.literal("arrange"), layout: z.enum(LAYOUT_NAMES) }).strict(),
     z.object({ type: z.literal("add"), tile: tileSchema }).strict(),
     z.object({ type: z.literal("remove"), id: text }).strict(),
   ])).min(1).max(30),

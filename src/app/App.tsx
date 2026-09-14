@@ -717,7 +717,7 @@ export function App() {
               {(book!.filters ?? []).filter(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)).map(f => <FilterControl key={f.id} compact filter={f} value={filterValues[f.id] ?? f.defaultValue ?? {}} onChange={v => setFilterValues(values => ({ ...values, [f.id]: v }))} spec={book!} model={model} activeTab={currentTab(book!, activeTabId).id} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onEdit={!canvas.locked ? () => setFilterEditing(f.id) : undefined} />)}
             </div>}
             {!canvas.locked && (
-              <EditBar canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit} onSettings={() => setSettingsOpen(true)}
+              <EditBar model={model} canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit} onSettings={() => setSettingsOpen(true)}
                        selected={selected} tiles={dash.tiles}
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}

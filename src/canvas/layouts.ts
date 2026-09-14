@@ -13,7 +13,8 @@ import { arrange, overlaps } from "./geometry.ts";
  * and places supporting charts beneath them. Headings and narrative content
  * travel with their section rather than being collected at the end.
  */
-export type LayoutName = "grid" | "exec-summary";
+export const LAYOUT_NAMES = ["grid", "exec-summary", "story", "executive"] as const;
+export type LayoutName = typeof LAYOUT_NAMES[number];
 
 export interface LayoutInfo { name: LayoutName; label: string; description: string }
 
@@ -22,6 +23,10 @@ export const LAYOUTS: LayoutInfo[] = [
     description: "Readable KPI rows and supporting charts, keeping sections and pinned content together." },
   { name: "grid", label: "Grid",
     description: "Clean rows within each section. Keeps headings, notes and pinned content in place." },
+  { name: "story", label: "Tell a story",
+    description: "A vertical walkthrough, with large charts and room for commentary." },
+  { name: "executive", label: "Build an executive dashboard",
+    description: "Headline numbers, one leading chart, and compact supporting comparisons." },
 ];
 
 /**
@@ -48,6 +53,7 @@ const isDataTile = (t: TileSpec) => (t.kind ?? "metric") === "metric";
  * refuses a tile set, however it's composed.
  */
 export function scoreLayout(name: LayoutName, tiles: TileSpec[]): number {
+  if (name === "story" || name === "executive") return 0; // Explicit intent, never an automatic replacement.
   const kpis = tiles.filter(isKpiTile).length;
   const charts = tiles.filter((t) => isDataTile(t) && !isKpiTile(t)).length;
   if (name === "exec-summary") {
@@ -79,6 +85,8 @@ export function sectionsOf(tiles: TileSpec[]): TileSpec[][] {
 export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, stretch = true): TileSpec[] {
   const PAD = 24, GAP = 16, avail = Math.max(1, width - PAD * 2);
   const groups = sectionsOf(tiles);
+  const purposeful = name === "story" || name === "executive";
+  const lead = groups.filter(g => !g.some(t => t.pinned)).flat().find(t => isDataTile(t) && !isKpiTile(t) && t.dimensions.some(d => d.includes(":")))?.id;
   // A pinned item anchors its whole section, so its title and notes stay meaningful.
   const fixed = groups.filter(g => g.some(t => t.pinned)).flat();
   const out: TileSpec[] = [...fixed];
@@ -88,7 +96,7 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
     const heading = group[0].kind === "heading" ? group[0] : null;
     const members = heading ? group.slice(1) : group;
     const kpis = members.filter(isKpiTile);
-    const body = name === "exec-summary" ? [...kpis, ...members.filter(t => !isKpiTile(t))] : members;
+    const body = name !== "grid" ? [...kpis, ...members.filter(t => !isKpiTile(t))] : members;
     const packed: TileSpec[] = [];
     let localY = 0;
     if (heading) {
@@ -102,14 +110,19 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
       do { run.push(body[i++]); } while (i < body.length && isKpiTile(body[i]) === isKpi && isDataTile(body[i]) === !text && !text);
       let row: TileSpec[];
       if (isKpi) {
-        const cols = Math.max(1, Math.floor((avail + GAP) / (180 + GAP)));
+        const cols = Math.max(1, Math.min(purposeful ? 3 : Infinity, Math.floor((avail + GAP) / (180 + GAP))));
         row = run.map((t, j) => {
           const count = Math.min(cols, run.length - Math.floor(j / cols) * cols);
           const w = Math.floor((avail - GAP * (count - 1)) / count);
           return { ...t, layout: { ...t.layout, x: PAD + (j % cols) * (w + GAP), y: Math.floor(j / cols) * (156 + GAP), w, h: 156 } };
         });
       } else {
-        row = arrange(run.map(t => ({ ...t, layout: { ...t.layout, w: text ? Math.min(t.layout.w, avail) : Math.min(avail, Math.max(360, t.layout.w)), h: text ? t.layout.h : Math.max(280, t.layout.h) } })), width, { stretch });
+        row = arrange(run.map(t => {
+          const w = purposeful ? (text || name === "story" || t.id === lead || avail < 736 ? avail : Math.floor((avail - GAP) / 2))
+            : text ? Math.min(t.layout.w, avail) : Math.min(avail, Math.max(360, t.layout.w));
+          const h = text ? t.layout.h : name === "story" ? 360 : name === "executive" ? (t.id === lead ? 320 : 280) : Math.max(280, t.layout.h);
+          return { ...t, layout: { ...t.layout, w, h } };
+        }), width, { stretch });
         row = row.map(t => ({ ...t, layout: { ...t.layout, y: t.layout.y - PAD } }));
       }
       packed.push(...row.map(t => ({ ...t, ...(heading ? { section: heading.id } : {}), layout: { ...t.layout, y: t.layout.y + localY } })));
