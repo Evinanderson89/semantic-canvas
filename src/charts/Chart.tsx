@@ -21,7 +21,7 @@ export function Chart({ kind, columns, rows, format, secondaryFormat, labels = {
    *  position, each potentially needing its own number style (spend as
    *  currency, click-through rate as a percent) -- computed by the caller,
    *  which has the model to infer a style from and this component doesn't.
-   *  Unused by every other chart kind. */
+   *  Also supplies the second metric's units for a dual-axis line chart. */
   secondaryFormat?: import("../format/format.ts").FormatSpec;
   /** Click-to-cross-filter (categorical axis) or click-to-drill (temporal
    *  axis). Receives the dimension column and the clicked value -- a string
@@ -307,11 +307,12 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       })));
       const marginRight = f.showY ? 54 : 12;
       const fig = Plot.plot({ ...common, marginRight,
+        y: { ...common.y, tickFormat: dual.primary[0] === measures[1] ? secondaryTick : tick },
         color: { ...common.color, legend },
         marks: [Plot.ruleY([0]),
           Plot.line(tidyDual, { x: "x", y: "value", stroke: "series", curve: "monotone-x" }),
           Plot.dot(tidyDual, { x: "x", y: "value", stroke: "series", r: 1.6 })] });
-      return addSecondaryAxis(fig, dual, tick, marginRight, box.w);
+      return addSecondaryAxis(fig, dual, dual.secondary[0] === measures[1] ? secondaryTick : tick, marginRight, box.w);
     }
     case "combo": {
       // Fixed roles, not magnitude-sorted like the plain multi-series line
@@ -374,9 +375,19 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       return Plot.plot({ ...common, color: { ...common.color, legend },
         marks: [Plot.areaY(definedTidy, { x: "x", y: "value", fill: "series", fillOpacity: 0.85 }), Plot.ruleY([0])] });
     }
-    case "bar":
+    case "bar": {
+      // Monthly bars need a band axis, with date labels in query order.
+      // Keep a second breakdown visible instead of stacking it invisibly.
+      const label = dateLabeler(data.map(d => d[x]));
+      const rows = temporalX ? data.map(d => ({ ...d, [x]: label(d[x]) })) : data;
+      const series = dims[1];
       return Plot.plot({ ...common,
-        marks: [Plot.barY(data, { x, y, fill: "currentColor", fillOpacity: 0.75 }), Plot.ruleY([0])] });
+        x: { label: f.xTitle, axis: f.showX ? "bottom" : null,
+          ...(temporalX ? { domain: [...new Set(rows.map(d => d[x]))], tickRotate: -35 } : xScale) },
+        marginBottom: f.showX && temporalX ? 58 : common.marginBottom,
+        color: { ...common.color, legend: legend && !!series },
+        marks: [Plot.barY(rows, { x, y, fill: series ?? "currentColor", fillOpacity: 0.75 }), Plot.ruleY([0])] });
+    }
     case "waterfall": {
       // Bridges from 0 through a sequence of named, signed deltas to a
       // running total -- fct_mrr_movements documents itself this way
@@ -703,15 +714,17 @@ function labelsAreLong(data: any[], x: string) {
  * tile happens to be querying at. Non-Date values (a plain categorical
  * dimension run through the combo case) just stringify.
  */
-function dateLabeler(values: unknown[]): (v: unknown) => string {
-  const dates = values.filter((v): v is Date => v instanceof Date).sort((a, b) => +a - +b);
+export function dateLabeler(values: unknown[]): (v: unknown) => string {
+  // Multiple series repeat each date. Count unique buckets when detecting
+  // the grain, or monthly labels lose their year and merge across years.
+  const dates = [...new Set(values.filter((v): v is Date => v instanceof Date).map(Number))].sort((a, b) => a - b);
   const day = 86400000;
-  const step = dates.length > 1 ? Math.abs(+dates[1] - +dates[0]) : Infinity;
+  const step = dates.length > 1 ? Math.min(...dates.slice(1).map((d, i) => d - dates[i])) : 0;
   const opts: Intl.DateTimeFormatOptions =
     step >= 300 * day ? { year: "numeric" } :
     step >= 25 * day ? { month: "short", year: "2-digit" } :
-    { month: "short", day: "numeric" };
-  return (v) => (v instanceof Date ? v.toLocaleDateString(undefined, opts) : String(v));
+    { month: "short", day: "numeric", year: "2-digit" };
+  return (v) => (v instanceof Date ? v.toLocaleDateString(undefined, { ...opts, timeZone: "UTC" }) : String(v));
 }
 
 /**
@@ -777,7 +790,11 @@ function attachPicker(host: HTMLElement, column: string | null, data: any[],
     if (!n || hi === lo) return;
     const i = Math.floor(((px - lo) / (hi - lo)) * n);
     const value = xs.domain[Math.max(0, Math.min(n - 1, i))];
-    if (value != null) onPick(column, value as any);
+    if (value != null) {
+      const label = dateLabeler(data.map(row => row[column]));
+      const date = data.find(row => row[column] instanceof Date && label(row[column]) === value)?.[column];
+      onPick(column, date ?? value as any);
+    }
   });
 }
 

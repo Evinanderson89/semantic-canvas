@@ -47,11 +47,12 @@ test("the cleanup example has real review fixes and can be arranged into a clean
   await expect(page.getByLabel("Proposed story structure")).toContainText("At a glance");
   await expect(page.locator(".heading-text")).toHaveCount(0);
   await page.getByRole("button", { name: "Apply story structure", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "Design review", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Design review", exact: true })).toBeVisible();
   await expect(page.locator(".heading-text")).toHaveText(["At a glance", "How it's changing", "Supporting context", "A closer look"]);
   await expect(page.locator(".note-text")).toContainText("Check each chart's reporting period and filters");
   await expect(page.locator(".dash-title")).toHaveText("SaaS Overview");
   await expect.poll(hasOverlap).toBe(false);
+  await page.locator(".dash-beautify-pop").getByRole("button", { name: "Close", exact: true }).click();
   await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
   await expect(page.locator(".heading-text")).toHaveCount(0);
   await expect(page.locator(".dash-title")).toHaveText("SaaS Overview (rough draft)");

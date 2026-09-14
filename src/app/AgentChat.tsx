@@ -1,3 +1,5 @@
+import { rememberDecision, reviewGoals, type ReviewDecision } from "../suggest/reviewSession.ts";
+import { LAYOUTS } from "../canvas/layouts.ts";
 import { fingerprint } from "./document.ts";
 import { readResponse } from "./http.ts";
 import type { DashboardSpec } from "../compiler/spec.ts";
@@ -23,6 +25,8 @@ export function AgentChat({ document, onApply }: {
   const [available, setAvailable] = useState(false);
   const [open, setOpen] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
+  const choices = useRef<ReviewDecision[]>([]);
+  const [nextStep, setNextStep] = useState(false);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,18 +56,18 @@ export function AgentChat({ document, onApply }: {
 
   if (!available) return null;
 
-  const send = () => {
-    const message = input.trim();
+  const send = (requested?: string) => {
+    const message = (requested ?? input).trim();
     if (!message || busy) return;
     setTurns((t) => [...t, { role: "user", text: message }]);
     setInput("");
-    setBusy(true);
+    setBusy(true); setNextStep(false);
     setError(null); setPending(null);
     const expected = current;
     const controller = new AbortController(); request.current = controller;
     fetch("/api/agent/chat", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ conversationId: conversationId.current, message, document }), signal: controller.signal,
+      body: JSON.stringify({ conversationId: conversationId.current, message, document, review: { goal: message.slice(0,600), dashboardTitle: document?.spec.title ?? "", decisions: choices.current } }), signal: controller.signal,
     }).then(readResponse).then((d) => {
       if (d.error) { setError(d.error); return; }
       if (controller.signal.aborted) return;
@@ -99,15 +103,16 @@ export function AgentChat({ document, onApply }: {
               <div className="eyebrow">PROPOSED CHANGES</div><h3>{pending.proposal.title}</h3><p>{pending.proposal.reason}</p>
               <ol>{pending.proposal.actions.map((action, i) => <li key={i}>{describeAction(action, document?.spec)}</li>)}</ol>
               {pending.expected !== current ? <p role="status">Your document changed. Ask for a fresh proposal to keep your latest edits.</p> : <p>Applies to your current canvas. One undo restores the previous version.</p>}
-              <div className="story-actions"><button className="primary" disabled={pending.expected !== current} onClick={() => { if (onApply(pending.proposal, pending.expected)) setPending(null); }}>Apply changes</button><button onClick={() => setPending(null)}>Dismiss</button></div>
+              <div className="story-actions"><button className="primary" disabled={pending.expected !== current} onClick={() => { if (onApply(pending.proposal, pending.expected)) { choices.current = rememberDecision(choices.current, { key: JSON.stringify(pending.proposal.actions).slice(0,4000), label: pending.proposal.title, status: "applied" }); setTurns(t => [...t, { role: "assistant", text: "Changes applied. Continue with the updated canvas, or undo to restore the previous version." }]); setPending(null); setNextStep(true); } }}>Apply changes</button><button onClick={() => { choices.current = rememberDecision(choices.current, { key: JSON.stringify(pending.proposal.actions).slice(0,4000), label: pending.proposal.title, status: "dismissed" }); setPending(null); setNextStep(true); }}>Dismiss</button></div>
             </div>}
+            {!busy && !pending && document && <div className="agent-next-steps"><p>{nextStep ? "What would make this version more useful?" : "Choose a direction, or describe your goal below."}</p>{reviewGoals.map(item => <button className="tgl" key={item.label} onClick={() => send(item.goal)}>{item.label}</button>)}</div>}
             {error && <div className="agent-chat-msg error">{error}</div>}
           </div>
           <div className="agent-chat-input">
             <textarea rows={2} value={input} placeholder="Message the agent…" disabled={busy}
                       onChange={(e) => setInput(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
-            {busy ? <button onClick={() => request.current?.abort()}>Stop</button> : <button className="primary" disabled={!input.trim()} onClick={send}>Send</button>}
+            {busy ? <button onClick={() => request.current?.abort()}>Stop</button> : <button className="primary" disabled={!input.trim()} onClick={() => send()}>Send</button>}
           </div>
         </div>
       )}
@@ -115,14 +120,16 @@ export function AgentChat({ document, onApply }: {
   );
 }
 
-function describeAction(action: CanvasProposal["actions"][number], document?: DashboardSpec) {
+export function describeAction(action: CanvasProposal["actions"][number], document?: DashboardSpec) {
   const label = (id: string) => { const tile = document?.tiles.find(t => t.id === id); return tile?.title ?? tile?.text ?? tile?.metrics.join(", ") ?? id; };
   switch (action.type) {
     case "rename": return `Dashboard title: ${action.title}`;
     case "title": return `Rename “${label(action.id)}” to “${action.title}”`;
     case "note": return `Text in “${label(action.id)}”: ${action.text}`;
     case "chart": return `Show “${label(action.id)}” as ${action.chart}`;
-    case "arrange": return `Arrange sections using ${action.layout === "exec-summary" ? "headline rows" : "a clean grid"}; keep pinned positions`;
+    case "query": return `Update “${label(action.id)}”${action.metrics ? ` using ${action.metrics.join(", ")}` : ""}${action.dimensions ? ` with ${action.dimensions.length ? action.dimensions.join(", ") : "no breakdown"}` : ""}${action.compare ? `; comparison: ${action.compare}` : ""}`;
+    case "place": return `Resize or reposition “${label(action.id)}”${action.section !== undefined ? " and update its section" : ""}`;
+    case "arrange": return `${LAYOUTS.find(layout => layout.name === action.layout)?.label ?? action.layout}; keep sections and pinned positions`;
     case "add": return `Add ${action.tile.title ?? action.tile.text ?? action.tile.metrics.join(", ")} (${action.tile.kind ?? action.tile.chart ?? "chart"})`;
     case "remove": return `Remove “${label(action.id)}”`;
   }

@@ -1,11 +1,21 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Popover } from "./Popover.tsx";
 import { PRESETS, presetById, type CanvasSpec } from "../canvas/presets.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import { boundsOf } from "../canvas/geometry.ts";
 import { applyBestLayout } from "../canvas/layouts.ts";
+import { arrangeForPurpose } from "../suggest/arrangement.ts";
+import type { Model } from "../semantic/model.ts";
 
-export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify, onSettings }: {
+const ARRANGEMENTS = [
+  { id: "auto", label: "Tidy up", description: "Align the current charts and keep their sections together." },
+  { id: "story", label: "Tell a story", description: "A spacious walkthrough: headline numbers, large charts, and room for commentary." },
+  { id: "executive", label: "Build an executive dashboard", description: "Headline numbers first, one leading trend, then compact supporting charts." },
+] as const;
+
+export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify, onSettings, onRedesign }: {
+  onRedesign: () => void;
+  model: Model;
   canvas: CanvasSpec; onCanvas: (c: CanvasSpec) => void;
   zoom: number; onZoom: (z: number) => void; onFit: () => void;
   selected: string[]; tiles: TileSpec[]; onTiles: (t: TileSpec[]) => void;
@@ -19,6 +29,7 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
 }) {
   const sel = tiles.filter((t) => selected.includes(t.id));
   const many = sel.length > 1;
+  const [arrangement, setArrangement] = useState<"auto" | "story" | "executive">("auto");
 
   const patch = (fn: (t: TileSpec) => TileSpec) =>
     onTiles(tiles.map((t) => (selected.includes(t.id) ? fn(t) : t)));
@@ -60,7 +71,10 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
    *  Summary if there's a real headline + support-chart mix, Grid otherwise)
    *  and packs into it. Grows the canvas if that needs more vertical room
    *  than it has -- never shrinks a preset/custom height that already fits. */
-  const proposal = applyBestLayout(tiles, canvas.width);
+  const proposal = arrangement === "auto" ? applyBestLayout(tiles, canvas.width)
+    : { name: arrangement, tiles: arrangeForPurpose(tiles, model, canvas.width, arrangement) };
+  const intent = ARRANGEMENTS.find(option => option.id === arrangement)!;
+  const addedSections = proposal.tiles.filter(t => t.kind === "heading" && !tiles.some(before => before.id === t.id)).length;
   const bottom = Math.max(100, ...proposal.tiles.map(t => t.layout.y + t.layout.h)) + 24;
   const applyComposition = () => onCompose(proposal.tiles, { ...canvas, height: Math.max(canvas.height, Math.round(bottom)) });
 
@@ -109,15 +123,20 @@ export function EditBar({ canvas, onCanvas, zoom, onZoom, onFit, selected, tiles
       <span className="sep" />
       <Popover label="Smart arrange" trigger="Smart arrange" className="arrange-popover">
         {(close) => <div className="arrange-preview">
+          <div className="arrange-preview-scroll">
           <div className="eyebrow">COMPOSITION PREVIEW</div>
-          <h3>A clearer reading order</h3>
-          <p>Readable rows, with headings and notes kept in their sections. Pinned sections stay in place.</p>
+          <h3>What should this layout do?</h3>
+          <button className="ai-arrange-option" onClick={() => { close(); onRedesign(); }}><span className="eyebrow">Powered by AI</span><b>Reimagine with AI</b><span>See a better version with improved charts, comparisons, and storytelling. Preview, then apply.</span><strong>Explore the possibilities →</strong></button>
+          <div className="arrangement-options" role="group" aria-label="Arrangement purpose">{ARRANGEMENTS.map(option => <button key={option.id} aria-label={option.label} aria-pressed={arrangement === option.id} onClick={() => setArrangement(option.id)}><b>{option.label}</b><span>{option.description}</span></button>)}</div>
+          <p><b>{intent.label}</b>{addedSections > 0 ? ` · Adds ${addedSections} section headings.` : " · Keeps your existing sections."} Your notes and pinned sections stay intact.</p>
+          {!tiles.length && <p>Add charts to the canvas, then choose how they should read together.</p>}
           <svg viewBox={`0 0 ${canvas.width} ${bottom}`} role="img" aria-label="Proposed dashboard layout">
-            {proposal.tiles.map(t => <rect key={t.id} x={t.layout.x} y={t.layout.y} width={t.layout.w} height={t.layout.h} rx={8}
-              fill={t.pinned ? "var(--ink-3)" : t.kind === "heading" ? "var(--accent)" : "var(--surface-3, #dce5de)"} />)}
+            {proposal.tiles.map(t => <g key={t.id}><title>{t.title ?? t.text ?? t.metrics.join(", ")}</title><rect x={t.layout.x} y={t.layout.y} width={t.layout.w} height={t.layout.h} rx={8}
+              fill={t.pinned ? "var(--ink-3)" : t.kind === "heading" ? "var(--accent)" : "var(--surface-3, #dce5de)"} />{t.kind !== "heading" && <text x={t.layout.x + 12} y={t.layout.y + 28} fontSize="20" fill="var(--ink)">{(t.title ?? t.text ?? t.metrics.join(", ")).slice(0, Math.max(8, Math.floor(t.layout.w / 13)))}</text>}</g>)}
           </svg>
-          <div className="story-actions"><button className="primary" disabled={!tiles.length} onClick={() => { applyComposition(); close(); }}>Apply layout</button><button onClick={close}>Keep current</button></div>
-          <small>One undo restores the entire previous layout.</small>
+          </div>
+          <footer className="arrange-preview-actions"><div className="story-actions"><button className="primary" disabled={!tiles.length} onClick={() => { applyComposition(); close(); }}>Apply layout</button><button onClick={close}>Keep current</button></div>
+          <small>One undo restores the entire previous layout.</small></footer>
         </div>}
       </Popover>
 

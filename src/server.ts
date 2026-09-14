@@ -1,3 +1,4 @@
+import { reviewContextSchema } from "./suggest/reviewSession.ts";
 import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -1028,7 +1029,11 @@ app.post("/api/agent/chat", safe(async (req, res) => {
   const active = req.body.document ? z.object({ spec: dashboardSchema, canvas: canvasSchema, selected: z.array(z.string()).max(500).default([]) }).strict().parse(req.body.document) : undefined;
   const controller = new AbortController();
   res.on("close", () => controller.abort());
-  const { text, messages, proposal } = await agentChat(ai, history.slice(-12), message, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined);
+  const review = reviewContextSchema.safeParse(req.body?.review ?? {});
+  if (!review.success) return res.status(400).json({ error: "Invalid building-session context" });
+  const mode = z.enum(["chat", "redesign"]).parse(req.body?.mode ?? "chat");
+  if (mode === "redesign" && !active) return res.status(400).json({ error: "A current canvas is required for redesign" });
+  const { text, messages, proposal } = await agentChat(ai, history.slice(-12), message, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined, review.data, mode);
   if (agentConversations.size >= 500) agentConversations.delete(agentConversations.keys().next().value!);
   agentConversations.set(historyKey, messages.slice(-12));
   res.json({ text, proposal });
@@ -1102,7 +1107,10 @@ app.post("/api/agent/dashboard-story", safe(async (req, res) => {
   const catalog = Object.values(reviewedModel(modelOf(req)).metrics).map((m) => ({
     name: m.name, label: m.label, description: m.description, baseTable: m.baseTable,
   }));
-  const result = await suggestDashboardStory(ai, { source, principal, auth: auth.forwarded(req) }, tiles, catalog);
+  const review = reviewContextSchema.safeParse(body.review ?? {});
+  if (!review.success) return res.status(400).json({ error: "Invalid building-session context" });
+  const controller = new AbortController(); res.on("close", () => controller.abort());
+  const result = await suggestDashboardStory(ai, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, tiles, catalog, review.data);
   res.json(result);
 }));
 

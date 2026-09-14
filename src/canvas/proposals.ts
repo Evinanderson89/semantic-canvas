@@ -4,7 +4,7 @@ import { validateTile } from "../compiler/compile.ts";
 import type { DashboardSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
 import type { CanvasSpec } from "./presets.ts";
-import { applyLayout } from "./layouts.ts";
+import { applyLayout, LAYOUT_NAMES, sectionsOf } from "./layouts.ts";
 
 const text = z.string().min(1).max(1000);
 export const proposalSchema = z.object({
@@ -14,7 +14,9 @@ export const proposalSchema = z.object({
     z.object({ type: z.literal("title"), id: text, title: text }).strict(),
     z.object({ type: z.literal("note"), id: text, text: z.string().max(100000) }).strict(),
     z.object({ type: z.literal("chart"), id: text, chart: z.enum(["line", "area", "bar", "barH", "table", "kpi", "stat", "scatter", "smallMultiples"]) }).strict(),
-    z.object({ type: z.literal("arrange"), layout: z.enum(["grid", "exec-summary"]) }).strict(),
+    z.object({ type: z.literal("query"), id: text, metrics: z.array(z.string().min(1).max(256)).min(1).max(50).optional(), dimensions: z.array(z.string().min(1).max(256)).max(12).optional(), compare: z.enum(["none", "prior", "yoy"]).optional() }).strict(),
+    z.object({ type: z.literal("place"), id: text, layout: tileSchema.shape.layout, section: text.nullable().optional() }).strict(),
+    z.object({ type: z.literal("arrange"), layout: z.enum(LAYOUT_NAMES) }).strict(),
     z.object({ type: z.literal("add"), tile: tileSchema }).strict(),
     z.object({ type: z.literal("remove"), id: text }).strict(),
   ])).min(1).max(30),
@@ -36,6 +38,17 @@ export function applyProposal(spec: DashboardSpec, canvas: CanvasSpec, raw: unkn
     const tile = next.tiles.find(t => t.id === action.id);
     if (!tile) throw new Error(`The proposed tile ${action.id} no longer exists`);
     if (action.type === "title") tile.title = action.title;
+    if (action.type === "place") {
+      tile.layout = action.layout;
+      if (action.section === null) delete tile.section;
+      else if (action.section !== undefined) tile.section = action.section;
+    }
+    if (action.type === "query") {
+      if (tile.kind && tile.kind !== "metric") throw new Error("Query changes require a metric tile");
+      if (action.metrics !== undefined) tile.metrics = action.metrics;
+      if (action.dimensions !== undefined) tile.dimensions = action.dimensions;
+      if (action.compare !== undefined) tile.compare = action.compare;
+    }
     if (action.type === "note") {
       if (tile.kind !== "text" && tile.kind !== "heading") throw new Error("Text changes require a note or heading");
       tile.text = action.text;
@@ -56,9 +69,13 @@ export function applyProposal(spec: DashboardSpec, canvas: CanvasSpec, raw: unkn
     const issues = validateTile(model, tile);
     if (issues.length) throw new Error(issues.map(i => i.problem).join("; "));
   }
-  for (const tile of spec.tiles.filter(t => t.pinned)) {
+  for (const tile of sectionsOf(spec.tiles).filter(group => group.some(t => t.pinned)).flat()) {
     const after = next.tiles.find(t => t.id === tile.id);
-    if (!after || JSON.stringify(after.layout) !== JSON.stringify(tile.layout)) throw new Error("A proposal cannot move or remove pinned content");
+    if (!after || after.section !== tile.section || JSON.stringify(after.layout) !== JSON.stringify(tile.layout)) throw new Error("A proposal cannot move or remove pinned content or its section");
   }
-  return { spec: next, canvas: canvasSchema.parse({ ...canvas, height: Math.max(canvas.height, ...next.tiles.map(t => t.layout.y + t.layout.h + 24)) }) };
+  const nextCanvas = canvasSchema.parse({ ...canvas, height: Math.max(canvas.height, ...next.tiles.map(t => t.layout.y + t.layout.h + 24)) });
+  if (JSON.stringify(next) === JSON.stringify(dashboardSchema.parse(spec)) && JSON.stringify(nextCanvas) === JSON.stringify(canvasSchema.parse(canvas))) {
+    throw new Error("This proposal does not change the current canvas. Suggest a different improvement.");
+  }
+  return { spec: next, canvas: nextCanvas };
 }

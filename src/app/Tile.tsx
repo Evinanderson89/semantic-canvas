@@ -185,13 +185,14 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
 
   const kind = spec.chart ?? inferChart(model, spec);
   const fmt = resolveFormat(model, spec);
+  // Combo and dual-axis line charts can contain metrics with different units.
   // A combo tile's bar and line are two DIFFERENT metrics by fixed position
   // (see Chart.tsx), and each can need its own number style -- spend as
   // currency, click-through rate as a percent. `fmt` above already answers
   // "what style for the first metric"; this is the same question asked of
   // the second one, only computed here (not in Chart.tsx, which has no
   // model to infer a style from) and handed down for the secondary axis.
-  const secondaryFmt = kind === "combo" && spec.metrics.length > 1
+  const secondaryFmt = (kind === "combo" || kind === "line") && spec.metrics.length > 1
     ? resolveFormat(model, { ...spec, metrics: [spec.metrics[1]] }) : undefined;
   const title = spec.title ?? spec.metrics.map((m) => metricOf(model, m)?.label ?? m).join(", ");
 
