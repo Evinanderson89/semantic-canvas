@@ -343,7 +343,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
             {structure && <section className="structure-review" aria-label="Story structure">
               <div className="eyebrow">Shape the story</div>
               <h3>Give every chart a place.</h3>
-              <p>{structure.refinement ? "Refine chart sizes and spacing inside your existing sections. Keep headings, authored notes, and pinned sections." : `Add ${structure.sections.length} section headings, an editable reading guide, and a clear visual hierarchy${structure.renamed ? `, with ${structure.renamed} clearer chart labels` : ""}.`}</p>
+              <p>{structure.refinement ? "Refine chart sizes and spacing inside your existing sections. Keep headings, authored notes, and pinned sections." : `Add ${structure.sections.length} section headings, an editable reading guide, and a clear visual hierarchy${structure.renamed ? `, with ${structure.renamed} clearer chart ${structure.renamed === 1 ? "label" : "labels"}` : ""}.`}</p>
               {!structurePreview ? <button ref={previewTrigger} className="primary small" onClick={() => setStructurePreview(true)}>Preview story structure</button> : <>
                 <div ref={previewRef} tabIndex={-1} className="structure-preview" aria-label="Proposed story structure">
                   <h4>{structure.spec.title}</h4>
@@ -356,7 +356,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
             </section>}
             {!structure && dash.tiles.some(t => t.kind === "heading") && <p className="explain-body hint">No additional automatic layout proposal for this version. Your headings and pinned sections are preserved. Choose a new direction above to review the next question.</p>}
             {story === "checking" && <p className="explain-body loading">Reading the dashboard as a story…</p>}
-            {story && story !== "checking" && "error" in story && <p className="explain-body error">{story.error}</p>}
+            {story && story !== "checking" && "error" in story && <section className="beautify-suggestion" aria-label="AI review unavailable"><p className="explain-body error" role="alert">AI review couldn’t finish.</p><p className="explain-body">Your dashboard and review choices are unchanged. You can still use the chart checks and layout suggestions.</p><button className="primary small" onClick={() => askAgent()}>Retry AI review</button><details className="explain-body"><summary>Error details</summary><p>{story.error}</p></details></section>}
             {story && story !== "checking" && !("error" in story) && (
               <div className="beautify-suggestion">
                 <div className="explain-body">{renderMarkdown(story.summary)}</div>

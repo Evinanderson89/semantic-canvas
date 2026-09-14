@@ -1,6 +1,26 @@
 import { expect, test } from "@playwright/test";
 import { openStarter } from "./library-helpers.ts";
 
+test("a failed editorial review can be retried without changing the dashboard", async ({ page }) => {
+  let attempts = 0;
+  await page.route("**/api/agent/status", route => route.fulfill({ json: { configured: true } }));
+  await page.route("**/api/agent/dashboard-story", route => {
+    const input = route.request().postDataJSON();
+    if (++attempts === 1) return route.fulfill({ status: 500, json: { error: "The AI review could not finish." } });
+    return route.fulfill({ json: { title: input.review.dashboardTitle, layout: null, order: input.tiles.map((t: any) => t.id), notes: [], additions: [], summary: "Recovered editorial review." } });
+  });
+  await page.goto("/"); await openStarter(page, "Dashboard cleanup demo");
+  const before = await page.locator(".node").evaluateAll(nodes => nodes.map(node => node.getAttribute("style")));
+  await page.getByRole("button", { name: "Design review", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("AI review couldn’t finish.");
+  await expect(page.getByRole("button", { name: "Preview story structure", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Retry AI review", exact: true }).click();
+  await expect(page.getByText("Recovered editorial review.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(attempts).toBe(2);
+  expect(await page.locator(".node").evaluateAll(nodes => nodes.map(node => node.getAttribute("style")))).toEqual(before);
+});
+
 test("review follows accepted edits and remembers dismissed ideas", async ({ page }) => {
   const requests: any[] = [];
   await page.route("**/api/agent/status", route => route.fulfill({ json: { configured: true } }));
