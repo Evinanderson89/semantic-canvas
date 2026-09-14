@@ -62,6 +62,11 @@ it("validates a whole proposal before applying it and rejects invented metrics",
   const good = applyProposal(spec, DEFAULT_CANVAS, { title: "Good", reason: "Clearer", actions: [{ type: "rename", title: "Revenue" }] }, model);
   expect(good.spec.title).toBe("Revenue"); expect(spec.title).toBe("Before");
 });
+it("rejects proposals that make no change, including edits that cancel each other", () => {
+  const spec = { title: "Revenue", tiles: [tile()] };
+  expect(() => applyProposal(spec, DEFAULT_CANVAS, { title: "Rename", reason: "Clearer", actions: [{ type: "rename", title: "Revenue" }] }, model)).toThrow(/does not change/);
+  expect(() => applyProposal(spec, DEFAULT_CANVAS, { title: "Rename", reason: "Clearer", actions: [{ type: "rename", title: "Other" }, { type: "rename", title: "Revenue" }] }, model)).toThrow(/does not change/);
+});
 it("uses the same filtered and drilled request for charts and review", () => {
   const q = visibleQuery(model, tile({ dimensions: ["month:sold_on"], chart: "kpi" }), [{ id: "country", source: "dimension", mode: "discrete", field: "dim_users.country", values: ["GB"] }], [{ grain: "day", column: "sold_on", min: "2024-03-01", max: "2024-03-31", label: "March" } as any]);
   expect(q.dimensions).toEqual(["day:sold_on"]); expect(q.where).toHaveLength(2); expect(q.compare).toBe("prior");

@@ -60,5 +60,9 @@ export function applyProposal(spec: DashboardSpec, canvas: CanvasSpec, raw: unkn
     const after = next.tiles.find(t => t.id === tile.id);
     if (!after || JSON.stringify(after.layout) !== JSON.stringify(tile.layout)) throw new Error("A proposal cannot move or remove pinned content");
   }
-  return { spec: next, canvas: canvasSchema.parse({ ...canvas, height: Math.max(canvas.height, ...next.tiles.map(t => t.layout.y + t.layout.h + 24)) }) };
+  const nextCanvas = canvasSchema.parse({ ...canvas, height: Math.max(canvas.height, ...next.tiles.map(t => t.layout.y + t.layout.h + 24)) });
+  if (JSON.stringify(next) === JSON.stringify(dashboardSchema.parse(spec)) && JSON.stringify(nextCanvas) === JSON.stringify(canvasSchema.parse(canvas))) {
+    throw new Error("This proposal does not change the current canvas. Suggest a different improvement.");
+  }
+  return { spec: next, canvas: nextCanvas };
 }

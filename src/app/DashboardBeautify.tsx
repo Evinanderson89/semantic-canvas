@@ -1,3 +1,4 @@
+import { additionKey, hasEquivalentTile, rememberDecision, reviewGoals, type ReviewDecision } from "../suggest/reviewSession.ts";
 import { visibleQuery } from "./query.ts";
 import { readResponse } from "./http.ts";
 import { validateTile } from "../compiler/compile.ts";
@@ -28,6 +29,7 @@ interface DegenerateHit {
 type Hit = NoiseHit | DegenerateHit;
 interface Addition { metrics: string[]; title: string; reason: string; breakdown: "time" | "none" }
 interface Story {
+  layout?: "grid" | "exec-summary" | null;
   title: string; order: string[]; notes: { id: string; note: string }[];
   additions: Addition[]; summary: string;
 }
@@ -50,6 +52,13 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
   filtersByTile?: Record<string, FilterSpec[]>;
   queryContext: string; drills: Record<string, DrillEntry[]>;
 }) {
+  const [goal, setGoal] = useState<string>(reviewGoals[0].goal);
+  const [continuous, setContinuous] = useState(true);
+  const [decisions, setDecisions] = useState<ReviewDecision[]>([]);
+  const [round, setRound] = useState(0);
+  const [queued, setQueued] = useState(false);
+  const editorialRequest = useRef<AbortController | null>(null);
+  const editorialSerial = useRef(0);
   const [open, setOpen] = useState(false);
   const [hits, setHits] = useState<"checking" | Hit[] | null>(null);
   const [honesty, setHonesty] = useState<HonestyFinding[]>([]);
@@ -61,26 +70,45 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
   const trigger = useRef<HTMLButtonElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const previewTrigger = useRef<HTMLButtonElement>(null);
-  const close = () => { setOpen(false); trigger.current?.focus(); };
+  const close = () => { request.current?.abort(); editorialRequest.current?.abort(); setOpen(false); trigger.current?.focus(); };
   useEffect(() => { if (structurePreview) previewRef.current?.focus({ preventScroll: true }); }, [structurePreview]);
   const structure = useMemo(() => suggestStoryStructure(dash, model, canvas.width), [dash, model, canvas.width]);
-  const rescanAfterEdit = useRef(false);
+  const proposedOrder = useMemo(() => {
+    if (!story || story === "checking" || "error" in story) return null;
+    const visualOrder = [...dash.tiles].sort((a,b) => a.layout.y - b.layout.y || a.layout.x - b.layout.x).map(t => t.id);
+    if (!story.layout && JSON.stringify(story.order) === JSON.stringify(visualOrder)) return null;
+    const rank = new Map(story.order.map((id, i) => [id, i]));
+    const fixed = new Set(sectionsOf(dash.tiles).filter(group => group.some(t => t.pinned)).flat().map(t => t.id));
+    // The row packer reads positions, so express the proposed reading order as temporary y values.
+    const reranked = dash.tiles.map(t => fixed.has(t.id) ? t : ({ ...t, layout: { ...t.layout, y: rank.get(t.id) ?? 9999, x: 0 } }));
+    const packed = applyLayout(story.layout ?? "grid", reranked, canvas.width);
+    return packed.every(t => JSON.stringify(t.layout) === JSON.stringify(dash.tiles.find(before => before.id === t.id)?.layout)) ? null : packed;
+  }, [story, dash, canvas.width]);
+  const decisionRef = useRef(decisions); decisionRef.current = decisions;
+  const remember = (key: string, label: string, status: ReviewDecision["status"]) => {
+    const next = rememberDecision(decisionRef.current, { key: key.slice(0,4000), label: label.slice(0,1000), status });
+    decisionRef.current = next; setDecisions(next);
+  };
+  const isDismissed = (key: string) => decisions.some(d => d.key === key && d.status === "dismissed");
 
   const [scan, setScan] = useState<{ reviewed: number; limited: number; failed: string[] } | null>(null);
   const context = JSON.stringify([dash, canvas, queryContext, drills, filtersByTile]);
   const current = useRef(context); current.current = context;
   const request = useRef<AbortController | null>(null);
+  const wasOpen = useRef(false);
   useEffect(() => {
-    request.current?.abort(); setHits(null); setHonesty([]); setStory(null); setScan(null); setStructurePreview(false);
-    if (rescanAfterEdit.current && open) scanTiles();
-    rescanAfterEdit.current = false;
-    return () => request.current?.abort();
-  }, [context]);
+    const opening = open && !wasOpen.current; wasOpen.current = open;
+    request.current?.abort(); editorialRequest.current?.abort();
+    setHits(null); setHonesty([]); setStory(null); setScan(null); setStructurePreview(false);
+    setQueued(open && (continuous || opening));
+    const timer = open && (continuous || opening) ? setTimeout(() => { setQueued(false); scanTiles(); if (aiAvailable) askAgent(); }, 600) : undefined;
+    return () => { clearTimeout(timer); request.current?.abort(); editorialRequest.current?.abort(); };
+  }, [context, open, continuous, aiAvailable]);
 
   const scanTiles = async () => {
     request.current?.abort(); const ac = new AbortController(); request.current = ac;
     const snapshot = context;
-    setHits("checking"); setScan(null);
+    setQueued(false); setHits("checking"); setScan(null);
     const found: Hit[] = [], failed: string[] = [], honest: HonestyFinding[] = [];
     let reviewed = 0, limited = 0;
     for (const t of dash.tiles) {
@@ -106,7 +134,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
         }
       } catch (e: any) { if (ac.signal.aborted) return; failed.push(`${title}: ${e.message}`); }
     }
-    if (current.current === snapshot && !ac.signal.aborted) { setHits(found); setHonesty(honest); setScan({ reviewed, limited, failed }); }
+    if (current.current === snapshot && !ac.signal.aborted) { setHits(found); setHonesty(honest); setScan({ reviewed, limited, failed }); setRound(value => value + 1); }
   };
 
   const tileSummary = (t: TileSpec) => {
@@ -117,28 +145,32 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
     return { id: t.id, title, kind, metrics: t.metrics ?? [], dimensions: t.dimensions ?? [], text: t.text, layout: t.layout, section: t.section, pinned: t.pinned };
   };
 
-  const askAgent = () => {
+  const askAgent = (intent = goal) => {
+    editorialRequest.current?.abort();
+    const ac = new AbortController(); editorialRequest.current = ac;
+    const serial = ++editorialSerial.current;
     setStory("checking");
     const snapshot = context;
     fetch("/api/agent/dashboard-story", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tiles: dash.tiles.map(tileSummary) }),
-    }).then(readResponse).then((d) => { if (current.current === snapshot) setStory(d); })
-      .catch((e) => { if (current.current === snapshot) setStory({ error: String(e?.message ?? e) }); });
+      signal: ac.signal, body: JSON.stringify({ tiles: dash.tiles.map(tileSummary), review: { goal: intent, dashboardTitle: dash.title, decisions: decisionRef.current } }),
+    }).then(readResponse).then((d) => { if (current.current === snapshot && !ac.signal.aborted && serial === editorialSerial.current) setStory(d); })
+      .catch((e) => { if (current.current === snapshot && !ac.signal.aborted && serial === editorialSerial.current) setStory({ error: String(e?.message ?? e) }); });
   };
 
   const run = () => {
-    setOpen(true);
+    if (!open) { setOpen(true); return; }
     scanTiles();
     if (aiAvailable) askAgent();
   };
 
   const applyReviewed = (next: DashboardSpec) => {
-    rescanAfterEdit.current = true;
+    if (JSON.stringify(next) === JSON.stringify(dash)) return;
     onDash(next);
   };
 
   const applyCoarsen = (hit: NoiseHit) => {
+    remember(`grain:${hit.tileId}:${hit.next}`, `Show ${hit.title} by ${hit.next}`, "applied");
     applyReviewed({ ...dash, tiles: dash.tiles.map((t) => t.id !== hit.tileId ? t : {
       ...t,
       dimensions: t.dimensions.map((d) =>
@@ -147,6 +179,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
   };
 
   const applyRemoveBreakdown = (hit: DegenerateHit) => {
+    remember(`breakdown:${hit.tileId}`, `Remove the unhelpful breakdown from ${hit.title}`, "applied");
     // Caps the tile down to KPI height rather than leaving it sized for
     // whatever chart it was before -- a bare number in a tile still sized
     // for a full chart is a huge dead gap, not a fix.
@@ -157,12 +190,14 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
 
   const applyShowOverTime = (hit: DegenerateHit) => {
     if (!hit.timeDimension) return;
+    remember(`trend:${hit.tileId}`, `Show ${hit.title} over time`, "applied");
     applyReviewed({ ...dash, tiles: dash.tiles.map((t) => t.id !== hit.tileId ? t : {
       ...t, dimensions: [`month:${hit.timeDimension}`], chart: undefined, title: readableChartTitle(model, t, { ...t, dimensions: [`month:${hit.timeDimension}`], chart: undefined }),
       layout: { ...t.layout, h: Math.max(t.layout.h, CHART_MIN_HEIGHT) } }) });
   };
 
   const applyHonesty = (f: HonestyFinding, fix: HonestyFix) => {
+    remember(`honesty:${f.key}:${fix.kind}`, `${f.title}: ${fixLabel(fix)}`, "applied");
     const today = todayOf(model);
     if (fix.kind === "freshness-note") {
       const note: TileSpec = {
@@ -187,23 +222,18 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
 
   const applyTitle = () => {
     if (!story || story === "checking" || "error" in story) return;
-    onDash({ ...dash, title: story.title });
+    remember(`title:${story.title}`, `Use title: ${story.title}`, "applied");
+    applyReviewed({ ...dash, title: story.title });
   };
 
   const applyOrder = () => {
-    if (!story || story === "checking" || "error" in story) return;
-    const rank = new Map(story.order.map((id, i) => [id, i]));
-    // arrange() (under applyLayout) packs in order of each tile's CURRENT
-    // layout.y/x, not array order -- so the suggested order is expressed as
-    // synthetic y positions first, then handed to the same row-packer Smart
-    // Arrange already uses, rather than inventing new placement math here.
-    const fixed = new Set(sectionsOf(dash.tiles).filter(group => group.some(t => t.pinned)).flat().map(t => t.id));
-    const reranked = dash.tiles.map((t) => fixed.has(t.id) ? t : ({ ...t, layout: { ...t.layout, y: rank.get(t.id) ?? 9999, x: 0 } }));
-    const packed = applyLayout("grid", reranked, canvas.width);
-    onDash({ ...dash, tiles: packed });
+    if (!story || story === "checking" || "error" in story || !proposedOrder) return;
+    remember(`order:${story.layout ?? "grid"}:${story.order.join(",")}`, "Apply the proposed reading order", "applied");
+    applyReviewed({ ...dash, tiles: proposedOrder });
   };
 
   const applyAddition = (addition: Addition) => {
+    if (hasEquivalentTile(dash.tiles, addition)) return;
     const base = metricOf(model, addition.metrics[0])?.baseTable ?? null;
     const timeCol = addition.breakdown === "time" ? timeColumnOf(model, base) : null;
     const newTile: TileSpec = {
@@ -225,15 +255,14 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
     // "have to scroll forever" a growing dashboard shouldn't produce.
     // Leaving raw widths alone lets same-sized additions keep sharing rows.
     const packed = applyLayout("grid", [...dash.tiles, newTile], canvas.width, false);
-    onDash({ ...dash, tiles: packed });
-    setStory((s) => (s && s !== "checking" && !("error" in s))
-      ? { ...s, additions: s.additions.filter((a) => a !== addition) } : s);
+    remember(additionKey(addition), `Add ${addition.title}`, "applied");
+    applyReviewed({ ...dash, tiles: packed });
   };
 
   return (
     <>
       <button ref={trigger} className="tgl" onClick={run} disabled={!dash.tiles.length} aria-describedby={aiAvailable ? undefined : "review-scope-note"}
-              title="Suggest a title and a top-to-bottom reading order for the whole dashboard, and flag any tile that's hard to read at its current grain. Review the current results and composition. Changes are applied only when you choose a suggestion.">
+              title="Review layout, supporting context, and storytelling as you build. Preview and apply changes; the next review uses your updated canvas.">
         <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6">
           <path d="M3 17l7-7" strokeLinecap="round" />
           <path d="M13 3v3M11.5 4.5h3" strokeLinecap="round" />
@@ -251,7 +280,15 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
             <button className="icon" onClick={close} aria-label="Close">✕</button>
           </div>
           <div className="beautify-body">
-            <div className="review-intro"><h3>Make the story easier to see.</h3></div>
+            <div className="review-intro"><h3>Keep building the story.</h3><p>Review {round || 1} · {aiAvailable ? "Layout, chart checks, and editorial guidance" : "Layout and chart checks"}</p></div>
+            <section className="review-direction" aria-label="Review direction">
+              <label htmlFor="review-goal">What should this dashboard help someone decide?</label>
+              <textarea id="review-goal" rows={2} maxLength={600} value={goal} onChange={e => setGoal(e.target.value)} />
+              <div className="story-actions">{reviewGoals.map(item => <button key={item.label} className="tgl" onClick={() => { setGoal(item.goal); scanTiles(); if (aiAvailable) askAgent(item.goal); }}>{item.label}</button>)}</div>
+              <button className="link" onClick={run}>Review this goal</button>
+              <label className="review-continuous"><input type="checkbox" checked={continuous} onChange={e => setContinuous(e.target.checked)} />Keep reviewing while this panel is open</label>
+              <small>Rechecks after edits settle. AI review uses your configured provider. Changes still wait for you to apply them.</small>
+            </section>
             <ul className="review-passes" aria-label="What this review covers">
               <li className="on" title="Results, grain, breakdowns and layout, from the current queries.">Chart checks</li>
               <li className="on" title="Partial periods, lagging comparisons and freshness, from the current results.">Data honesty</li>
@@ -297,36 +334,34 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
                 ))}
               </section>
             )}
-            {scan && <div className="review-coverage" role="status"><b>{scan.failed.length ? "Review incomplete" : "Review complete"}</b> · {scan.reviewed} chart{scan.reviewed === 1 ? "" : "s"} reviewed{scan.limited ? ` · ${scan.limited} limited result window${scan.limited === 1 ? "" : "s"}` : ""}{scan.failed.length ? ` · ${scan.failed.length} unavailable` : ""}{Array.isArray(hits) && hits.length === 0 && !visibleHonesty.length ? (scan.failed.length ? " · nothing to change in the readable tiles" : " · nothing to change") : ""}{scan.failed.map(message => <p key={message} className="err">{message}</p>)}</div>}
-            {hits === null && <p className="explain-body">The dashboard changed. <button className="link" onClick={run}>Review this version</button></p>}
+            {scan && <div className="review-coverage" role="status"><b>{scan.failed.length ? "Review incomplete" : "Review complete"}</b> · {scan.reviewed} chart{scan.reviewed === 1 ? "" : "s"} reviewed{scan.limited ? ` · ${scan.limited} limited result window${scan.limited === 1 ? "" : "s"}` : ""}{scan.failed.length ? ` · ${scan.failed.length} unavailable` : ""}{Array.isArray(hits) && hits.length === 0 && !visibleHonesty.length ? (scan.failed.length ? " · nothing to change in the readable tiles" : " · no chart or data issues found") : ""}{scan.failed.map(message => <p key={message} className="err">{message}</p>)}</div>}
+            {queued && <p className="explain-body loading" role="status">Reviewing the updated dashboard…</p>}
+            {hits === null && !queued && <p className="explain-body">{continuous ? "The dashboard changed." : "Automatic review is paused."} <button className="link" onClick={run}>Review this version</button></p>}
             {!scan && Array.isArray(hits) && hits.length === 0 &&
               <p className="explain-body">No chart changes suggested for the results reviewed.</p>}
 
             {structure && <section className="structure-review" aria-label="Story structure">
               <div className="eyebrow">Shape the story</div>
               <h3>Give every chart a place.</h3>
-              <p>Add {structure.sections.length} section headings, an editable reading guide, and a clear visual hierarchy{structure.renamed ? `, with ${structure.renamed} clearer chart label${structure.renamed === 1 ? "" : "s"}` : ""}.</p>
+              <p>{structure.refinement ? "Refine chart sizes and spacing inside your existing sections. Keep headings, authored notes, and pinned sections." : `Add ${structure.sections.length} section headings, an editable reading guide, and a clear visual hierarchy${structure.renamed ? `, with ${structure.renamed} clearer chart labels` : ""}.`}</p>
               {!structurePreview ? <button ref={previewTrigger} className="primary small" onClick={() => setStructurePreview(true)}>Preview story structure</button> : <>
                 <div ref={previewRef} tabIndex={-1} className="structure-preview" aria-label="Proposed story structure">
                   <h4>{structure.spec.title}</h4>
                   <ol>{structure.sections.map(s => <li key={s.title}><b>{s.title}</b><p>{s.purpose}</p><span>{s.labels.join(" · ")}</span></li>)}</ol>
                   <div className="reading-guide-preview"><b>Reading guide</b><p>{structure.guide}</p></div>
                 </div>
-                <div className="story-actions"><button className="primary small" onClick={() => { onDash(structure.spec); close(); }}>Apply story structure</button><button className="tgl" onClick={() => { setStructurePreview(false); requestAnimationFrame(() => previewTrigger.current?.focus()); }}>Keep current</button></div>
+                <div className="story-actions"><button className="primary small" onClick={() => { remember("structure", structure.refinement ? "Refine existing story layout" : "Apply story structure", "applied"); setStructurePreview(false); applyReviewed(structure.spec); }}>Apply story structure</button><button className="tgl" onClick={() => { setStructurePreview(false); requestAnimationFrame(() => previewTrigger.current?.focus()); }}>Keep current</button></div>
                 <small>Reuses your charts and queries. One undo restores the previous version.</small>
               </>}
             </section>}
-            {!structure && dash.tiles.some(t => t.kind === "heading") && <p className="explain-body hint">Your section headings already establish a reading order. Smart arrange keeps those sections together.</p>}
+            {!structure && dash.tiles.some(t => t.kind === "heading") && <p className="explain-body hint">No additional automatic layout proposal for this version. Your headings and pinned sections are preserved. Choose a new direction above to review the next question.</p>}
             {story === "checking" && <p className="explain-body loading">Reading the dashboard as a story…</p>}
             {story && story !== "checking" && "error" in story && <p className="explain-body error">{story.error}</p>}
             {story && story !== "checking" && !("error" in story) && (
               <div className="beautify-suggestion">
                 <div className="explain-body">{renderMarkdown(story.summary)}</div>
-                <p className="explain-body"><b>Suggested title:</b> {story.title}</p>
-                <div className="story-actions">
-                  <button className="primary small" onClick={applyTitle}>Use this title</button>
-                  <button className="primary small" onClick={applyOrder}>Reorder top to bottom</button>
-                </div>
+                {story.title !== dash.title && !isDismissed(`title:${story.title}`) && <div className="review-title-option"><p className="explain-body"><b>Optional title:</b> {story.title}</p><div className="story-actions"><button className="tgl" onClick={applyTitle}>Use this title</button><button className="link" onClick={() => remember(`title:${story.title}`, `Keep current title instead of ${story.title}`, "dismissed")}>Keep current title</button></div></div>}
+                {proposedOrder && !isDismissed(`order:${story.layout ?? "grid"}:${story.order.join(",")}`) && <div className="story-actions"><button className="primary small" onClick={applyOrder}>{story.layout ? "Apply suggested layout" : "Reorder top to bottom"}</button><button className="link" onClick={() => remember(`order:${story.layout ?? "grid"}:${story.order.join(",")}`, "Keep current reading order", "dismissed")}>Keep this order</button></div>}
                 {story.notes.length > 0 && (
                   <ul className="story-notes">
                     {story.notes.map((n) => <li key={n.id}>{renderInline(n.note)}</li>)}
@@ -334,16 +369,17 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
                 )}
                 {story.additions.length > 0 && (
                   <div className="story-additions">
-                    {story.additions.map((a, i) => (
+                    {story.additions.filter(a => !hasEquivalentTile(dash.tiles, a) && !isDismissed(additionKey(a))).map((a, i) => (
                       <div key={i} className="addition-item">
                         <p className="explain-body"><b>{a.title}</b> — {renderInline(a.reason)}</p>
-                        <button className="primary small" onClick={() => applyAddition(a)}>Add this tile</button>
+                        <div className="story-actions"><button className="primary small" onClick={() => applyAddition(a)}>Add this tile</button><button className="link" onClick={() => remember(additionKey(a), `Skip ${a.title}`, "dismissed")}>Not useful</button></div>
                       </div>
                     ))}
                   </div>
                 )}
               </div>
             )}
+            {decisions.length > 0 && <details className="review-history"><summary>Your choices in this review ({decisions.length})</summary><ul>{decisions.map(d => <li key={d.key}>{d.status === "applied" ? "Applied" : "Kept out"}: {d.label}</li>)}</ul><button className="link" onClick={() => { decisionRef.current = []; setDecisions([]); }}>Forget these choices</button></details>}
           </div>
         </div>
       )}

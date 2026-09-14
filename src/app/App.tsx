@@ -721,7 +721,7 @@ export function App() {
                        selected={selected} tiles={dash.tiles}
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
-                       beautify={<DashboardBeautify dash={dash} canvas={canvas} model={model}
+                       beautify={<DashboardBeautify key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} dash={dash} canvas={canvas} model={model}
                                                      aiAvailable={aiAvailable} canConfigureAi={session.canAdmin} onConnections={() => setView("connections")} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))} />} />
             )}
             {canvas.locked && session.canEdit && (
@@ -858,7 +858,7 @@ export function App() {
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
-      <AgentChat key={`${activeSourceId}:${asWho}:${activeTabId}`} document={dash && session.canEdit ? { spec: dash, canvas, selected } : null}
+      <AgentChat key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} document={dash && session.canEdit ? { spec: dash, canvas, selected } : null}
         onApply={(proposal, expected) => {
           if (!session.canEdit || !dash || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Request a fresh proposal before applying it."); return false; }
           try { const next = applyProposal(dash, canvas, proposal, model); compose(next.spec, next.canvas); setNotice("Changes applied. Undo restores the previous version."); return true; }

@@ -65,3 +65,32 @@ it("does not offer a composition for invalid governed queries or exceed the docu
   const full = { title: "Full", tiles: Array.from({ length: 500 }, (_, i) => tile({ id: `t${i}` })) };
   expect(suggestStoryStructure(full, model, 1200)).toBeNull();
 });
+
+it("refines a later draft without duplicating sections or changing authored content", () => {
+  const original = suggestStoryStructure(draft(), model, 1200)!.spec;
+  const edited = structuredClone(original);
+  const trend = edited.tiles.find(t => t.id === "trend")!;
+  trend.layout.w = 240; trend.layout.h = 180;
+  const refined = suggestStoryStructure(edited, model, 1200)!;
+  expect(refined.refinement).toBe(true);
+  expect(refined.spec.tiles.map(t=>t.id)).toEqual(edited.tiles.map(t=>t.id));
+  expect(refined.spec.tiles.find(t=>t.id === "trend")!.layout.w).toBe(1152);
+  for (const tile of edited.tiles) {
+    const { layout, ...content } = tile;
+    const { layout: afterLayout, ...afterContent } = refined.spec.tiles.find(t=>t.id===tile.id)!;
+    expect(afterContent).toEqual(content);
+  }
+  expect(suggestStoryStructure(refined.spec, model, 1200)).toBeNull();
+});
+
+it("continues improving unlocked sections while preserving an entire pinned section", () => {
+  const spec = suggestStoryStructure(draft(), model, 1200)!.spec;
+  spec.tiles.find(t=>t.id==="kpi")!.pinned = true;
+  const fixedSection = spec.tiles.find(t=>t.id==="kpi")!.section;
+  const fixed = spec.tiles.filter(t=>t.id===fixedSection || t.section===fixedSection);
+  spec.tiles.find(t=>t.id==="trend")!.layout.w=220;
+  const after = suggestStoryStructure(spec, model, 1200)!.spec;
+  expect(after.tiles.filter(t=>fixed.some(f=>f.id===t.id))).toEqual(fixed);
+  expect(after.tiles.find(t=>t.id==="trend")!.layout.w).toBe(1152);
+  for (const t of after.tiles) expect(after.tiles.some(other=>other.id!==t.id && overlaps(t.layout,other.layout))).toBe(false);
+});

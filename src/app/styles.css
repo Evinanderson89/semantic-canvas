@@ -1332,3 +1332,18 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .data-policy{display:block;margin-top:3px;font-size:10.5px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
 /* A tile's rows are scoped by a data policy the gateway signed onto the request (docs/self-hosting.md). */
 .gateway-scope{color:var(--accent,#345c48);border:1px solid currentColor;border-radius:var(--r-xl);padding:1px 7px;font-size:10.5px;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.review-direction{padding:0 18px 14px;border-bottom:1px solid var(--line)}
+.review-direction>label:first-child{display:block;font-size:12px;margin:8px 0}
+.review-direction textarea{box-sizing:border-box;resize:vertical;width:100%;font:inherit;font-size:12px;line-height:1.5;padding:9px;background:var(--bg);color:inherit;border:1px solid var(--line);border-radius:6px}
+.review-direction .story-actions{flex-wrap:wrap;margin:9px 0;gap:6px}
+.review-direction .tgl{font-size:11px;white-space:normal;text-align:left}
+.review-continuous{display:flex;gap:8px;align-items:center;font-size:11px;margin:12px 0 6px}
+.review-direction small{display:block;font-size:10px;line-height:1.5;opacity:.7}
+.review-intro p{font-size:11px;opacity:.7;margin:0 0 10px}
+.review-history{padding:12px 18px;border-top:1px solid var(--line);font-size:11px;line-height:1.6}
+.review-history summary{cursor:pointer}
+.review-history ul{padding-left:18px}
+.review-title-option{border-top:1px solid var(--line);padding:8px 0}
+.agent-next-steps{padding:12px;font-size:12px}
+.agent-next-steps .tgl{font-size:11px;white-space:normal;margin:4px}
+.showing-structure .review-direction,.showing-structure .review-history{display:none}

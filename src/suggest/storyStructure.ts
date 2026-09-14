@@ -2,7 +2,7 @@ import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { dashboardSchema } from "../compiler/schema.ts";
-import { applyLayout } from "../canvas/layouts.ts";
+import { applyLayout, sectionsOf } from "../canvas/layouts.ts";
 import { inferChart } from "./chartRules.ts";
 import { metricOf } from "../semantic/model.ts";
 
@@ -10,6 +10,7 @@ export interface StoryStructure {
   spec: DashboardSpec;
   sections: { title: string; purpose: string; labels: string[] }[];
   renamed: number;
+  refinement?: boolean;
   guide: string;
 }
 
@@ -29,7 +30,7 @@ export function readableChartTitle(model: Model, tile: TileSpec, next = tile): s
 /** Presentation advice only. Never changes a query or asserts a business result. */
 export function suggestStoryStructure(dash: DashboardSpec, model: Model, width: number): StoryStructure | null {
   // Existing editorial structure and fixed positions belong to the author.
-  if (dash.tiles.some(t => t.kind === "heading" || t.pinned)) return null;
+  if (dash.tiles.some(t => t.kind === "heading" || t.pinned)) return refineStoryLayout(dash, model, width);
   const metricTiles = dash.tiles.filter(t => (t.kind ?? "metric") === "metric");
   if (metricTiles.length < 2 || metricTiles.some(t => validateTile(model, t).length)) return null;
   const available = width - 48;
@@ -87,4 +88,28 @@ export function suggestStoryStructure(dash: DashboardSpec, model: Model, width: 
   if (!dashboardSchema.safeParse(spec).success) return null;
   return { spec, renamed, guide, sections: groups.map(g => ({ title: g.title, purpose: g.purpose,
     labels: g.tiles.map(t => (t.kind ?? "metric") === "metric" ? label(t) : t.title ?? t.kind ?? "Note") })) };
+}
+
+/** Continue refining a structured document without replacing its editorial choices. */
+function refineStoryLayout(dash: DashboardSpec, model: Model, width: number): StoryStructure | null {
+  const available = width - 48;
+  if (available < 180 || dash.tiles.some(t => validateTile(model, t).length)) return null;
+  const groups = sectionsOf(dash.tiles);
+  const fixed = new Set(groups.filter(g => g.some(t => t.pinned)).flat().map(t => t.id));
+  const trend = dash.tiles.filter(t => !fixed.has(t.id) && (t.kind ?? "metric") === "metric" &&
+    !["kpi", "stat"].includes(inferChart(model, t)) && t.dimensions.some(d => /^(day|week|month|quarter|year):/.test(d)))
+    .sort((a,b) => a.layout.y - b.layout.y || a.layout.x - b.layout.x)[0];
+  const resized = dash.tiles.map(t => t.id === trend?.id ? { ...t, layout: { ...t.layout, w: available, h: Math.max(320, t.layout.h) } } : t);
+  const tiles = applyLayout("exec-summary", resized, width);
+  if (tiles.every((t,i) => JSON.stringify(t) === JSON.stringify(dash.tiles[i]))) return null;
+  const spec = { ...dash, tiles };
+  if (!dashboardSchema.safeParse(spec).success) return null;
+  return { spec, renamed: 0, refinement: true,
+    guide: "Keep your section headings and commentary. Give the leading trend room, align supporting charts, and preserve pinned sections.",
+    sections: groups.filter(g => !g.some(t => t.pinned)).map(g => ({
+      title: g[0].kind === "heading" ? g[0].title ?? g[0].text ?? "Section" : "Dashboard layout",
+      purpose: "Refine chart sizing and spacing within this section.",
+      labels: g.filter(t => t.kind !== "heading").map(t => t.title ?? t.text ?? t.metrics.join(", ")),
+    })),
+  };
 }
