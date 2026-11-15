@@ -266,6 +266,8 @@ it("returns computed substitutions to the actual SDK before the assistant explai
   const facts = JSON.parse(content);
   expect(facts.metricChanges).toMatchObject({ removedMetrics: ["revenue"], substitutions: [{ id: "revenue", before: ["revenue"], after: ["arpu"] }] });
   expect(facts.guidance).toContain("Do not claim all metrics are preserved");
+  expect(facts.metricChanges.additions).toMatchObject([{ id: "revenue", newTile: false, added: ["arpu"], newToDashboard: ["arpu"] }]);
+  expect(facts.guidance).toContain("submit a corrected proposal");
   expect(result.text).toContain("Revenue is replaced by ARPU");
   expect(active).toEqual(before);
 });

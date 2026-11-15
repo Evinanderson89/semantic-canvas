@@ -1,3 +1,4 @@
+import { numericValue } from "../charts/values.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import { parseDimension } from "../compiler/compile.ts";
 import { metricUnit } from "../format/format.ts";
@@ -33,9 +34,19 @@ export function queryEvidence(model: Model, tile: TileSpec, result: QualityResul
     basis: "Computed from the returned rows in this query's scope. Observations do not establish a cause or certify source completeness.",
     populationGuidance: "Definitions are semantic metadata, not additional query results. Shared tables, periods or units do not establish that metrics count the same population or that one total came from another metric's customers. Read expressions, standalone filters and component definitions together; a null filter does not rule out conditions inside the expression. Query filters and row-level policies still apply. State totals separately unless population-matched evidence supports the relationship.",
     rowsChecked: result.rows.length,
+    availabilityGuidance: "Counts describe returned metric values, not source records or input availability. A measured zero is available data. A null result does not prove missing inputs: a zero denominator can make a ratio undefined. Query the governed inputs in the same scope before attributing a null to a cause; otherwise state that the cause is unverified.",
     metrics: tile.metrics.map(name => {
       const metric = metricOf(model, name);
-      return { name, label: metric?.label ?? name, unit: metricUnit(model, name),
+      const index = result.columns.indexOf(name);
+      const values = index < 0 ? [] : result.rows.map(row => row[index]);
+      const numbers = values.map(numericValue);
+      const availability = { columnPresent: index >= 0,
+        numericValues: numbers.filter(value => value !== null).length,
+        zeroValues: numbers.filter(value => value === 0).length,
+        nullValues: values.filter(value => value == null).length,
+        nonNumericValues: values.filter((value, i) => value != null && numbers[i] === null).length,
+      };
+      return { name, availability, label: metric?.label ?? name, unit: metricUnit(model, name),
         unitSource: metric?.unit ? "declared" : "inferred from metric naming",
         ...(metric ? { definition: definition(model, metric),
           ...(metricType(metric) !== "simple" ? { components: metricComponents(model, metric).map(component => definition(model, component)) } : {}),

@@ -68,6 +68,7 @@ export function redesignImpact(before: DashboardSpec, after: DashboardSpec, mode
   const metricChanges = proposalMetricChanges(before, after);
   const metricLabel = (name: string) => ({ name, label: metricOf(model, name)?.label ?? name });
   return {
+    additions: metricChanges.additions.map(change => ({ ...change, added: change.added.map(metricLabel) })),
     substitutions: metricChanges.substitutions.map(change => ({ ...change, before: change.before.map(metricLabel), after: change.after.map(metricLabel) })),
     tiles: changes,
     added: changes.filter(t => t.status === "added").length,

@@ -5,8 +5,15 @@ export function proposalMetricChanges(before: DashboardSpec, after: DashboardSpe
   const metricTiles = (spec: DashboardSpec) => spec.tiles.filter(t => (t.kind ?? "metric") === "metric");
   const previous = metricTiles(before), proposed = metricTiles(after);
   const shown = new Set(proposed.flatMap(t => t.metrics));
+  const previouslyShown = new Set(previous.flatMap(t => t.metrics));
   return {
     removedMetrics: [...new Set(previous.flatMap(t => t.metrics))].filter(name => !shown.has(name)),
+    additions: proposed.flatMap(tile => {
+      const old = previous.find(t => t.id === tile.id);
+      const added = tile.metrics.filter(name => !old?.metrics.includes(name));
+      return added.length ? [{ id: tile.id, title: tile.title || tile.id, newTile: !old,
+        added, newToDashboard: added.filter(name => !previouslyShown.has(name)) }] : [];
+    }),
     substitutions: previous.flatMap(tile => {
       const next = proposed.find(t => t.id === tile.id);
       if (!next) return [];

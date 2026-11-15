@@ -91,7 +91,7 @@ test("AI redesign previews real charts, applies once, and restores with undo", a
   await expect(page.locator(".node").filter({ has: page.getByRole("heading", { name: "New MRR (USD)", exact: true }) }).locator('g[aria-label="line"]')).toBeVisible();
 });
 
-test("redesign previews monthly categorical bars and mixed-unit line labels", async ({ page }) => {
+test("redesign previews monthly categorical bars and mixed-unit line labels", async ({ page }, testInfo) => {
   await page.route("**/api/agent/status", route => route.fulfill({ json: { configured: true } }));
   await page.route("**/api/agent/chat", route => {
     const tiles = route.request().postDataJSON().document.spec.tiles;
@@ -127,6 +127,10 @@ test("redesign previews monthly categorical bars and mixed-unit line labels", as
   await expect(substitutions).toBeVisible();
   await expect(substitutions).toContainText("Before: New MRR (USD)");
   await expect(substitutions).toContainText("Proposed: Net new MRR (USD)");
+  const additions = dialog.getByRole("region", { name: "Metrics added to charts" });
+  await expect(additions).toContainText("Web sessions (existing chart): Signup conversion rate");
+  await expect(additions).toContainText("New MRR (USD) (existing chart): Net new MRR (USD)");
+  await additions.screenshot({ path: testInfo.outputPath("metric-additions.png") });
   const rationale = dialog.locator("details").filter({ has: page.getByText("AI design rationale", { exact: true }) });
   await expect(rationale).not.toHaveAttribute("open", "");
   await expect(dialog.getByText("Nothing is removed.", { exact: true })).not.toBeVisible();

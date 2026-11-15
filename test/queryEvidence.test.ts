@@ -98,3 +98,25 @@ it("discloses inferred units, respects comparison none, and does not claim whole
   expect(scalar.observations[0].basis).toBe("Aggregate · no time breakdown");
   expect(scalar.basis).toContain("do not establish a cause");
 });
+
+it("distinguishes a null ratio from its available zero input without inventing a cause", () => {
+  const scoped = { ...model, metrics: { ...model.metrics,
+    starting_mrr: { ...model.metrics.revenue, name: "starting_mrr", expression: "SUM(starting_mrr_usd)" },
+    nrr: { ...model.metrics.retention, name: "nrr", expression: "SUM(ending_mrr_usd) / NULLIF(SUM(starting_mrr_usd), 0)" },
+  } };
+  const request = tile({ metrics: ["starting_mrr", "nrr", "revenue", "absent"], dimensions: ["month:sold_on"] });
+  const result = { columns: ["sold_on_month", "starting_mrr", "nrr", "revenue"], rows: [
+    ["2024-09-01", 0, null, ""], ["2024-10-01", "149.95", "1.0333", "0"], ["2024-11-01", 200, 0, false],
+  ] };
+  const original = structuredClone({ request, result });
+  const evidence = queryEvidence(scoped, request, result);
+  expect(evidence.metrics.map(m => m.availability)).toEqual([
+    { columnPresent: true, numericValues: 3, zeroValues: 1, nullValues: 0, nonNumericValues: 0 },
+    { columnPresent: true, numericValues: 2, zeroValues: 1, nullValues: 1, nonNumericValues: 0 },
+    { columnPresent: true, numericValues: 1, zeroValues: 1, nullValues: 0, nonNumericValues: 2 },
+    { columnPresent: false, numericValues: 0, zeroValues: 0, nullValues: 0, nonNumericValues: 0 },
+  ]);
+  expect(evidence.availabilityGuidance).toContain("null result does not prove missing inputs");
+  expect(evidence.metrics[1].definition?.expression).toContain("NULLIF");
+  expect({ request, result }).toEqual(original);
+});

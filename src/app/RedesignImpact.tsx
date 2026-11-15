@@ -10,6 +10,11 @@ export function RedesignImpact({ impact }: { impact: ReturnType<typeof redesignI
       {impact.added > 0 && <li><strong>{impact.added}</strong> tile{impact.added === 1 ? "" : "s"} added</li>}
       {impact.removed > 0 && <li><strong>{impact.removed}</strong> tile{impact.removed === 1 ? "" : "s"} removed</li>}
     </ul>
+    {!!impact.additions.length && <section aria-label="Metrics added to charts">
+      <h4>Metrics added to charts</h4>
+      <ul>{impact.additions.map(change => <li key={change.id}><strong>{change.title}</strong> ({change.newTile ? "new chart" : "existing chart"}): {change.added.map(metric => metric.label).join(", ")}</li>)}</ul>
+      <p>A new chart can reuse metrics already shown elsewhere.</p>
+    </section>}
     {!!impact.substitutions.length && <div className="impact-removed-evidence" role="region" aria-label="Metric substitutions">
       <h4>Charts showing different metrics</h4>
       <ul>{impact.substitutions.map(change => <li key={change.id}><strong>{change.title}</strong>

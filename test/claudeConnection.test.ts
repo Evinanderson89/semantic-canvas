@@ -222,3 +222,16 @@ it("uses the generated configuration from another directory to query, save, arra
     expect((await call("get_dashboard", { id: "claude-test", source: "sample" })).revision).toBe(2);
   } finally { await client.close(); await transport.close(); }
 }, 20_000);
+
+it("keeps known zero starting MRR distinct from null retention in the real sample response", async () => {
+  const response = await fetch(url + "/api/query?evidence=1", { method: "POST",
+    headers: { "content-type": "application/json", "x-sc-source": "sample", "x-sc-principal": "admin" },
+    body: JSON.stringify({ metrics: ["starting_mrr", "nrr"], dimensions: ["month:month"], limit: 36 }),
+  });
+  expect(response.status).toBe(200);
+  const result = await response.json();
+  expect(result.rows[0]).toEqual(["2024-09-01", 0, null]);
+  expect(result.evidence.metrics[0].availability).toEqual({ columnPresent: true, numericValues: 24, zeroValues: 1, nullValues: 0, nonNumericValues: 0 });
+  expect(result.evidence.metrics[1].availability).toEqual({ columnPresent: true, numericValues: 23, zeroValues: 0, nullValues: 1, nonNumericValues: 0 });
+  expect(result.evidence.metrics[1].definition.expression).toContain("NULLIF");
+});
