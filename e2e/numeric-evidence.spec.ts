@@ -115,7 +115,7 @@ test("an invalid latest KPI observation stays unknown in the dashboard and infog
   await expect(tile.locator(".kpi-value")).toHaveText("—");
   await expect(tile.locator(".kpi-delta")).toHaveText("no comparison");
   await expect(tile.locator(".spark-observation")).toHaveCount(1);
-  await expect(tile.locator(".spark-missing")).toHaveText("Missing periods");
+  await expect(tile.locator(".spark-missing")).toHaveText("Missing values");
   await page.getByRole("button", { name: "Review and share", exact: true }).click();
   const review = page.getByRole("dialog", { name: "Review and share", exact: true });
   await review.getByRole("button", { name: "Infographic", exact: true }).click();

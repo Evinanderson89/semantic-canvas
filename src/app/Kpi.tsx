@@ -37,6 +37,11 @@ export function Kpi({ label, series, options, onOptions, format, grain, previous
 
   const timeline = sparklineTimeline(series, grain);
   const { points, valid, segments, gaps, domain } = timeline;
+  const gapLabel = timeline.missingPeriods ? timeline.missingValues ? "Data gaps" : "Missing periods" : "Missing values";
+  const gapDescription = [
+    timeline.missingPeriods ? "Some reporting periods were not returned." : "",
+    timeline.missingValues ? `${timeline.missingValues} returned ${timeline.missingValues === 1 ? "value is" : "values are"} unavailable.` : "",
+  ].filter(Boolean).join(" ");
   const pad = 3;
   const hovered = hover ? sparklineHover(timeline, domain[0] + Math.max(0, Math.min(1, (hover.ratio * box.width - pad) / Math.max(1, box.width - 2 * pad))) * (domain[1] - domain[0])) : null;
   useEffect(() => {
@@ -152,7 +157,7 @@ export function Kpi({ label, series, options, onOptions, format, grain, previous
       </div>
 
       <div className="spark-wrap">
-        <svg ref={ref} className="spark" preserveAspectRatio="none" role="img" aria-label={`${label} trend${gaps.length ? "; missing periods are shown as gaps" : ""}`}
+        <svg ref={ref} className="spark" preserveAspectRatio="none" role="img" aria-label={`${label} trend${gaps.length ? `; ${gapDescription} Gaps are not filled.` : ""}`}
              onMouseMove={(e) => {
                const r = (e.target as SVGElement).closest("svg")!.getBoundingClientRect();
                if (r.width) setHover({ ratio: (e.clientX - r.left) / r.width, left: e.clientX - r.left });
@@ -166,11 +171,11 @@ export function Kpi({ label, series, options, onOptions, format, grain, previous
         )}
       </div>
 
-      {!!gaps.length && !(o.showRange && points.length > 1) && <span className="spark-missing">Missing periods</span>}
+      {!!gaps.length && !(o.showRange && points.length > 1) && <span className="spark-missing" title={gapDescription}>{gapLabel}</span>}
       {o.showRange && points.length > 1 && (
-        <div className="spark-range" title={`${valid.length} observations. ${gaps.length ? "Missing periods remain gaps. " : ""}Period completeness is not declared by the source.`}>
+        <div className="spark-range" title={`${valid.length} numeric observations. ${gapDescription ? `${gapDescription} ` : ""}Period completeness is not declared by the source.`}>
           <span>{period(points[0].x)}</span>
-          {!!gaps.length && <span className="spark-missing">Missing periods</span>}
+          {!!gaps.length && <span className="spark-missing" title={gapDescription}>{gapLabel}</span>}
           <span>{period(points.at(-1)!.x)}</span>
         </div>
       )}

@@ -17,7 +17,7 @@ test("a compact KPI keeps its data check, trend and date range readable", async 
   await page.getByRole("dialog", { name: "Saved dashboards" }).getByRole("button", { name: title, exact: false }).click();
   const card = page.locator(".node .tile"), kpi = card.locator(".kpi");
   await expect(kpi.locator(".kpi-value")).toHaveText("102.8%");
-  await expect(kpi.locator(".spark-range")).toContainText("Missing periods");
+  await expect(kpi.locator(".spark-range")).toContainText("Missing values");
   await expect(kpi.locator(".spark-range")).toContainText("2026-08-01");
   for (const mode of ["edit", "preview"] as const) {
     if (mode === "preview") await page.getByRole("button", { name: "Preview dashboard", exact: true }).click();

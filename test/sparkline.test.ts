@@ -8,6 +8,8 @@ it("keeps omitted months at their elapsed dates without bridging their values", 
   const t = sparklineTimeline([point("2024-01-01"), point("2024-02-01"), point("2024-04-01"), point("2024-05-01")], "month");
   expect(t.segments.map(s => s.map(p => p.x))).toEqual([["2024-01-01", "2024-02-01"], ["2024-04-01", "2024-05-01"]]);
   expect(t.gaps).toEqual([{ from: day("2024-03-01"), to: day("2024-04-01") }]);
+  expect(t.missingPeriods).toBe(true);
+  expect(t.missingValues).toBe(0);
   expect(t.points[2].position - t.points[1].position).toBe(60 * 86400000);
   expect(sparklineHover(t, day("2024-03-15")).point).toBeUndefined();
   expect(sparklineHover(t, day("2024-04-01")).point?.y).toBe(100);
@@ -18,6 +20,8 @@ it("merges explicit nulls and omitted periods, while preserving a genuine zero",
   expect(t.valid.map(p => p.y)).toEqual([0, 20]);
   expect(t.segments.map(s => s.length)).toEqual([1, 1]);
   expect(t.gaps).toEqual([{ from: day("2024-02-01"), to: day("2024-05-01") }]);
+  expect(t.missingPeriods).toBe(true);
+  expect(t.missingValues).toBe(2);
   expect(sparklineHover(t, day("2024-02-01")).gap).toBeDefined();
 });
 
@@ -37,6 +41,8 @@ it("retains missing latest and entirely unknown histories", () => {
   expect(t.domain[1]).toBe(day("2024-02-01"));
   expect(sparklineHover(t, t.domain[1]).gap).toBeDefined();
   expect(t.valid).toHaveLength(1);
+  expect(t.missingPeriods).toBe(false);
+  expect(t.missingValues).toBe(1);
   const empty = sparklineTimeline([point("2024-01-01", NaN), point("2024-02-01", NaN)], "month");
   expect(empty.valid).toEqual([]);
   expect(empty.gaps).toHaveLength(1);
@@ -57,6 +63,8 @@ it("supports Date objects without mutating inputs and falls back for non-date ca
   expect(input.map(p => p.y)).toEqual([20, 10]);
   const categories = sparklineTimeline([point("a"), point("b", NaN), point("c")]);
   expect(categories.temporal).toBe(false);
+  expect(categories.missingPeriods).toBe(false);
+  expect(categories.missingValues).toBe(1);
   expect(categories.segments).toHaveLength(2);
   expect(sparklineHover(categories, 1).gap).toBeDefined();
 });

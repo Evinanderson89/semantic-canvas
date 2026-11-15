@@ -16,11 +16,14 @@ export function sparklineTimeline(series: KpiPoint[], grain?: string | null) {
   const end = (p: SparkPoint) => knownGrain ? +bucketEnd(new Date(p.position), grain!) : p.position + 1;
   const segments: SparkPoint[][] = [];
   const gaps: SparkGap[] = [];
+  let missingPeriods = false;
+  let missingValues = 0;
   for (let i = 0; i < points.length; i++) {
     const p = points[i], before = points[i - 1];
     const skipped = before && knownGrain && p.position > end(before);
-    if (skipped) gaps.push({ from: end(before), to: p.position });
+    if (skipped) { missingPeriods = true; gaps.push({ from: end(before), to: p.position }); }
     if (!Number.isFinite(p.y)) {
+      missingValues++;
       gaps.push({ from: p.position, to: knownGrain ? end(p) : points[i + 1]?.position ?? p.position });
       continue;
     }
@@ -37,7 +40,7 @@ export function sparklineTimeline(series: KpiPoint[], grain?: string | null) {
   const intervals = knownGrain ? points.map(p => end(p) - p.position)
     : points.slice(1).map((p, i) => p.position - points[i].position).filter(n => n > 0);
   const step = intervals.length ? Math.min(...intervals) : 1;
-  return { points, valid, segments, gaps: merged, temporal, step,
+  return { points, valid, segments, gaps: merged, temporal, step, missingPeriods, missingValues,
     domain: [points[0]?.position ?? 0, points.at(-1)?.position ?? 1] as [number, number] };
 }
 

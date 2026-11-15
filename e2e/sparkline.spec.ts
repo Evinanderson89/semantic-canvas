@@ -39,9 +39,9 @@ for (const shape of ["line", "area"] as const) test(`${shape} sparkline breaks a
   const card = await openKpi(page, shape, [["2024-01-01", 10], ["2024-02-01", 20], ["2024-03-01", null], ["2024-05-01", 40], ["2024-06-01", 50]]);
   await expect(card.locator(".spark-line")).toHaveCount(2);
   if (shape === "area") await expect(card.locator(".spark-area")).toHaveCount(2);
-  await expect(card.locator(".spark-missing")).toHaveText("Missing periods");
+  await expect(card.locator(".spark-missing")).toHaveText("Data gaps");
   const svg = card.locator("svg.spark");
-  await expect(svg).toHaveAccessibleName(/missing periods are shown as gaps/);
+  await expect(svg).toHaveAccessibleName(/Some reporting periods were not returned.*1 returned value is unavailable/);
   const box = (await svg.boundingBox())!;
   const ratio = (Date.parse("2024-04-15") - Date.parse("2024-01-01")) / (Date.parse("2024-06-01") - Date.parse("2024-01-01"));
   await svg.hover({ position: { x: 3 + ratio * (box.width - 6), y: 20 } });
@@ -54,6 +54,9 @@ for (const shape of ["line", "area"] as const) test(`${shape} sparkline breaks a
 test("missing latest value remains unknown without a fabricated final sparkline dot", async ({ page }) => {
   const card = await openKpi(page, "line", [["2024-01-01", 10], ["2024-02-01", 20], ["2024-03-01", null]]);
   await expect(card.locator(".kpi-value")).toHaveText("—");
+  await expect(card.locator(".spark-missing")).toHaveText("Missing values");
+  await expect(card.locator("svg.spark")).toHaveAccessibleName(/1 returned value is unavailable/);
+  await expect(card.locator("svg.spark")).not.toHaveAccessibleName(/periods were not returned/);
   await expect(card.locator(".kpi-delta")).toHaveText("no comparison");
   await expect(card.locator(".spark-observation")).toHaveCount(0);
   await expect(card.locator(".spark-range")).toContainText("2024-03-01");
@@ -64,6 +67,8 @@ test("missing latest value remains unknown without a fabricated final sparkline 
 
 test("sparse bars retain period widths, stay inside the plot, and update on resize", async ({ page }) => {
   const card = await openKpi(page, "bar", [["2024-01-01", -100], ["2024-07-01", -50]]);
+  await expect(card.locator(".spark-missing")).toHaveText("Missing periods");
+  await expect(card.locator(".spark-missing")).toHaveAttribute("title", "Some reporting periods were not returned.");
   const svg = card.locator("svg.spark"), bars = svg.locator("rect");
   await expect(bars).toHaveCount(2);
   const check = async () => {
