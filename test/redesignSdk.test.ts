@@ -54,6 +54,22 @@ it("still bounds the rationale and lets the provider correct it without truncati
   expect(schema.properties.reason.description).toContain("maxLength: 4000");
 });
 
+it("identifies colliding tiles so finalization can arrange after all additions", async () => {
+  const note = { id: "reading-note", kind: "text", text: "Compare monthly revenue.", metrics: [], dimensions: [], section: null,
+    format: { textSize: 16, textAlign: "left" }, layout: { ...active.spec.tiles[0].layout } };
+  const overlapping = { ...valid, actions: [...valid.actions, { type: "add", tile: note }] };
+  const corrected = { ...overlapping, actions: [...overlapping.actions, { type: "arrange", layout: "story" }] };
+  const requests = provider([overlapping, { endText: "Ready." }, corrected]);
+  const before = structuredClone(active);
+  expect((await run()).proposal).toEqual(corrected);
+  const feedback = JSON.stringify(requests[2].messages);
+  expect(feedback).toContain('reading-note');
+  expect(feedback).toContain('revenue');
+  expect(feedback).toContain('after all add/place actions');
+  expect(feedback).toContain('x=');
+  expect(active).toEqual(before);
+});
+
 it("names the invalid blank-canvas KPI and teaches a bounded correction without silently selecting a period", async () => {
   const empty = { ...active, spec: { title: "Empty", tiles: [] } };
   const newCard = { kind: "metric", id: "new-revenue-card", title: "Revenue", metrics: ["revenue"], dimensions: [],

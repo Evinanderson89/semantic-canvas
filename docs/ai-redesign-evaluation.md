@@ -29,6 +29,8 @@ Inspect the rendered before/after at desktop and narrow widths, then Story and I
 
 Also render the proposed document as a read fixture in the normal interactive dashboard, without applying or saving it. Exploration controls, wrapped titles and data-check notices use space that the read-only proposal preview does not. Check both query errors (`.err`) and rendering errors (`.chart-err`), confirm actual chart marks, and inspect usable plot height. A ready preview or successful report export does not prove that the interactive layout fits.
 
+New-overlap rejections identify the colliding tile IDs and rectangles, and instruct correction to place them apart or run arrangement after additions and placements while preserving pinned content. The SDK regression verifies that this feedback reaches finalization; it does not establish that a live provider repairs the layout. A failed request with no returned proposal cannot be visually assessed or treated as accepted.
+
 ## Fresh live evaluation
 
 Use an isolated sample-only server and a new data directory. The agent can read dashboard storage, so using the ordinary working server could expose unrelated saved dashboards. The prepared `sources.yaml` restricts the catalog to the checked-in sample, but isolation also requires a fresh `SC_DATA_DIR`.

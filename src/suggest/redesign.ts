@@ -38,7 +38,10 @@ export function validateRedesign(spec: DashboardSpec, canvas: CanvasSpec, raw: u
       if (tabOf(next.spec, tile) !== tabOf(next.spec, other)) continue;
       if (!overlaps(tile.layout, other.layout)) continue;
       const previousOther = spec.tiles.find(t => t.id === other.id);
-      if (!before || !previousOther || !overlaps(before.layout, previousOther.layout)) throw new Error("The redesign introduces overlapping tiles. Arrange the proposal before returning it.");
+      if (!before || !previousOther || !overlaps(before.layout, previousOther.layout)) {
+        const box = (t: typeof tile) => `${JSON.stringify(t.id)} (x=${t.layout.x}, y=${t.layout.y}, w=${t.layout.w}, h=${t.layout.h})`;
+        throw new Error(`The redesign introduces overlapping tiles. Put arrange after all add/place actions, or place these tiles apart without moving pinned content: ${box(tile)} overlaps ${box(other)}.`);
+      }
     }
   }
   const analyticalShape = (dashboard: DashboardSpec) => dashboard.tiles.map(t => ({ id: t.id, metrics: t.metrics, dimensions: t.dimensions, compare: t.compare, chart: t.chart, layout: t.layout, section: t.section, kind: t.kind }));
