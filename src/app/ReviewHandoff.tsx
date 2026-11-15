@@ -1,3 +1,4 @@
+import { MetricColorProvider } from "../charts/MetricColors.tsx";
 import { useEvidenceDigest } from "./useEvidenceDigest.ts";
 import { briefReviewStatus } from "./evidenceFingerprint.ts";
 import { DataFindings, describeFilter } from "./MetricEvidence.tsx";
@@ -167,8 +168,8 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
               {hasInterpretation && <p className={`report-review-note ${reviewStatus === "matches" ? "review-matches" : "review-needed"}`}>{reviewNotice} This is an author acknowledgement, not a certification of the conclusion or source freshness.</p>}
               {mode === "infographic" && evidence.omitted.length > 0 && <p className="report-selection">Selected evidence · {shownCharts.length} of {charts.length} charts from this tab. Full coverage is available in Dashboard and Story.</p>}
             </header>
-            {mode === "dashboard" ? <DashboardRender key={mode} spec={spec} canvas={canvas} model={model} queryContext={queryContext} filtersByTile={filtersByTile} scopeWarnings={scopeWarnings} drills={drills} fullSize={false} onReadiness={record} />
-              : <ReportPresentation key={`${mode}:${JSON.stringify(brief.evidenceIds)}`} mode={mode} spec={reportSpec} model={model} queryContext={queryContext} filtersByTile={filtersByTile} scopeWarnings={scopeWarnings} drills={drills} checks={checks} onReadiness={record} />}
+            <MetricColorProvider tiles={spec.tiles}>{mode === "dashboard" ? <DashboardRender key={mode} spec={spec} canvas={canvas} model={model} queryContext={queryContext} filtersByTile={filtersByTile} scopeWarnings={scopeWarnings} drills={drills} fullSize={false} onReadiness={record} />
+              : <ReportPresentation key={`${mode}:${JSON.stringify(brief.evidenceIds)}`} mode={mode} spec={reportSpec} model={model} queryContext={queryContext} filtersByTile={filtersByTile} scopeWarnings={scopeWarnings} drills={drills} checks={checks} onReadiness={record} />}</MetricColorProvider>
             {nextStep.trim() && <section className="report-next-step"><span>Next action or question</span><h2>{nextStep}</h2><p>Proposed by the author. No task or notification has been sent.</p></section>}
             {mode === "infographic" && evidence.omitted.length > 0 && <section className="report-omitted"><h2>Outside this brief</h2><p>Not shown: {evidence.omitted.map(t => t.title ?? t.metrics.join(", ")).join("; ")}. Their results are not assessed in this presentation.</p></section>}
             <footer className="report-evidence"><h2>Reading this report</h2><p>Prepared {preparedAt}. This is a snapshot of the current viewing scope. Query and rendering checks do not certify source completeness or business conclusions.</p>

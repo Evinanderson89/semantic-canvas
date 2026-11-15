@@ -1,3 +1,4 @@
+import { MetricColorProvider } from "../charts/MetricColors.tsx";
 import { aiError } from "./aiError.ts";
 import type { Readiness } from "./readiness.ts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -134,10 +135,10 @@ export function DashboardRender({ spec, canvas, model, queryContext, filtersByTi
   useEffect(() => { const element = viewport.current!; const observer = new ResizeObserver(() => setWidth(element.clientWidth)); observer.observe(element); return () => observer.disconnect(); }, []);
   const scale = fullSize ? 1 : Math.min(1, Math.max(200, width - 16) / canvas.width);
   const height = useMemo(() => Math.max(360, ...spec.tiles.map(t => t.layout.y + t.layout.h + 24)), [spec]);
-  return <div className="ai-redesign-render" ref={viewport}><div style={{ width: canvas.width * scale, height: height * scale, position: "relative" }}><div style={{ width: canvas.width, height, transform: `scale(${scale})`, transformOrigin: "top left", position: "absolute" }}>
+  return <MetricColorProvider tiles={spec.tiles}><div className="ai-redesign-render" ref={viewport}><div style={{ width: canvas.width * scale, height: height * scale, position: "relative" }}><div style={{ width: canvas.width, height, transform: `scale(${scale})`, transformOrigin: "top left", position: "absolute" }}>
     {!spec.tiles.length && <p className="ai-redesign-empty">Your first draft will appear here.</p>}
     {spec.tiles.map(t => <div className="ai-redesign-tile" key={t.id} style={{ position: "absolute", left: t.layout.x, top: t.layout.y, width: t.layout.w, height: t.layout.h, zIndex: t.layout.z }}>
       {t.kind === "filter" ? <div className="tile"><p>{t.title ?? "Dashboard filter"}</p><small>Current selection is preserved.</small></div> : <TileBoundary onError={message => onReadiness?.(t.id, { status: "error", message })} label={t.title ?? t.metrics.join(", ")}><Tile onReadiness={onReadiness} scopeWarnings={scopeWarnings?.[t.id]} model={model} spec={t} locked queryContext={queryContext} crossFilters={[...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])]} drill={drills[t.id]} onRemove={() => {}} /></TileBoundary>}
     </div>)}
-  </div></div></div>;
+  </div></div></div></MetricColorProvider>;
 }

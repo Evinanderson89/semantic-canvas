@@ -1,3 +1,4 @@
+import { metricColorScale, useMetricOrder } from "./MetricColors.tsx";
 import { funnelStages } from "./funnel.ts";
 import { compareTableNumbers, tableCell, tableNumber, type TableColumnDisplay } from "../format/tableDisplay.ts";
 import { hasPrecisionRisk } from "./precision.ts";
@@ -53,6 +54,7 @@ export function Chart({ kind, columns, rows, measureColumns, temporalColumns, ti
    *  or number for a category, a Date for a time bucket. */
   onPick?: (column: string, value: PickValue) => void;
 }) {
+  const metricOrder = useMetricOrder();
   const status = useRef(onStatus); status.current = onStatus;
   const picker = useRef(onPick); picker.current = onPick;
   const dataKey = JSON.stringify([columns, rows]);
@@ -88,7 +90,7 @@ export function Chart({ kind, columns, rows, measureColumns, temporalColumns, ti
         (figure as HTMLElement).style.margin = "0";
         el.replaceChildren(figure);
       };
-      mount(render(kind, columns, data, box, format, secondaryFormat, labels, measureColumns, separateAxes, temporalColumns, metricFormats, timeGrains));
+      mount(render(kind, columns, data, box, format, secondaryFormat, labels, measureColumns, separateAxes, temporalColumns, metricFormats, timeGrains, metricOrder));
       // Plot stacks a legend ABOVE the svg. Exploration also needs its own
       // row, so neither its trigger nor the legend covers chart content.
       // Measure both after mounting and reserve that space on the redraw.
@@ -110,7 +112,7 @@ export function Chart({ kind, columns, rows, measureColumns, temporalColumns, ti
         if (spill > 1) {
           if (box.h - spill < 60) throw new Error("Enlarge this chart to make room for its legend and exploration controls.");
           mount(render(kind, columns, data,
-            { w: box.w, h: box.h - spill }, format, secondaryFormat, labels, measureColumns, separateAxes, temporalColumns, metricFormats, timeGrains));
+            { w: box.w, h: box.h - spill }, format, secondaryFormat, labels, measureColumns, separateAxes, temporalColumns, metricFormats, timeGrains, metricOrder));
           attachPicker(el, pickColumn, data, kind, pick);
         }
       }
@@ -126,7 +128,7 @@ export function Chart({ kind, columns, rows, measureColumns, temporalColumns, ti
       msg.textContent = `Could not draw this as a ${kind}: ${e?.message ?? e}`;
       host.current.replaceChildren(msg);
     }
-  }, [kind, dataKey, separateAxes, box.w, box.h, JSON.stringify(measureColumns), JSON.stringify(temporalColumns), JSON.stringify(timeGrains), JSON.stringify(pickableColumns), JSON.stringify(format), JSON.stringify(secondaryFormat), JSON.stringify(metricFormats), JSON.stringify(labels), !!onPick]);
+  }, [kind, dataKey, separateAxes, box.w, box.h, JSON.stringify(measureColumns), JSON.stringify(temporalColumns), JSON.stringify(timeGrains), JSON.stringify(pickableColumns), JSON.stringify(format), JSON.stringify(secondaryFormat), JSON.stringify(metricFormats), JSON.stringify(labels), JSON.stringify(metricOrder), !!onPick]);
 
   return <div ref={host} className="chart-host" tabIndex={-1} aria-label="Chart" style={{ width: "100%", height: "100%", position: "relative" }} />;
 }
@@ -307,7 +309,7 @@ function chartAxis(kind: ChartKind, dims: string[], data: Record<string, unknown
 
 function render(kind: ChartKind, columns: string[], data: any[], box: { w: number; h: number },
                 fmt?: import("../format/format.ts").FormatSpec,
-                secondaryFmt?: import("../format/format.ts").FormatSpec, labels: Record<string, string> = {}, measureColumns?: string[], separateAxes = false, temporalColumns?: string[], metricFormats?: Record<string, import("../format/format.ts").FormatSpec>, timeGrains?: Record<string, TimeGrain>) {
+                secondaryFmt?: import("../format/format.ts").FormatSpec, labels: Record<string, string> = {}, measureColumns?: string[], separateAxes = false, temporalColumns?: string[], metricFormats?: Record<string, import("../format/format.ts").FormatSpec>, timeGrains?: Record<string, TimeGrain>, metricOrder: string[] = []) {
   const f = fmt ?? DEFAULT_FORMAT;
   const palette = PALETTES[f.palette] ?? PALETTES.default;
   // Convention from the compiler: dimensions are selected first, metrics last.
@@ -369,13 +371,15 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
     color: { range: palette, tickFormat: (value: string) => labels[value] ?? value },
   };
   const legend = f.legend !== "hide";
+  const metricColors = { ...common.color, ...metricColorScale(measures, metricOrder, palette) };
+  const metricColor = (metric: string) => metricColors.range[metricColors.domain.indexOf(metric)];
 
   // Long/tidy form lets one mark serve any number of measures.
   const category = dims.length === 2 ? dims.find(d => d !== x) : undefined;
   const segmented = category && ["line", "areaStacked", "barGrouped", "barStacked", "smallMultiples"].includes(kind)
     ? categorySeries(data, x, category, y, temporalX || kind === "barStacked") : undefined;
   const tidy = segmented?.points ?? data.flatMap((d) => measures.map((m) => ({ x: d[x], series: m, value: d[m] })));
-  const seriesColor = { ...common.color, ...(segmented ? {
+  const seriesColor = { ...(segmented ? common.color : metricColors), ...(segmented ? {
     domain: [...segmented.labels.keys()], tickFormat: (v: string) => segmented.labels.get(v) ?? v,
   } : {}), legend: legend && (!!segmented || measures.length > 1) };
   const pointTitle = (d: typeof tidy[number]) => `${segmented?.labels.get(d.series) ?? labels[d.series] ?? d.series}\n${d.x instanceof Date ? d.x.toISOString().slice(0, 10) : d.x}\n${segmented ? `${labels[y] ?? y}: ` : ""}${d.value == null ? "No data" : d.value}`;
@@ -418,7 +422,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       const marginRight = f.showY ? 54 : 12;
       const primaryTick = fitTicks(data.flatMap(d => dual.primary.map(m => numericValue(d[m])).filter((v): v is number => v !== null)), dualTick(dual.primary));
       const fig = Plot.plot({ ...common, y: { ...common.y, tickFormat: primaryTick }, marginRight, caption: dualCaption(dual),
-        color: { ...common.color, legend },
+        color: { ...metricColors, legend },
         marks: [...(fitted ? [] : [Plot.ruleY([0])]),
           Plot.line(tidyDual, { x: "x", y: "value", stroke: "series", curve: "monotone-x" }),
           Plot.dot(tidyDual, { x: "x", y: "value", stroke: "series", r: 1.6 })] });
@@ -471,11 +475,12 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
         x: { label: f.xTitle, axis: f.showX ? "bottom" : null, domain: xDomain, tickFormat: axisLabel,
              tickRotate: rotated ? -35 : 0, ...bandDates(xDomain, box.w - Math.max(62, Math.ceil(labelWidth * .82) + 8) - marginRight) },
         y: { label: f.yTitle, axis: f.showY ? "left" : null, grid: f.grid, nice: true, tickFormat: dual ? dualTick(dual.primary) : tick },
+        color: { ...metricColors, legend },
         marks: [
           Plot.ruleY([0]),
-          Plot.barY(barRows, { x: "x", y: "value", fill: palette[0], fillOpacity: 0.85 }),
-          Plot.line(lineRows, { x: "x", y: "value", stroke: palette[1], strokeWidth: 2, curve: "monotone-x" }),
-          Plot.dot(lineRows, { x: "x", y: "value", fill: palette[1], r: 2 }),
+          Plot.barY(barRows, { x: "x", y: "value", fill: () => barMeasure, fillOpacity: 0.85 }),
+          Plot.line(lineRows, { x: "x", y: "value", stroke: () => lineMeasure, strokeWidth: 2, curve: "monotone-x" }),
+          Plot.dot(lineRows, { x: "x", y: "value", fill: () => lineMeasure, r: 2 }),
         ] });
       return dual && f.showY ? addSecondaryAxis(fig, dual, dualTick(dual.secondary), marginRight, box.w) : fig;
     }
@@ -484,8 +489,8 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
         // Explicit boundaries avoid areaY's default stacking, which treats
         // missing measures as empty layers. Retaining the rows breaks both
         // paths at unavailable observations instead of connecting over them.
-        marks: [Plot.area(data, { x1: x, x2: x, y1: 0, y2: y, fill: palette[0], fillOpacity: 0.18 }),
-          Plot.line(data, { x, y, stroke: palette[0], curve: "monotone-x" }), Plot.ruleY([0])] });
+        marks: [Plot.area(data, { x1: x, x2: x, y1: 0, y2: y, fill: metricColor(y), fillOpacity: 0.18 }),
+          Plot.line(data, { x, y, stroke: metricColor(y), curve: "monotone-x" }), Plot.ruleY([0])] });
     }
     case "areaStacked": {
       // A missing component is an unknown total, not an empty/zero layer.
@@ -496,9 +501,9 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
     case "bar": {
       if (!dims.length) {
         const values = measures.map(m => ({ series: m, value: data[0]?.[m] }));
-        return Plot.plot({ ...common, x: { type: "band", label: f.xTitle, axis: f.showX ? "bottom" : null,
+        return Plot.plot({ ...common, color: metricColors, x: { type: "band", label: f.xTitle, axis: f.showX ? "bottom" : null,
           domain: measures, tickFormat: (m: string) => labels[m] ?? m },
-          marks: [Plot.barY(values, { x: "series", y: "value", fillOpacity: 0.75 }), Plot.ruleY([0])] });
+          marks: [Plot.barY(values, { x: "series", y: "value", fill: "series", fillOpacity: 0.75 }), Plot.ruleY([0])] });
       }
       // Values remain unique even when abbreviated date labels coincide.
       const key = (v: any) => v instanceof Date ? v.toISOString() : v;
@@ -509,7 +514,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
           x: { type: "band", axis: null },
           fx: { label: f.xTitle, domain: [...new Set(rows.map(d => d[x]))], ...bandDates([...new Set(rows.map(d => d[x]))]), axis: f.showX ? "bottom" : null },
           marginBottom: f.showX ? 58 : 12,
-          color: { ...common.color, legend },
+          color: { ...metricColors, legend },
           marks: [Plot.barY(grouped, { x: "series", y: "value", fx: "bucket", fill: "series" }), Plot.ruleY([0])] });
       }
       const series = dims[1];
@@ -524,7 +529,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
           domain: [...new Set(rows.map(d => d[x]))], ...bandDates([...new Set(rows.map(d => d[x]))]) },
         marginBottom: f.showX && temporalX ? 58 : common.marginBottom,
         color: { ...common.color, legend: legend && !!series },
-        marks: [Plot.barY(rows, { x, y, fill: series ?? palette[0], fillOpacity: 0.75 }), Plot.ruleY([0])] });
+        marks: [Plot.barY(rows, { x, y, fill: series ?? metricColor(y), fillOpacity: 0.75 }), Plot.ruleY([0])] });
     }
     case "waterfall": {
       // Bridges from 0 through a sequence of named, signed deltas to a
@@ -661,7 +666,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
         style: { background: "transparent", fontSize: "11px" },
         x: { label: f.xTitle, axis: f.showX ? "bottom" : null, grid: f.grid, domain: [start, end], ticks, tickFormat: tick },
         y: { label: f.yTitle, axis: f.showY ? "left" : null },
-        marks: [Plot.barX(data, { y: x, x: y, fill: palette[0], fillOpacity: 0.85,
+        marks: [Plot.barX(data, { y: x, x: y, fill: metricColor(y), fillOpacity: 0.85,
                                   sort: { y: "-x" } }), Plot.ruleX([0])],
       });
     }

@@ -1,0 +1,46 @@
+import { expect, test, type Locator } from "@playwright/test";
+
+const markColor = (chart: Locator, label: string) => chart.locator('g[aria-label="bar"] rect').filter({ has: chart.page().locator("title", { hasText: label }) }).first().evaluate(el => getComputedStyle(el).fill);
+
+test("metric colors survive chart subsets, chart types, presentation modes and selected exports", async ({ page }, info) => {
+  const title = `Metric colors ${crypto.randomUUID()}`;
+  const kinds = ["barGrouped", "barGrouped", "combo", "area"] as const;
+  const names = ["All movements", "Plan comparison", "Combined view", "New business trend"];
+  await page.route("**/api/query", route => {
+    const q = route.request().postDataJSON(), tiers = q.dimensions[0]?.includes("plan_tier");
+    return route.fulfill({ json: { columns: [tiers ? "plan_tier" : "movement_date_month", ...q.metrics],
+      rows: (tiers ? ["business", "team"] : ["2026-07-01", "2026-08-01"]).map((bucket, i) => [bucket, ...q.metrics.map((m: string) => ({ new_mrr: 100, expansion_mrr: 80, churned_mrr: 20 })[m]!* (i + 1))]), ms: 1 } });
+  });
+  const saved = await page.request.post("/api/dashboards", { data: { id: crypto.randomUUID(),
+    canvas: { width: 1400, height: 1000, preset: "custom", snap: true, grid: 8, locked: false },
+    spec: { title, tiles: kinds.map((chart, i) => ({ id: `chart-${i}`, title: names[i], chart,
+      metrics: i === 0 ? ["new_mrr", "expansion_mrr", "churned_mrr"] : i === 3 ? ["new_mrr"] : ["expansion_mrr", "new_mrr"],
+      dimensions: [i === 1 ? "dim_plans.plan_tier" : "month:fct_mrr_movements.movement_date"],
+      layout: { x: 24 + (i % 2) * 680, y: 24 + Math.floor(i / 2) * 400, w: 650, h: 370 } })) } } });
+  expect(saved.ok(), await saved.text()).toBe(true);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open saved dashboard", exact: true }).click();
+  await page.getByRole("dialog", { name: "Saved dashboards" }).getByRole("button", { name: title, exact: false }).click();
+  const colorChecks = async (tile: (i: number) => Locator) => {
+    await expect.poll(() => markColor(tile(0), "New MRR (USD)")).toBe("rgb(177, 132, 66)");
+    expect(await markColor(tile(1), "New MRR (USD)")).toBe("rgb(177, 132, 66)");
+    expect(await markColor(tile(0), "Expansion MRR (USD)")).toBe(await markColor(tile(1), "Expansion MRR (USD)"));
+    expect(await tile(2).locator('g[aria-label="line"] path').first().evaluate(el => getComputedStyle(el).stroke)).toBe("rgb(177, 132, 66)");
+    expect(await tile(3).locator('g[aria-label="line"] path').first().evaluate(el => getComputedStyle(el).stroke)).toBe("rgb(177, 132, 66)");
+  };
+  await colorChecks(i => page.locator(".node").filter({ has: page.getByText(names[i], { exact: true }) }));
+  await page.getByRole("button", { name: "Review and share", exact: true }).click();
+  const review = page.getByRole("dialog", { name: "Review and share" });
+  for (const mode of ["Story", "Infographic"]) {
+    await review.getByRole("button", { name: mode, exact: true }).click();
+    await expect(review.getByRole("button", { name: `Export ${mode.toLowerCase()} as PNG` })).toBeEnabled();
+    await colorChecks(i => review.locator(`[data-report-tile="chart-${i}"]`));
+  }
+  await review.getByRole("checkbox", { name: "All movements", exact: true }).uncheck();
+  await expect(review.locator('[data-report-tile="chart-0"]')).toHaveCount(0);
+  expect(await markColor(review.locator('[data-report-tile="chart-1"]'), "New MRR (USD)")).toBe("rgb(177, 132, 66)");
+  await review.getByRole("button", { name: "Expand presentation", exact: true }).click();
+  const download = page.waitForEvent("download");
+  await review.getByRole("button", { name: "Export infographic as PNG" }).click();
+  await (await download).saveAs(info.outputPath("consistent-metric-colors.png"));
+});

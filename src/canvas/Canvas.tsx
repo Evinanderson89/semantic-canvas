@@ -1,3 +1,4 @@
+import { MetricColorProvider } from "../charts/MetricColors.tsx";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { TileSpec } from "../compiler/spec.ts";
 import type { CanvasSpec } from "./presets.ts";
@@ -197,7 +198,7 @@ export function Canvas({
   }, [selected, tiles, canvas, onChange, onCommit, onSelect]);
 
   return (
-    <div className="canvas-scroll" ref={scrollRef}>
+    <MetricColorProvider tiles={tiles}><div className="canvas-scroll" ref={scrollRef}>
       <div className="canvas-stage" style={{ width: canvas.width * zoom, height: canvas.height * zoom }}>
         <div ref={surface} className={"canvas-surface" + (canvas.locked ? " locked" : "")}
              style={{ width: canvas.width, height: canvas.height,
@@ -241,7 +242,7 @@ export function Canvas({
           ))}
         </div>
       </div>
-    </div>
+    </div></MetricColorProvider>
   );
 }
 
