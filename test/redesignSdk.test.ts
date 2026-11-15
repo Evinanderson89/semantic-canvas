@@ -230,3 +230,37 @@ it("returns computed substitutions to the actual SDK before the assistant explai
   expect(result.text).toContain("Revenue is replaced by ARPU");
   expect(active).toEqual(before);
 });
+
+it("teaches a cross-base correction that retains both intended metrics on separate charts", async () => {
+  const mixed = { ...valid, actions: [
+    { type: "query", id: "revenue", metrics: ["revenue", "users"], dimensions: ["month:sold_on"] },
+    { type: "chart", id: "revenue", chart: "combo" },
+  ] };
+  const corrected = { ...valid, actions: [...valid.actions, { type: "add", tile: {
+    id: "users", kind: "metric", title: "Users", metrics: ["users"], dimensions: [], chart: "kpi", compare: "none",
+    section: null, where: [], limit: 500, layout: { x: 24, y: 400, w: 400, h: 200 }, format: { number: "plain", palette: "default" },
+  } }] };
+  const requests = provider([mixed, { endText: "Ready." }, corrected]);
+  const before = structuredClone(active);
+  const result = await run();
+  const feedback = JSON.stringify(requests[2].messages);
+  expect(feedback).toContain("Split this tile into separate charts by base table");
+  expect(feedback).toContain("preserving the intended metrics");
+  expect(feedback).toContain("Selected metric groups");
+  expect(feedback).toContain("fct_sales"); expect(feedback).toContain("dim_users");
+  expect(result.proposal).toEqual(corrected);
+  expect(active).toEqual(before);
+});
+
+it("supplies compatibility groups in both phases without exposing unreviewed metrics", async () => {
+  const requests = provider([invalid, { endText: "Ready." }, valid]);
+  const scopedModel = structuredClone(model);
+  scopedModel.metrics.unreviewed_secret = { ...scopedModel.metrics.revenue, name: "unreviewed_secret", reviewed: false };
+  await chat({ provider: "anthropic", model: "synthetic-model", apiKey: "synthetic-test-key" }, [], "Improve", {}, { ...active, model: scopedModel }, undefined, "redesign");
+  for (const request of [requests[0], requests[2]]) {
+    expect(request.system).toContain("Metric compatibility groups from the reviewed catalog");
+    expect(request.system).toContain('"dim_users":["users"]');
+    expect(request.system).toContain("A shared month grain or a join path does not make metrics from different base tables compatible");
+    expect(request.system).not.toContain("unreviewed_secret");
+  }
+});

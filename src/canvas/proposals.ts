@@ -86,8 +86,14 @@ export function applyProposal(spec: DashboardSpec, canvas: CanvasSpec, raw: unkn
   ] }));
   const issues = validateDashboard(model, next);
   if (issues.length) throw new Error(issues.map(i => {
-    const correction = i.problem === "period comparison requires a time dimension"
+    let correction = i.problem === "period comparison requires a time dimension"
       ? ' Use a governed time dimension (grain:date_field) for a period KPI, or compare:"none" for an aggregate. Do not invent a date field or silently change the reporting scope.' : "";
+    if (i.problem.startsWith("metrics span ")) {
+      const selected = next.tiles.find(tile => tile.id === i.tile)?.metrics ?? [];
+      const groups = Object.fromEntries([...new Set(selected.map(name => metricOf(model, name)?.baseTable).filter(Boolean))]
+        .map(table => [table, selected.filter(name => metricOf(model, name)?.baseTable === table)]));
+      correction = ` Split this tile into separate charts by base table, preserving the intended metrics. Shared dates do not permit combining base tables. Selected metric groups: ${JSON.stringify(groups)}.`;
+    }
     return `Tile ${i.tile}: ${i.problem}.${correction}`;
   }).join("; "));
   // Validate the final combination, not intermediate action order. Leave an
