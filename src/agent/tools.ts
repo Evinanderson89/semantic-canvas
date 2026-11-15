@@ -112,7 +112,7 @@ export const TOOLS: ToolSpec[] = [
   },
   {
     name: "query_metric",
-    description: 'Run a governed query -- compiled and row-level-secured the same way the UI\'s charts are. Dimensions use "grain:column" for a time bucket (e.g. "month:event_date") or "table.column" for a joined field. The evidence object supplies metric units, bucket-start meanings, calculated observations and returned-row quality findings. Use it alongside the raw values, warnings and partial coverage metadata before writing a conclusion; a ratio can have unequal input dates even when its displayed value looks stable. A withheld observation is not evidence of no change.',
+    description: 'Run a governed query -- compiled and row-level-secured the same way the UI\'s charts are. Dimensions use "grain:column" for a time bucket (e.g. "month:event_date") or "table.column" for a joined field. The evidence object supplies metric definitions and component filters alongside units, bucket-start meanings, calculated observations and returned-row quality findings. Shared tables or periods do not prove matching populations: inspect the definitions before attributing one metric to another metric\'s customers, deriving a per-customer relationship, or describing a contribution. Use it alongside the raw values, warnings and partial coverage metadata before writing a conclusion; a ratio can have unequal input dates even when its displayed value looks stable. A withheld observation is not evidence of no change.',
     inputSchema: {
       metrics: z.array(z.string()).min(1),
       dimensions: z.array(z.string()).optional(),

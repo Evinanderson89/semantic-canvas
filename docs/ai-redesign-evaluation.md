@@ -23,6 +23,8 @@ Both sets of queries run against the current bundled sample and model. They are 
 
 Review every factual claim against its exact metric, dates, filters and returned values. An excluded partial edge bucket is absent from the returned trend; it does not make the first displayed month partial. A low value does not establish a cause or missing source data. An all-time scalar need not reconcile with a trend that excludes edge periods. Captions must describe the actual chart type.
 
+Check relationships between metrics as well as their individual values. Shared tables and reporting periods do not establish matching populations. For example, a net-new MRR total includes existing-customer movements; writing that it came from a count of new customers is unsupported even when both figures are correct. Inspect the governed expressions, filters and component definitions. When a relationship is unverified, report the totals separately rather than imply attribution or compute a per-customer value.
+
 Inspect the rendered before/after at desktop and narrow widths, then Story and Infographic. The preview lists metrics that are no longer shown, including when an existing tile was repurposed instead of removed. A metric retained on another chart is not listed as removed; detailed per-tile changes still identify its replacement on the original chart. Assess reading order, usable chart sizes, preserved authored content, and whether the result answers the stated business question. Keep human decisions with supporting evidence in a separate review artifact; do not modify the captured provider response.
 
 ## Fresh live evaluation
@@ -36,6 +38,8 @@ This unrestricted synthetic evaluation does not replace company-mode authorizati
 ## Redesign tool contract
 
 The shared `query_metric` tool requests `/api/query?evidence=1`. Alongside the unchanged governed query result, it receives metric labels and declared/inferred units, explicit time-bucket start meanings, the reporting calendar, calculated observations and returned-row data findings. Evidence is computed after access rules, partial-period handling and limit-probe removal, from the same finalized rows returned to the caller. The catalog metadata used for evidence respects the caller's role. A reporting calendar or pinned sample clock is not a freshness guarantee.
+
+Each selected metric also carries its authored definition: type, expression, standalone filter, description, base table and declared table grain. Computed metrics include their referenced inputs' definitions and filters. This preserves `FILTER` and `CASE` conditions verbatim; a null standalone filter does not mean the expression covers every row. The evidence does not parse SQL into a certified population, execute another query, or establish a relationship between totals. Query filters and row-level policies still apply. These definitions are available to the embedded agent and both MCP clients, while ordinary chart responses remain unchanged.
 
 Limited results and incompatible ratio input periods withhold automatic observations and explain why. Missing latest values remain unavailable. Observations are calculated locally with the same helpers as report drafting; they do not verify arbitrary AI prose or establish causes. Claude and ChatGPT MCP clients receive this same tool result. Ordinary chart queries omit the additional evidence object.
 

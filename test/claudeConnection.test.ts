@@ -84,6 +84,27 @@ it("adds evidence only on request, using exactly the finalized scoped rows and l
   expect(withEvidence.evidence.observationNote).toContain("limited");
 });
 
+it("returns population definitions beside real movement totals without changing their values or scope", async () => {
+  const request = { metrics: ["new_mrr", "net_new_mrr", "new_paying_customers"], dimensions: [] };
+  const options = { method: "POST", headers: { "content-type": "application/json", "x-sc-source": "sample", "x-sc-principal": "admin" }, body: JSON.stringify(request) };
+  const plainResponse = await fetch(url + "/api/query", options);
+  const enrichedResponse = await fetch(url + "/api/query?evidence=1", options);
+  expect(plainResponse.status).toBe(200); expect(enrichedResponse.status).toBe(200);
+  const plain = await plainResponse.json(), enriched = await enrichedResponse.json();
+  expect(enriched.rows).toEqual(plain.rows);
+  expect(enriched.sql).toBe(plain.sql);
+  expect(enriched.principal).toBe(plain.principal);
+  const [newMrr, netNew, newCustomers] = enriched.evidence.metrics.map((m: any) => m.definition);
+  expect(newMrr.expression).toContain("movement_type = 'new'");
+  expect(newCustomers.expression).toContain("movement_type = 'new'");
+  expect(netNew.expression).toBe("SUM(fct_mrr_movements.mrr_delta_usd)");
+  expect(netNew.description).toContain("minus contraction and churn");
+  expect(new Set([newMrr.baseTable, netNew.baseTable, newCustomers.baseTable]).size).toBe(1);
+  expect(enriched.rows[0][0]).toBeCloseTo(186313.38, 2);
+  expect(enriched.rows[0][1]).toBeCloseTo(202787.46, 2);
+  expect(enriched.rows[0][2]).toBe(7851);
+});
+
 it("checks ChatGPT's scoped tools without claiming a remote connection or exposing another principal", async () => {
   const params = "source=sample&principal=emea&access=explore";
   const before = await (await fetch(url + "/api/dashboards")).json();
@@ -125,6 +146,7 @@ for (const access of ["explore", "build"] as const) it(`ChatGPT ${access} mode e
     const evidence = data(q).evidence;
     expect(evidence.rowsChecked).toBe(countries.length);
     expect(evidence.metrics.map((m: any) => m.name)).toEqual(["new_signups"]);
+    expect(evidence.metrics[0].definition).toMatchObject({ name: "new_signups", baseTable: "dim_users", type: "simple" });
     expect(evidence.observations[0].latest).toBe(Math.max(...data(q).rows.map((r: unknown[]) => Number(r[1]))));
     expect(evidence.observations[0].statement).not.toMatch(/US|CA|AU|BR|IN/);
     const id = "chatgpt-built", spec = { title: "Built from ChatGPT tools", tiles: [{ id: "new-users", title: "New users", metrics: ["new_signups"], dimensions: ["dim_users.country"], chart: "bar", layout: { x: 24, y: 24, w: 600, h: 360 } }] };
@@ -181,6 +203,7 @@ it("uses the generated configuration from another directory to query, save, arra
     expect(query.rows.length).toBeGreaterThan(1);
     expect(query.evidence.timeDimensions).toEqual([{ dimension: "month:movement_date", resultColumn: "movement_date_month", grain: "month", dateMeaning: "Start of the month bucket, not its end." }]);
     expect(query.evidence.metrics[0]).toMatchObject({ name: "new_mrr", unit: "currency", unitSource: "declared" });
+    expect(query.evidence.metrics[0].definition.expression).toContain("movement_type = 'new'");
     expect(query.evidence.observations[0].basis).toContain("month bucket starting");
     const invalid = await client.callTool({ name: "query_metric", arguments: { metrics: ["invented_metric"], source: "sample", principal: "admin" } });
     expect(invalid.isError).toBe(true);
