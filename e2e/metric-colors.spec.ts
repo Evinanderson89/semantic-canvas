@@ -44,3 +44,41 @@ test("metric colors survive chart subsets, chart types, presentation modes and s
   await review.getByRole("button", { name: "Export infographic as PNG" }).click();
   await (await download).saveAs(info.outputPath("consistent-metric-colors.png"));
 });
+
+test("new revenue and churn stay visually distinct when unrelated dashboard metrics fill the palette", async ({ page }, info) => {
+  const title = `Extended metric colors ${crypto.randomUUID()}`;
+  const movementMetrics = ["new_mrr", "expansion_mrr", "churned_mrr", "contraction_mrr"];
+  const spec = { title, tiles: [
+    ...[movementMetrics, ["new_mrr", "churned_mrr"]].map((metrics, i) => ({ id: `movement-${i}`, title: i ? "Focused movements" : "All movements", chart: "barGrouped", metrics,
+      dimensions: ["month:fct_mrr_movements.movement_date"], layout: { x: 24 + i * 600, y: 24, w: 580, h: 360 } })),
+    ...["ending_mrr", "nrr", "cac", "ltv_cac_ratio"].map((metric, i) => ({ id: `headline-${i}`, title: metric, chart: "kpi", metrics: [metric],
+      dimensions: ["month:fct_saas_monthly.month"], layout: { x: 24 + i * 300, y: 400, w: 280, h: 200 } })),
+  ] };
+  const response = await page.request.post("/api/dashboards", { data: { id: crypto.randomUUID(), spec,
+    canvas: { width: 1240, height: 650, preset: "custom", snap: true, grid: 8, locked: false } } });
+  expect(response.ok(), await response.text()).toBe(true);
+  await page.goto("/");
+  await page.getByLabel("Acting as", { exact: true }).selectOption("admin");
+  await page.getByRole("button", { name: "Open saved dashboard", exact: true }).click();
+  await page.getByRole("dialog", { name: "Saved dashboards" }).getByRole("button", { name: title, exact: false }).click();
+  const chart = (name: string) => page.locator(".node").filter({ has: page.getByText(name, { exact: true }) });
+  await expect(chart("All movements").locator('g[aria-label="bar"] rect').first()).toBeVisible();
+  const labels = ["New MRR (USD)", "Expansion MRR (USD)", "Churned MRR (USD)", "Contraction MRR (USD)"];
+  const colors = await Promise.all(labels.map(label => markColor(chart("All movements"), label)));
+  expect(new Set(colors).size).toBe(4);
+  expect(await markColor(chart("Focused movements"), labels[0])).toBe(colors[0]);
+  expect(await markColor(chart("Focused movements"), labels[2])).toBe(colors[2]);
+  await page.getByRole("button", { name: "Review and share", exact: true }).click();
+  const review = page.getByRole("dialog", { name: "Review and share" });
+  for (const mode of ["Story", "Infographic"]) {
+    await review.getByRole("button", { name: mode, exact: true }).click();
+    await expect(review.getByRole("button", { name: `Export ${mode.toLowerCase()} as PNG` })).toBeEnabled();
+    const all = review.locator('[data-report-tile="movement-0"]');
+    expect(await Promise.all(labels.map(label => markColor(all, label)))).toEqual(colors);
+  }
+  const download = page.waitForEvent("download");
+  await review.getByRole("button", { name: "Export infographic as PNG" }).click();
+  await (await download).saveAs(info.outputPath("distinct-revenue-movements.png"));
+  await review.getByRole("checkbox", { name: "All movements", exact: true }).uncheck();
+  expect(await markColor(review.locator('[data-report-tile="movement-1"]'), labels[0])).toBe(colors[0]);
+});
