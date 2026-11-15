@@ -24,3 +24,18 @@ it("does not conflate changed counts, missing values, or excluded periods", () =
   expect(notes.map(n => n.number)).toEqual([1, 2, 3]);
   expect(reportFindings([{ ...source, findings: [] }])).toEqual([]);
 });
+
+it("shares repeated scope guidance without claiming that different chart scopes are the same", () => {
+  const partial = { id: "partial", title: "Edge periods were left out", evidence: "The first partial period is excluded.", nextStep: "Check each chart's reporting window." };
+  const first = { ...source, findings: [partial], scope: { metrics: ["new_mrr"], dimensions: ["month:movement_date"], compare: "prior", limit: 24 } };
+  const second = { ...first, id: "trend", title: "Gross additions", scope: { metrics: ["new_mrr", "expansion_mrr"], dimensions: ["month:movement_date"], compare: "none", limit: 36 } };
+  const filtered = { ...second, id: "filtered", title: "Regional additions", scope: { ...second.scope, where: [{ country: "US" }] } };
+  const sources = [first, second, filtered], before = structuredClone(sources);
+  expect(reportFindings(sources)).toEqual([{ finding: partial, number: 1, independentScopes: 3,
+    charts: sources.map(({ id, title }) => ({ id, title })) }]);
+  expect(sources).toEqual(before);
+  // Different excluded edges remain different notes, even with the same ID.
+  expect(reportFindings([first, { ...second, findings: [{ ...partial, evidence: "The last partial period is excluded." }] }])).toHaveLength(2);
+  // Repeated null observations still cannot be combined across these scopes.
+  expect(reportFindings(sources.map(s => ({ ...s, findings: [finding] })))).toHaveLength(3);
+});

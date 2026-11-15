@@ -445,3 +445,32 @@ test("saved brief review survives unchanged queries but flags changed results, s
   await marker.scrollIntoViewIfNeeded();
   await page.screenshot({ path: info.outputPath("brief-review-mobile.png") });
 });
+
+test("scope notes are shared across distinct metrics while chart-specific reporting context remains", async ({ page }, info) => {
+  await open(page, { title: `Shared scope notes ${crypto.randomUUID()}`, tiles:
+    ["new_mrr", "net_new_mrr", "lost_mrr"].map((metric, i) => ({ id: `scope-${i}`, title: metric,
+      metrics: [metric], dimensions: ["month:movement_date"], chart: "kpi" as const, compare: "prior" as const,
+      limit: 24, layout: { x: 24 + i * 340, y: 24, w: 330, h: 200 } })),
+  });
+  await page.getByRole("button", { name: "Review and share", exact: true }).click();
+  const review = page.getByRole("dialog", { name: "Review and share" });
+  for (const mode of ["Story", "Infographic"]) {
+    await review.getByRole("button", { name: mode, exact: true }).click();
+    await expect(review.getByRole("button", { name: `Export ${mode.toLowerCase()} as PNG` })).toBeEnabled();
+    const notes = review.getByRole("complementary", { name: "Presentation data notes" });
+    // Excluded edge periods are reporting-scope guidance, not a data-quality finding.
+    await expect(notes.locator(".scope-note")).toHaveCount(1);
+    await expect(notes.locator(".scope-note .finding-category")).toHaveText("Reporting scope");
+    await expect(notes.locator(".quality-finding")).toHaveCount(0);
+    await expect(notes).toContainText("new_mrr · net_new_mrr · lost_mrr");
+    await expect(notes).toContainText("applies separately to each chart listed");
+    for (let i = 0; i < 3; i++) {
+      const chart = review.locator(`[data-report-tile="scope-${i}"]`);
+      await expect(chart.locator(".report-chart-context")).toContainText("2024-10-01 to 2026-08-01");
+      await chart.getByRole("link", { name: "Data note 1: Edge periods were left out" }).click();
+      await expect(notes.getByRole("region", { name: "Data note 1: Edge periods were left out" })).toBeFocused();
+    }
+    await review.getByRole("article", { name: `${mode} presentation` }).screenshot({ path: info.outputPath(`shared-scope-note-${mode.toLowerCase()}.png`) });
+  }
+  await review.getByRole("complementary", { name: "Presentation data notes" }).screenshot({ path: info.outputPath("shared-scope-note.png") });
+});

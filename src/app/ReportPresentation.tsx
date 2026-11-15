@@ -101,6 +101,7 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
       <h3>Data notes</h3>
       {notes.map(note => <section id={noteId(note.number)} key={note.number} tabIndex={-1} aria-label={`Data note ${note.number}: ${findingTitle(note.finding, model)}`}>
         <p className="report-note-charts"><strong>{note.number}.</strong> {note.charts.map(chart => chart.title).join(" · ")}</p>
+        {note.independentScopes && <p className="report-note-charts">This note applies separately to each chart listed. Each chart retains its own reporting window and filters.</p>}
         <DataFindings findings={[note.finding]} model={model} compact />
       </section>)}
     </aside>}
