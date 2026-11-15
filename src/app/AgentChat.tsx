@@ -11,15 +11,14 @@ interface Turn { role: "user" | "assistant"; text: string }
 
 /**
  * The embedded in-app agent: the AI itself, not just a port for one. Talks
- * to /api/agent/chat (src/agent/loop.ts), which drives the same tool list
- * as the MCP server -- so a clarifying question it asks mid-task shows up
- * as the exact same AgentQuestions prompt an external MCP agent's ask_user
- * would. Only rendered once /api/agent/status confirms an ANTHROPIC_API_KEY
+ * to /api/agent/chat (src/agent/loop.ts). With an active document it reads
+ * governed evidence and proposes edits for review; clarification stays in
+ * the conversation. Only rendered once /api/agent/status confirms an ANTHROPIC_API_KEY
  * is actually configured; otherwise this port just isn't there, same as a
  * data source that never got credentials.
  */
 export function AgentChat({ document, onApply }: {
-  document: { spec: DashboardSpec; canvas: CanvasSpec; selected: string[] } | null;
+  document: { spec: DashboardSpec; canvas: CanvasSpec; selected: string[]; activeTabId?: string } | null;
   onApply: (proposal: CanvasProposal, expected: string) => boolean;
 }) {
   const [available, setAvailable] = useState(false);
@@ -36,6 +35,11 @@ export function AgentChat({ document, onApply }: {
   const current = document ? fingerprint(document.spec, document.canvas) : null;
   const conversationId = useRef(crypto.randomUUID());
   const scrollRef = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const focusInput = () => inputRef.current?.focus({ preventScroll: true });
+  const close = () => { setOpen(false); toggleRef.current?.focus(); };
+  useEffect(() => { if (open && available) focusInput(); }, [open, available]);
 
   // Polled, not fetched once -- the key can be added or removed from
   // Connections while this panel is already mounted, and the toggle should
@@ -59,6 +63,7 @@ export function AgentChat({ document, onApply }: {
   const send = (requested?: string) => {
     const message = (requested ?? input).trim();
     if (!message || busy) return;
+    focusInput();
     setTurns((t) => [...t, { role: "user", text: message }]);
     setInput("");
     setBusy(true); setNextStep(false);
@@ -79,19 +84,20 @@ export function AgentChat({ document, onApply }: {
 
   return (
     <>
-      <button className="agent-chat-toggle" onClick={() => setOpen((v) => !v)}
-              title="Ask the agent to build or curate a dashboard" aria-label="Open agent chat">
+      <button ref={toggleRef} className="agent-chat-toggle" onClick={() => open ? close() : setOpen(true)}
+              title="Ask the agent to build or curate a dashboard" aria-label={open ? "Close agent chat" : "Open agent chat"} aria-expanded={open} aria-controls="canvas-assistant-panel">
         <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7">
           <path d="M10 2v16M10 6l5-2M10 12l-5 2" strokeLinecap="round" />
         </svg>
       </button>
       {open && (
-        <div className="agent-chat-panel">
+        <div className="agent-chat-panel" id="canvas-assistant-panel" role="region" aria-label="Canvas assistant"
+          onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); close(); } }}>
           <header>
             <span>Canvas assistant</span>
-            <button className="icon" onClick={() => setOpen(false)} aria-label="Close">✕</button>
+            <button className="icon" onClick={close} aria-label="Close">✕</button>
           </header>
-          <div className="agent-chat-log" ref={scrollRef}>
+          <div className="agent-chat-log" ref={scrollRef} role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text" aria-busy={busy}>
             {turns.length === 0 && !busy && (
               <p className="agent-chat-empty">Ask for a clearer story, a different chart, or a better layout. The assistant sees your current unsaved canvas. You review changes before applying them.</p>
             )}
@@ -103,16 +109,16 @@ export function AgentChat({ document, onApply }: {
               <div className="eyebrow">PROPOSED CHANGES</div><h3>{pending.proposal.title}</h3><p>{pending.proposal.reason}</p>
               <ol>{pending.proposal.actions.map((action, i) => <li key={i}>{describeAction(action, document?.spec)}</li>)}</ol>
               {pending.expected !== current ? <p role="status">Your document changed. Ask for a fresh proposal to keep your latest edits.</p> : <p>Applies to your current canvas. One undo restores the previous version.</p>}
-              <div className="story-actions"><button className="primary" disabled={pending.expected !== current} onClick={() => { if (onApply(pending.proposal, pending.expected)) { choices.current = rememberDecision(choices.current, { key: JSON.stringify(pending.proposal.actions).slice(0,4000), label: pending.proposal.title, status: "applied" }); setTurns(t => [...t, { role: "assistant", text: "Changes applied. Continue with the updated canvas, or undo to restore the previous version." }]); setPending(null); setNextStep(true); } }}>Apply changes</button><button onClick={() => { choices.current = rememberDecision(choices.current, { key: JSON.stringify(pending.proposal.actions).slice(0,4000), label: pending.proposal.title, status: "dismissed" }); setPending(null); setNextStep(true); }}>Dismiss</button></div>
+              <div className="story-actions"><button className="primary" disabled={pending.expected !== current} onClick={() => { if (onApply(pending.proposal, pending.expected)) { choices.current = rememberDecision(choices.current, { key: JSON.stringify(pending.proposal.actions).slice(0,4000), label: pending.proposal.title, status: "applied" }); setTurns(t => [...t, { role: "assistant", text: "Changes applied. Continue with the updated canvas, or undo to restore the previous version." }]); setPending(null); setNextStep(true); focusInput(); } }}>Apply changes</button><button onClick={() => { choices.current = rememberDecision(choices.current, { key: JSON.stringify(pending.proposal.actions).slice(0,4000), label: pending.proposal.title, status: "dismissed" }); setPending(null); setNextStep(true); focusInput(); }}>Dismiss</button></div>
             </div>}
             {!busy && !pending && document && <div className="agent-next-steps"><p>{nextStep ? "What would make this version more useful?" : "Choose a direction, or describe your goal below."}</p>{reviewGoals.map(item => <button className="tgl" key={item.label} onClick={() => send(item.goal)}>{item.label}</button>)}</div>}
-            {error && <div className="agent-chat-msg error">{error}</div>}
+            {error && <div className="agent-chat-msg error" role="alert">{error}</div>}
           </div>
           <div className="agent-chat-input">
-            <textarea rows={2} value={input} placeholder="Message the agent…" disabled={busy}
+            <textarea ref={inputRef} aria-label="Message the agent" rows={2} value={input} placeholder="Message the agent…" readOnly={busy}
                       onChange={(e) => setInput(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
-            {busy ? <button onClick={() => request.current?.abort()}>Stop</button> : <button className="primary" disabled={!input.trim()} onClick={() => send()}>Send</button>}
+            {busy ? <button onClick={() => { request.current?.abort(); focusInput(); }}>Stop</button> : <button className="primary" disabled={!input.trim()} onClick={() => send()}>Send</button>}
           </div>
         </div>
       )}
@@ -124,6 +130,7 @@ export function describeAction(action: CanvasProposal["actions"][number], docume
   const label = (id: string) => { const tile = document?.tiles.find(t => t.id === id); return tile?.title ?? tile?.text ?? tile?.metrics.join(", ") ?? id; };
   switch (action.type) {
     case "rename": return `Dashboard title: ${action.title}`;
+    case "describe": return action.description ? `Dashboard description: ${action.description}` : "Clear the dashboard description";
     case "title": return `Rename “${label(action.id)}” to “${action.title}”`;
     case "note": return `Text in “${label(action.id)}”: ${action.text}`;
     case "chart": return `Show “${label(action.id)}” as ${action.chart}`;

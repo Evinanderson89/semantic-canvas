@@ -11,10 +11,9 @@ test("the cleanup example has real review fixes and can be arranged into a clean
   await examples.click();
   const example = page.getByRole("button", { name: "Starter: Dashboard cleanup demo", exact: true });
   await expect(example).toHaveCount(1);
-  await expect(page.getByRole("button", { name: /Try the design playground/ })).toHaveCount(0);
-  await openStarter(page, "Dashboard cleanup demo");
+  await expect(page.getByRole("button", { name: /Try the design playground/ })).toBeVisible();
+  await page.getByRole("button", { name: /Try the design playground/ }).click();
   await page.getByLabel("Acting as", { exact: true }).selectOption("admin");
-  await expect(example).toHaveAttribute("aria-current", "page");
   await expect(page.locator(".node")).toHaveCount(6);
   const hasOverlap = () => page.locator(".node").evaluateAll(nodes => {
     const boxes = nodes.map(n => n.getBoundingClientRect());
@@ -26,12 +25,16 @@ test("the cleanup example has real review fixes and can be arranged into a clean
   await expect(page.locator(".review-coverage")).toContainText("6 charts reviewed");
   await expect(page.getByRole("button", { name: "Switch to week", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Show over time", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Use Country map", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Use Waterfall", exact: true })).toBeVisible();
   const weekly = page.waitForResponse(r => r.url().endsWith("/api/query") && r.request().postDataJSON()?.dimensions?.includes("week:fct_web_sessions.session_date"));
   await page.getByRole("button", { name: "Switch to week", exact: true }).click();
   expect((await weekly).ok()).toBe(true);
   const trend = page.waitForResponse(r => r.url().endsWith("/api/query") && r.request().postDataJSON()?.metrics?.includes("new_mrr") && r.request().postDataJSON()?.dimensions?.some((d: string) => d.startsWith("month:")));
   await page.getByRole("button", { name: "Show over time", exact: true }).click();
   expect((await trend).ok()).toBe(true);
+  await expect(page.locator(".review-coverage")).toContainText("6 charts reviewed");
+  await expect(page.getByRole("button", { name: "Switch to month", exact: true })).toHaveCount(0);
   await page.locator(".dash-beautify-pop").getByRole("button", { name: "Close", exact: true }).click();
 
   await page.getByRole("button", { name: "Smart arrange", exact: true }).click();

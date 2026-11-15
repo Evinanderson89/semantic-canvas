@@ -1,6 +1,7 @@
 import type { FilterSpec, TileSpec } from "../compiler/spec.ts";
 import { parseDimension } from "../compiler/compile.ts";
-import { metricOf, isTemporal, type Model } from "../semantic/model.ts";
+import { metricOf, metricComponents, nativePeriod, type Model } from "../semantic/model.ts";
+import { isCalendarDate } from "../semantic/calendar.ts";
 
 /**
  * Data-honesty rules (docs/data-honesty-review.md): the ways a time series
@@ -54,11 +55,13 @@ const DAY = 86_400_000;
 
 /** A date at UTC midnight from a result value ("2026-08-24", a Date, or a timestamp). */
 export function toUtcDay(v: unknown): Date | null {
-  if (v === null || v === undefined) return null;
-  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : new Date(Date.UTC(v.getUTCFullYear(), v.getUTCMonth(), v.getUTCDate()));
-  const m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return null;
-  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  if (v instanceof Date) {
+    if (!Number.isFinite(v.getTime())) return null;
+    const day = new Date(v); day.setUTCHours(0, 0, 0, 0); return day;
+  }
+  if (typeof v !== "string") return null;
+  const day = /^(\d{4}-\d{2}-\d{2})(?:$|[T ])/.exec(v)?.[1];
+  return isCalendarDate(day) ? new Date(`${day}T00:00:00Z`) : null;
 }
 
 /** The first day after a bucket that starts on `start` at `grain`. */
@@ -183,9 +186,12 @@ export function labelTile(tile: TileSpec, baseTitle: string, fix: Extract<Honest
   return { ...tile, title: `${clean} (${word} ${sayDate(fix.date, today)})` };
 }
 
-/** The filter an "exclude future" fix adds: everything through today. */
+/** Exclude tomorrow onward. Using exclusion preserves observed-edge checks;
+ * removing invalid future rows does not declare the newest period complete.
+ * A half-open next-day boundary also keeps every timestamp during today. */
 export function futureFilter(tileId: string, fix: Extract<HonestyFix, { kind: "exclude-future" }>): FilterSpec {
-  return { id: `honesty:${tileId}:through-today`, field: fix.field, source: "dimension", mode: "range", max: fix.through };
+  return { id: `honesty:${tileId}:through-today`, field: fix.field, source: "dimension", mode: "range",
+    min: iso(addDays(new Date(`${fix.through}T00:00:00Z`), 1)), exclude: true };
 }
 
 /** The filter an "exclude unsettled" fix adds; replaces an earlier one of its own. */
@@ -199,9 +205,7 @@ export function isPeriodKeyed(model: Model, tile: TileSpec, timeDimension: strin
   const metric = metricOf(model, tile.metrics[0]);
   if (!grain || !metric) return false;
   const owner = table ?? metric.baseTable;
-  const tbl = model.tables[owner];
-  const pk = tbl?.primaryKey ? tbl.columns.find((c) => c.name === tbl.primaryKey) : undefined;
-  const native = tile.metrics.some((m) => metricOf(model, m)?.timeGrains?.includes(grain as never));
-  return native || (!!pk && isTemporal(pk) && pk.name === column);
+  const metrics = tile.metrics.flatMap(name => { const m = metricOf(model, name); return m ? metricComponents(model, m) : []; });
+  return nativePeriod(model, owner, column, grain, metrics);
 }
 

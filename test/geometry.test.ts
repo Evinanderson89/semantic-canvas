@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { arrange, boundsOf, overlaps } from "../src/canvas/geometry.ts";
+import { arrange, boundsOf, overlaps, reorderLayers } from "../src/canvas/geometry.ts";
 
 const box = (id: string, x: number, y: number, w: number, h: number) => ({ id, layout: { x, y, w, h } });
 
@@ -114,9 +114,21 @@ describe("arrange", () => {
 
 describe("boundsOf", () => {
   it("still works after arrange -- packed content starts at the pad", () => {
+    expect(boundsOf([])).toEqual({ x: 0, y: 0, w: 0, h: 0 });
     const out = arrange([box("a", 400, 300, 300, 150), box("b", 0, 0, 300, 150)], 900);
     const b = boundsOf(out.map((o) => o.layout));
     expect(b.x).toBe(24);
     expect(b.y).toBe(24);
   });
+});
+
+it("repeated layering keeps every tile above the canvas and preserves selected and unselected relative order", () => {
+  const original = [box("a", 0, 0, 100, 100), box("b", 20, 20, 100, 100), box("c", 40, 40, 100, 100), box("d", 60, 60, 100, 100)];
+  let items = original;
+  for (let i = 0; i < 100; i++) items = reorderLayers(items, ["b", "d"], "back");
+  const ordered = [...items].sort((a, b) => (a.layout as any).z - (b.layout as any).z);
+  expect(ordered.map(t => t.id)).toEqual(["b", "d", "a", "c"]);
+  expect(ordered.map(t => (t.layout as any).z)).toEqual([1, 2, 3, 4]);
+  expect(items.map(t => { const { z: _, ...layout } = t.layout as any; return layout; })).toEqual(original.map(t => t.layout));
+  expect(reorderLayers(items, ["b", "d"], "front").map(t => (t.layout as any).z)).toEqual([1, 3, 2, 4]);
 });

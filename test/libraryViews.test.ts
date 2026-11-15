@@ -20,8 +20,10 @@ it("captures a selected section with labels and only its own filter bindings", (
 });
 it("inserts independent copies without moving existing tiles or widening filter scope", () => {
   const source = book(), saved = captureView(source, DEFAULT_CANVAS, "one", [], "View");
+  const before = structuredClone(source);
   const next = insertView(source, DEFAULT_CANVAS, "two", saved.spec, model);
-  expect(next.spec.tiles.slice(0, 3)).toEqual(source.tiles);
+  expect(source).toEqual(before);
+  expect(next.spec.tiles.slice(0, 3)).toEqual(before.tiles);
   const [heading, chart] = next.spec.tiles.slice(3); expect(chart.section).toBe(heading.id); expect(chart.id).not.toBe("chart");
   expect(chart.tabId).toBe("two"); expect(heading.layout.y).toBeGreaterThan(100);
   expect(next.spec.filters![1].id).not.toBe("country"); expect(next.spec.filters![1].bindings[0].tileId).toBe(chart.id);

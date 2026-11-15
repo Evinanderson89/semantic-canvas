@@ -1,7 +1,6 @@
 /**
- * Export: a tile's rows as CSV, or a tile/the whole canvas as a PNG. Both
- * are pure client-side -- the data is already on screen (state.rows), and a
- * PNG is a snapshot of the rendered DOM, so neither needs a server round trip.
+ * Export returned rows as typed Excel or raw CSV, or a rendered view as PNG.
+ * Files are produced client-side from the current query snapshot or DOM.
  */
 
 /** RFC 4180: quote a field only when it needs it, double embedded quotes. */
@@ -37,9 +36,18 @@ export function downloadCsv(filename: string, columns: string[], rows: unknown[]
   downloadBlob(filename, new Blob([toCsv(columns, rows)], { type: "text/csv;charset=utf-8" }));
 }
 
+/** Load workbook code only when requested. Superseded results cannot download
+ * after the asynchronous module load or compression completes. */
+export async function downloadSpreadsheet(filename: string, columns: string[], rows: unknown[][], context: [string, unknown][], signal: AbortSignal) {
+  const { toSpreadsheet } = await import("./spreadsheetExport.ts");
+  if (signal.aborted) return;
+  const blob = await toSpreadsheet(columns, rows, context);
+  if (!signal.aborted) downloadBlob(filename, blob);
+}
+
 /** Snapshots `el` to a PNG and downloads it. Dynamically imports
  *  html-to-image so it's never in the bundle for anyone who never exports. */
-export async function downloadPng(filename: string, el: HTMLElement) {
+export async function downloadPng(filename: string, el: HTMLElement, options: { hideControls?: boolean } = {}) {
   const { toBlob } = await import("html-to-image");
   // html-to-image has no timeout of its own -- if font/resource embedding
   // gets stuck on something (a slow or blocked network fetch, an
@@ -52,6 +60,13 @@ export async function downloadPng(filename: string, el: HTMLElement) {
       backgroundColor: getComputedStyle(el).backgroundColor || "#ffffff",
       pixelRatio: 2, // crisp on a retina display, still a reasonable file size
       skipFonts: true,
+      filter: (node: HTMLElement) => !(node instanceof Element &&
+        (node.matches("[data-export-ignore]") || options.hideControls && node.matches("button") && !node.closest("th, .drill-crumbs"))),
+      ...(options.hideControls ? {
+        // A centered report's computed auto margin becomes a pixel offset in
+        // the cloned SVG, but the image is only as wide as the report itself.
+        style: { margin: "0" },
+      } : {}),
     }),
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error("rendering this took too long -- try a smaller tile, or the whole dashboard PNG instead")), 15000)),

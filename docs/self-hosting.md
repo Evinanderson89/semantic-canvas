@@ -16,7 +16,9 @@ The named `workspace` volume contains `/data/dashboards.duckdb`, `/data/config/s
 
 The runtime serves the built UI and API in one non-root process. Its root filesystem is read-only; only `/data` and temporary storage are writable. Docker logs rotate at 10 MB with three files. Use an external collector for longer retention.
 
-Without Docker, use Node 22.12+ or 24, `npm ci`, `npm run build`, then `npm run serve`. The default data directory is `~/.semantic-canvas`. Set `SC_DATA_DIR` to change it. Development remains `npm start`.
+Before releasing a container build, run `npm run check:container` with Docker running. It builds the image and tests the packaged UI/API, the actual runtime user ID, read-only root filesystem, loopback port binding, a sample query, two saved dashboard designs, and restoring both versions from a stopped-volume backup into a new container. `npm run test:container -- <image>` tests an existing image. The test creates uniquely named containers and volumes and removes only those fixtures afterward. This release check is separate from `npm run check`, which runs source, unit, build, and browser checks without requiring Docker.
+
+Without Docker, use Node.js 22.x (22.12 or newer), 24.x, or 26.x, with the latest patch release in your chosen major version. Run `npm ci`, `npm run build`, then `npm run serve`. The default data directory is `~/.semantic-canvas`. Set `SC_DATA_DIR` to change it. Development remains `npm start`.
 
 ## Set up company sign-in
 
@@ -52,14 +54,24 @@ Caddy manages HTTPS certificates and forwards the original Host header. The app 
 | Capability | Viewer | Editor | Administrator |
 | --- | --- | --- | --- |
 | Read permitted catalogues/dashboards, query, filter, drill, ask AI | Yes | Yes | Yes |
+| Discover raw warehouse schema beyond the semantic model | No | No | Yes, where the connector supports it |
 | Save/update/delete shared dashboards | No | Yes | Yes |
+| Propose and query unreviewed metrics on an allowed source | No | Yes | Yes |
+| Publish proposed metrics to the governed catalogue | No | No | Yes |
+| Remove metrics added through a proposal | No | Own unpublished proposals only | Yes |
 | Configure sources, AI credentials, workspace setup, library backup | No | No | Yes |
 
 Saved dashboards are shared by source, not private per author. Authenticated viewers can read authored text and filter defaults in dashboards on an allowed source; do not put confidential commentary in a broadly shared dashboard. There are no document-specific ACLs, SCIM provisioning, or invitation emails in this release.
 
+Metric proposals use a restricted aggregate-expression vocabulary over the chosen base table. Canvas validates the expression, executes a warehouse probe using the source connector, and stores accepted proposals in the source extension as unreviewed. The probe checks execution and does not return its aggregate result; it is not a test of a particular viewer's row access. This permission does not grant arbitrary SQL execution or permission to edit the base model. Chart queries retain their row-access rules. Viewers cannot query unpublished metrics or dependent calculations; administrator publication makes an accepted proposal available to them. See [metric proposals](modeler.md#proposed-metrics-a-field-made-to-order) for the expression and publication contract.
+
+`GET /api/schema` checks source access and uses the verified session role. Viewers receive table and column names/types from their published semantic catalog; editors receive the full semantic catalog, including drafts. Neither role requests raw warehouse introspection. Administrators can inspect raw schema where the connector supports it; otherwise they receive the semantic schema. The response's `scope` is `semantic-model` or `warehouse`. Schema discovery describes metadata, not accessible row values or proof that a modeled column is present in the warehouse; query permissions and row policies still apply separately.
+
 Sessions use opaque Secure/HttpOnly/SameSite cookies, PKCE/state/nonce, and CSRF protection on API writes. Role, source access and row principal come from the verified server session; browser principal headers cannot elevate access. Sessions expire after `SC_SESSION_SECONDS` (default one hour, 5 minutes–8 hours). Restarting the app signs everyone out and reloads policies. Group changes take effect on the next login; removing a user at the IdP does not instantly revoke an existing app session. Restart to invalidate all sessions immediately. In team mode, sign out ends the app session, not the provider's global session. In gateway mode the portal owns the session, so sign out hands the browser to the portal's sign-out, which revokes the refresh token at the identity provider and clears the shared cookies; nobody can re-enter without signing in.
 
 The embedded assistant uses the caller's session for its tools. Questions and chat history are separated by user. External stdio MCP remains a trusted local integration and cannot authenticate to team mode; it is refused by the team API. Do not disable authentication to make it work.
+
+In a session bound to a source or row-access principal, omitted tool arguments retain that scope and matching arguments are accepted. An explicit mismatch fails before a query or write; Canvas does not silently substitute another warehouse or identity. Switch the source or role in Canvas, or change a scoped connection's setup, before requesting another scope. Unbound local stdio tools can select a source and simulated principal explicitly; the API still applies its access rules.
 
 Local mode keeps recovery drafts in localStorage. Team mode isolates drafts by account in tab sessionStorage; signing out removes team drafts on that tab. Save work before signing out. The same-origin browser storage is not a security boundary against someone with access to the browser profile. No query-result rows or connection credentials are stored in recovery drafts.
 
@@ -67,7 +79,19 @@ Local mode keeps recovery drafts in localStorage. Team mode isolates drafts by a
 
 Connections pairs a supported adapter with DuckDB or Snowflake. YAML semantic models can be uploaded to the server (5 MB maximum); the source connection test validates them. Uploads persist even if setup is cancelled; operators can remove unused files from `/data/models` after checking source references. dbt requires a mounted target directory containing `manifest.json` and `semantic_manifest.json`. Mount external models/data read-only, e.g. `/company/models:/models:ro`, and use `/models/...` paths in Connections. Files on an administrator's laptop are not automatically visible inside a container.
 
+Editing an existing source waits for its saved settings to load. A failed load offers Retry and Cancel rather than an empty replacement form. Fields stay fixed during model upload and connection validation; failed saves retain your edits for correction. AI status failures also offer a retry, and a failed credential removal leaves the configured state and confirmation in place. “Configured” reports a stored credential, not a live provider health check.
+
 Adapters still import supported semantics and compile SQL; this is not native execution of every vendor's semantic engine. See `alpha-contract.md` for supported metric types and rejected semantics.
+
+### AI credentials
+
+Connections validates an Anthropic key before saving it in `SC_ENV_PATH` (default `.env`, `/data/config/.env` in the container) with owner-only permissions. The file must be writable and persist across container replacements. A rejected key leaves the previous credential unchanged. No key is returned by the status endpoint.
+
+All embedded AI features, including reference-image/PDF imports, require the supported Anthropic provider, a model name, and a nonblank key before constructing a provider client. Unsupported configuration returns a setup error without sending the reference, catalogue, dashboard or query results to a provider. Connections shows the configuration issue; adding another key is disabled when the server's provider/model selection must be corrected first.
+
+Saving or removing a key through Connections sets `SC_AI_KEY_MANAGED=true` in that file. While that marker is true, the file's `ANTHROPIC_API_KEY` is authoritative for the embedded Anthropic agent, including an empty value after removal. This prevents an older shell variable or YAML credential from returning on restart. Provider and model choices still come from `ai.provider` and `ai.model` in `sources.yaml`; adding an `ai` block is optional when using the default Anthropic setup.
+
+For operator-managed credentials, omit the marker or set it to `false` and restart. Then an explicit `ai.apiKey` (including a custom `${VARIABLE}` reference or an empty value to disable it) takes precedence; otherwise Anthropic uses `ANTHROPIC_API_KEY` from the server environment. Removing a key through Connections disables its use by the embedded agent; it does not revoke the provider credential or erase an operator-authored copy in YAML or the parent environment. This credential is separate from Claude Desktop/Code and ChatGPT tunnel setup.
 
 ### Connected tables (phase 2)
 
@@ -120,12 +144,16 @@ SC_DATA_DIR=/safe/new-workspace npm run restore -- /safe/location/library.json
 
 Library backups include chart comments, replies, alert rules, and the last 30 alert observations. They contain discussion text and observed metric values, so restrict their access. Restored alerts start paused and must be reviewed before resuming. Configure the same source IDs and policy/model configuration before opening restored dashboards. Restoration validates every document and applies the library atomically. It refuses an existing nonempty database.
 
+New backups use library format **2**, which stores verified UTC save times separately from legacy wall-clock timestamps whose time zone is unknown. The current restore command accepts formats 1 and 2; older Canvas releases cannot restore format 2. A format-1 dashboard date is recovered from a matching saved-version timestamp when available. Otherwise its original wall-clock value is retained as `legacyUpdatedAt`, and the UI shows that the time zone is unavailable. New saves and renames record explicit UTC times. The on-disk migration is additive and does not rewrite dashboard designs or guess the time zone of older records.
+
+Older dashboard canvases may contain only customized settings. Opening, version history, backup export and archive restore apply the same defaults to missing fields while preserving authored dimensions, grid, snapping and background. Invalid values and unknown settings are not silently replaced: export retains them for repair, and restore rejects them. Legacy dashboards whose model name matches multiple sources remain unassigned and are included in backups; migration does not guess which source owns them. Deleting a built-in starter remains effective after library initialization and backup restoration.
+
 **Full installation backup:** stop the application, then back up the entire `/data` volume plus `.env.team`, `deploy/access.yaml`, `deploy/policies.yaml` and any external mounted model/data files. This includes secrets: encrypt the archive and restrict access. Do not copy an active DuckDB file. Example team volume backup, from the repo root:
 
 ```sh
 docker compose --env-file .env.team -f compose.team.yaml stop canvas
 mkdir -p backups
-docker compose --env-file .env.team -f compose.team.yaml run --rm --no-deps --entrypoint tar canvas -C /data -czf - . > backups/workspace.tar.gz
+docker compose --env-file .env.team -f compose.team.yaml run -T --rm --no-deps --entrypoint tar canvas -C /data -czf - . > backups/workspace.tar.gz
 docker compose --env-file .env.team -f compose.team.yaml start canvas
 ```
 
@@ -137,15 +165,17 @@ Before upgrading, record the current commit/image ID, make the full stopped back
 
 ## Chart alert operations
 
-Alerts use the same semantic compiler and row-level permissions as chart queries. Results and rules remain private to the owner; comments are shared only within the same source and RLS scope. A policy change changes that scope instead of exposing earlier discussions under broader access.
+Alerts use the same semantic compiler and row-level permissions as chart queries. Results and rules remain private to the owner; comments are shared only within the same source, model, local RLS scope and canonical signed gateway rules. A policy change changes that scope instead of exposing earlier discussions under broader access. Viewers cannot read activity or preview alerts for unpublished metrics. Scheduled evaluations check the owner’s current role and publication permissions before querying and again before storing an observation.
+
+The audience format is versioned. Historical activity created before gateway rules were included has unknown scope: it remains in storage and backups, but is not automatically exposed under a new audience. Recreate personal watches under the current scope; old scheduled watches require review and do not execute under a guessed audience.
 
 The single-process scheduler checks due watches once a minute, up to 100 per sweep, sequentially. Rules choose 15-minute, hourly, or daily checks. There is no distributed scheduler or off-host notification service. Checks are in-app; a closed browser can still receive saved observations when reopened, provided the server was running and, in company mode, the owner still held access: in team mode an unexpired authenticated session, and in gateway mode a valid Gateway session presented to Canvas since the server started. Sign-out, session expiry, a server restart in gateway mode (until the owner opens Canvas again), or lost source access pauses query execution. A changed metric, filter configuration, or semantic model requires updating the watch.
 
-Anomaly checks are robust statistical heuristics, not a guarantee of incident detection. Stale or missing data yields a waiting state. Reporting periods are interpreted in UTC; source completeness and warehouse ingestion watermarks are not verified. Query timeouts/cancellation and richer seasonal forecasting remain part of the broader operational work below.
+Anomaly checks are robust statistical heuristics, not a guarantee of incident detection. Stale or missing data yields a waiting state. Closed reporting periods follow the model’s week start, fiscal year start, timezone (UTC when unset), and optional pinned reporting date. Audit timestamps still record the real check time. Source completeness and warehouse ingestion watermarks are not verified. Query timeouts/cancellation and richer seasonal forecasting remain part of the broader operational work below.
 
 ## Current operational limits
 
-One company workspace, one Node process, one DuckDB dashboard store. Horizontal scaling and highly available sessions require a different shared store/session design. Source settings are operator configuration; there is no per-company tenancy boundary inside one process. Query budgets, warehouse cancellation, permission-change propagation, detailed metrics, user provisioning and security review with your actual identity provider remain work before a broad enterprise rollout.
+One company workspace, one Node process, one DuckDB dashboard store. Horizontal scaling and highly available sessions require a different shared store/session design. Source settings are operator configuration; there is no per-company tenancy boundary inside one process. Field profiling has execution budgets and cancellation safeguards, with limits described in the [alpha contract](alpha-contract.md). General chart-query and alert execution budgets, live-warehouse cancellation verification, permission-change propagation, detailed metrics, user provisioning and security review with your actual identity provider remain work before a broad enterprise rollout.
 
 Implementation references: `src/security/auth.ts`, `src/operations/telemetry.ts`, `src/store/store.ts`, `compose.team.yaml`. OIDC uses the maintained [openid-client library](https://github.com/panva/openid-client). See [OpenTelemetry exporters](https://opentelemetry.io/docs/languages/js/exporters/), [Docker Compose services](https://docs.docker.com/reference/compose-file/services/) and [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https).
 
@@ -159,4 +189,4 @@ The bundled cross-repository Compose example is local development configuration 
 
 ## Data policies from the gateway
 
-In gateway mode Canvas honours the row-level policy the gateway's control API signs onto each request (`x-gateway-policy` and `x-gateway-policy-sig`; see the gateway repository's `docs/policy.md`). Set `SC_GATEWAY_POLICY_SECRET` to the same value as the gateway's `GATEWAY_POLICY_SECRET`; the Compose deployment does this for you. A rule such as `dim_users.country only GB, DE` becomes the same filter a `security/policies.yaml` policy becomes, on every query, drill, filter-value lookup and agent question; a chart whose table cannot reach the governed column is refused rather than run unscoped, and a watch cannot be created while such a rule applies (it would run later without the session). The signature, the subject, the app and the expiry are checked; anything else is treated as no policy. The app is the slug the gateway routes this Canvas under, taken from the first label of `SC_PUBLIC_URL`'s host (`semantic-canvas` at `semantic-canvas.apps.example.com`); set `SC_GATEWAY_APP` if the host is named differently. If the gateway sends a policy and no secret is configured here, the request is refused (503) rather than served unscoped, and the server logs `auth.policy_secret_missing` at boot. A watch whose owner has since come under a policy is paused with a reason rather than evaluated without it. The sidebar shows the person their own rules.
+In gateway mode Canvas honours the row-level policy the gateway's control API signs onto each request (`x-gateway-policy` and `x-gateway-policy-sig`; see the gateway repository's `docs/policy.md`). Set `SC_GATEWAY_POLICY_SECRET` to the same value as the gateway's `GATEWAY_POLICY_SECRET`; the Compose deployment does this for you. A rule such as `dim_users.country only GB, DE` becomes the same filter a `security/policies.yaml` policy becomes, on every query, drill, filter-value lookup and agent question; a chart whose table cannot reach the governed column is refused rather than run unscoped, and a watch cannot be created while such a rule applies (it would run later without the session). The signature, subject, app and expiry are checked. If either policy header is present but verification fails (including a missing companion header), Canvas refuses the request with 403 and invalidates the cached identity used for background work. An intentionally absent policy and a verified empty rule set remain distinct from invalid policy delivery. Empty `only` lists deny all rows; empty `not` lists exclude nothing, in both chart and field-discovery queries. Embedded tools forward the verified cookie or bearer credential together with the original signed policy headers over loopback; the receiving API verifies them again. Tool access and the cached identity expire at the earlier of the login expiry and policy expiry. The app is the slug the gateway routes this Canvas under, taken from the first label of `SC_PUBLIC_URL`'s host (`semantic-canvas` at `semantic-canvas.apps.example.com`); set `SC_GATEWAY_APP` if the host is named differently. If the gateway sends a policy and no secret is configured here, the request is refused (503) rather than served unscoped, and the server logs `auth.policy_secret_missing` at boot. A watch whose owner has since come under a policy is paused with a reason rather than evaluated without it. The sidebar shows the person their own rules.

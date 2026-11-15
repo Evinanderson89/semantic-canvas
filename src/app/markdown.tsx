@@ -8,20 +8,31 @@ import { Fragment, type ReactNode } from "react";
  * means literal asterisks and backticks on screen instead of the
  * formatting they were meant to be. Only React elements are ever produced
  * here (never dangerouslySetInnerHTML), so there's no HTML-injection
- * surface to worry about -- anything the model writes that isn't one of
- * these three patterns just prints as plain text, never mangled, never a
- * rendering exploit.
+ * surface. Fenced code preserves whitespace and literal Markdown; unsupported
+ * syntax stays text. HTML is never interpreted.
  */
 export function renderMarkdown(text: string): ReactNode {
   const lines = text.split("\n");
   const blocks: ReactNode[] = [];
   let bullets: string[] = [];
+  let fence: { character: string; length: number; lines: string[] } | null = null;
   const flushBullets = () => {
     if (!bullets.length) return;
     blocks.push(<ul key={blocks.length}>{bullets.map((b, i) => <li key={i}>{renderInline(b)}</li>)}</ul>);
     bullets = [];
   };
   for (const raw of lines) {
+    if (fence) {
+      const closing = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(raw);
+      if (closing && closing[1][0] === fence.character && closing[1].length >= fence.length) {
+        blocks.push(<pre key={blocks.length}><code>{fence.lines.join("\n")}</code></pre>); fence = null;
+      } else fence.lines.push(raw);
+      continue;
+    }
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
+    if (opening && (opening[1][0] !== "`" || !opening[2].includes("`"))) {
+      flushBullets(); fence = { character: opening[1][0], length: opening[1].length, lines: [] }; continue;
+    }
     const line = raw.trim();
     const bullet = /^[-*]\s+(.*)/.exec(line);
     if (bullet) { bullets.push(bullet[1]); continue; }
@@ -29,6 +40,7 @@ export function renderMarkdown(text: string): ReactNode {
     if (line) blocks.push(<p key={blocks.length}>{renderInline(line)}</p>);
   }
   flushBullets();
+  if (fence) blocks.push(<pre key={blocks.length}><code>{fence.lines.join("\n")}</code></pre>);
   return <>{blocks}</>;
 }
 

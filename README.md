@@ -18,11 +18,13 @@ With Docker:
 docker compose up --build -d
 ```
 
+**Try the before-and-after walkthrough:** on Home, choose **Try the design playground**. Start with a messy dashboard, preview a redesign with **Improve with AI** (requires a configured provider), or apply chart fixes in **Design review**. Use **Smart arrange → Tell a story**, then **Review and share** to compare Dashboard, Story and Infographic formats and export a PNG. The starter opens as an unsaved copy. See [presentation and evidence behavior](docs/presentations.md).
+
 Open [the local demo](http://localhost:5173). Dashboard storage persists in a named volume. For HTTPS company deployment, SSO, logging and recovery, follow the [self-hosting guide](docs/self-hosting.md).
 
 For local development:
 
-Use a supported Node.js release: 22.12+, 24.x, or 26+.
+Use Node.js 22.x (22.12 or newer), 24.x, or 26.x. Use the latest patch release in your chosen major version.
 
 ```sh
 npm ci
@@ -44,7 +46,7 @@ Open [Semantic Canvas](http://127.0.0.1:5173). The API runs at `127.0.0.1:5174`.
 - Open the message icon on a chart to discuss it, reply, and resolve conversations. Open the bell to create a personal threshold or anomaly watch, preview its result, and review its history.
 - Review charts against their current filters and drill state. Partial reviews identify unavailable or limited results.
 - Ask the optional AI assistant to improve the active unsaved document. Review its proposed edits, apply them together, and undo them in one step.
-- Export charts as CSV or export a dashboard as PNG.
+- Export returned chart data as typed Excel with query context, or raw CSV for data tools; export dashboards as PNG.
 - Review workspace setup in Connections, upload a semantic model, and download a complete dashboard-library backup.
 - In company mode, sign in through your identity provider and assign viewer/editor/admin roles with source and row access.
 - Collect JSON application/audit logs or export logs and request traces through OpenTelemetry.
@@ -57,7 +59,7 @@ Saved documents have a version, a source identity and a revision. Conflicting up
 
 Queries validate metrics, dimensions and structured filters before compiling SQL. Charts, field samples, distinct values and ranges use the same row restrictions. A policy that cannot be enforced denies that query. A missing or malformed policy file stops startup instead of disabling restrictions.
 
-Time-series limits keep the newest result window. Responses disclose truncation and the visible date window; limited CSV exports are labeled. Period comparisons look up the previous calendar period, so gaps stay unknown. First-of-month snapshots remain visible. The app shows **Coverage unverified** because observed dates do not prove that a reporting period is complete. Fiscal calendars and upstream completeness metadata are not implemented.
+Time-series limits keep the newest result window. Responses disclose truncation and the visible date window; limited CSV exports are labeled. Period comparisons look up the previous reporting period, so gaps stay unknown. First-of-month snapshots remain visible. Models can declare a week start, fiscal year start month, reporting time zone and pinned sample date; see [the calendar contract](docs/calendar.md). The app shows **Coverage unverified** because observed dates do not prove that a reporting period is complete. Upstream completeness metadata is not implemented.
 
 Snapshot and retention metrics in the sample declare their supported monthly grain. Unsupported rollups and all-time snapshot sums are rejected instead of returning misleading totals. Model authors can declare `time_grains`, `time_dimension`, optional dashboard `importance`, and `direction` (higher, lower or neutral) in YAML. Undeclared direction uses neutral KPI colors.
 
@@ -69,9 +71,9 @@ Open **Connections** to add, edit or select a source, or edit `sources.yaml`. A 
 
 | Adapter | Supported import | Explicitly unsupported |
 | --- | --- | --- |
-| `duckglue` | Bundled YAML model, trusted metric expressions and declared joins; ratio, derived and cumulative metrics (`docs/metric-types.md`) | Multi-hop or ambiguous joins |
+| `duckglue` | Bundled YAML model, trusted metric expressions and declared forward join paths, including multiple hops; ratio, derived and cumulative metrics (`docs/metric-types.md`) | Ambiguous shortest paths, reverse traversal, and declared joins that multiply base rows; see [joins](docs/joins.md) |
 | `dbt` | Simple metrics backed by supported column aggregates in `semantic_manifest.json` | Ratio, derived, cumulative and conversion metrics; metric filters; non-additive measures; computed dimensions |
-| `snowflake-semantic` | Plain-column fields, table-level metrics, composite join keys, left/inner joins, database/schema qualification | Computed fields, named filters, top-level derived metrics, repeated physical table names with different aliases |
+| `snowflake-semantic` | Public plain-column fields and table-level metrics, composite equality join keys, left/inner joins, database/schema qualification | Computed fields, filters, non-additive rules, private access, variables, explicit metric join paths, SQL-defined tables, range/asof joins, top-level derived metrics, repeated physical table names with different aliases |
 
 Unsupported imports return a source error explaining what could not be represented. The dbt and Snowflake adapters import files and compile local SQL; they do not call the native dbt Semantic Layer or Snowflake semantic query service.
 
@@ -85,11 +87,21 @@ Tables registered by Ingest ("Connected to Semantic Canvas", see `docs/connected
 
 ## AI and MCP
 
-AI is optional. The embedded agent currently supports **Anthropic only**. Set `ANTHROPIC_API_KEY` in `.env` and configure an available model in the `ai` block of `sources.yaml`. The canvas and rule-based suggestions work without a key.
+AI is optional. The embedded agent currently supports **Anthropic only**. Add a key in **Connections**, or set `ANTHROPIC_API_KEY` in `.env`; choose an available model with `ai.model` in `sources.yaml`. Connections saves its key on the server and preserves replacements/removals across source reloads and restarts, even without an `ai` block. See [credential precedence](docs/self-hosting.md#ai-credentials) for operator-managed configuration. The canvas and rule-based suggestions work without a key.
 
 Embedded tools and conversation histories are bound to the selected source and principal; in company mode, they also carry the authenticated caller’s session and are isolated by user. A model cannot switch that scope by changing its tool arguments. AI recommendations still need human judgment; they are not proof of causation or business correctness.
 
-To connect an external MCP agent, keep the app running and start:
+**Connect Claude Desktop or Claude Code:** open **Connections → Connect Claude**. Choose your client and copy the generated setup. It uses absolute paths and the running API’s port, so it also works when Claude starts outside this repository. Keep Canvas running on the same computer as Claude. No Anthropic API key is needed in Canvas for this connection.
+
+The panel includes a local MCP connection check and a starter prompt. The check launches the MCP server, discovers its tools, and reads the selected source’s metric definitions. It does not contact an AI provider or verify that your Claude client is connected. Confirm that separately in Claude Desktop’s connector settings or Claude Code’s `/mcp` view.
+
+Claude can save directly through these tools. Ask it to propose changes before saving, and use a new dashboard ID when exploring. Refresh Canvas and open the saved dashboard from its library; MCP does not edit your browser’s unsaved canvas. Generated configuration is specific to this installation; regenerate it if the repository, Node installation, or API port moves. Merge configuration entries rather than replacing other MCP servers. Remote/company-mode Claude authentication is not implemented.
+
+**Connect ChatGPT:** open **Connections → Connect ChatGPT**. The setup uses [OpenAI’s Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) and a separate scoped stdio server. Choose a source and row-access principal. Explore-only mode exposes eight read tools; build mode adds dashboard save and arrangement. The scope is enforced by the server, including refusing missing principals and tool requests for another source or principal. Everyone using that tunnel shares the chosen local scope. Company sign-in delegation is not supported.
+
+The panel generates macOS/Linux tunnel commands and checks the local MCP handshake. Completing the connection also requires OpenAI tunnel permissions, a runtime tunnel credential, and custom MCP access in the intended ChatGPT workspace. Canvas never collects that credential. The local check does not establish a tunnel or certify ChatGPT connectivity; verify by querying metrics from ChatGPT. See the in-app steps for connecting and stopping the client. No OpenAI model API integration is required.
+
+For other local MCP clients, the stdio entry point is:
 
 ```sh
 npm run mcp
@@ -100,6 +112,8 @@ The MCP server exposes catalog discovery, scoped queries, dashboard save/open, l
 To update a saved dashboard, call `get_dashboard` and pass its `revision` into `save_dashboard`; revision `0` creates a new document. Both tools accept a `source`. Set `SEMANTIC_CANVAS_URL` when the API uses a different port.
 
 ## Data and recovery
+
+**Edit, Preview, and version history:** the dashboard mode bar identifies editable drafts and read-only previews. Preview does not save or publish. After the first save, **Version history** lists saved designs with timestamps and a layout preview. Before restoring, compare the selected version against current work, including unsaved edits: data and scope changes are shown separately from story content and visual changes, with current and saved values side by side. **Restore as draft** preserves the existing history and opens the chosen design for a new save. History stores chart definitions, layout, authored text and saved filters; warehouse data and semantic definitions remain live. Versions overwritten before this feature are unavailable.
 
 Saved dashboards, chart conversations, and personal alert rules/history live in `~/.semantic-canvas/dashboards.duckdb`. Set `SC_DATA_DIR` to choose another directory. Unsaved recovery drafts are stored in this browser and appear on Home; they do not include query result rows or connection credentials. If browser recovery fails, internal navigation keeps the current document open and offers a downloadable JSON backup. Use **Import backup** on Home to restore it as a new document. Save larger image-heavy documents explicitly; browser storage has a quota.
 
@@ -140,7 +154,7 @@ See [architecture and contracts](docs/architecture.md), [contributing](CONTRIBUT
 
 ## CoreCanvas Library
 
-**CoreCanvas Library** in the sidebar is the workspace home for saved dashboards and reusable views. Create folders and subfolders, search across the library, and use each item's menu to rename or move it. The library replaces **Explore by topic** with Company overview, Revenue & retention, Growth & customers, Shared views (KPI summaries, Trends & comparisons, Story sections), and Examples. On first setup, unfiled dashboards using these topics move into the matching folder; existing folder choices and dashboard contents stay intact. Other dashboards stay at the root. The sample catalogue includes nine live starter dashboards in these folders. Starters open as independent copies: save to keep your version, and reopen **Examples → Dashboard cleanup demo** for a fresh before-and-after exercise. Examples and Shared views start collapsed. Folders, starters, and setup state persist in the library database and backups; later renames, moves, and deletions are respected.
+**CoreCanvas Library** in the sidebar is the workspace home for saved dashboards and reusable views. Create folders and subfolders, search across the library, and use each item's menu to rename or move it. The library replaces **Explore by topic** with Company overview, Revenue & retention, Growth & customers, Shared views (KPI summaries, Trends & comparisons, Story sections), and Examples. On first setup, unfiled dashboards using these topics move into the matching folder; existing folder choices and dashboard contents stay intact. Other dashboards stay at the root. The sample catalogue includes ten live starter dashboards in these folders. Eight use curated compositions: revenue waterfalls, geographic signup maps, product heatmaps, channel small multiples, subscription mix, scatter comparisons, and acquisition funnels. Starters open as independent copies: save to keep your version, and reopen **Examples → Dashboard cleanup demo** for a fresh before-and-after exercise. Examples and Shared views start collapsed. Folders, starters, and setup state persist in the library database and backups; later renames, moves, and deletions are respected.
 
 On a dashboard, open **Views → Save a view** to persist selected tiles or the current tab, including labels, section relationships, formatting, layout, and saved filter defaults. Selecting a heading includes its section. Use **Views → Browse saved views** to insert a copy into the current tab, or preview a view from the library and use it as a new dashboard. Metrics run against the current semantic catalogue and the viewer's permissions. Insertion uses fresh tile/filter IDs, preserves the destination's existing content, fits wider views when needed, and supports one-step undo. Copied filters apply only to the copied tiles and stay visible in the filter shelf when they have no canvas control.
 
@@ -161,3 +175,7 @@ Checks run in the Node server every 15 minutes, hour, or day, with a scheduler s
 Time-series checks skip the current UTC calendar period and wait for the most recently closed period. Nulls, missing periods, duplicate dates, stale data, and insufficient history produce a waiting state. Anomaly checks need 14 closed periods, use up to 60 prior observations, and compare against the median historical change with a scaled median absolute deviation range. Daily series use week-over-week changes once four weeks of history exist. Sensitivity adjusts the range, with a 1% floor for flat baselines. The range is an investigation aid, not a statistical confidence interval, and source completeness remains unverified. See the [NIST description of scaled MAD](https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/mad.htm).
 
 Library backups include conversations and alert observations, so handle them as company data. Restoring a library pauses all watches for review. Existing library backups without activity still restore correctly. Keep the same source and RLS configuration to recover the matching discussion scope.
+
+### Personal source configuration
+
+Keep personal connections out of tracked `sources.yaml`. Copy it to `sources.personal.local` (ignored by Git), add the connection there, and run `SOURCES_PATH=./sources.personal.local npm start`. When using the Connections form, start with this local configuration path too. The default configuration stays sample-only for walkthroughs.

@@ -30,3 +30,27 @@ it("wraps narrow dashboard charts into readable rows without changing their quer
     }
   }
 });
+
+it("describes mixed reporting scope without assigning a period to undated metrics", () => {
+  const dash = suggestDashboard(model, { metrics: ["revenue", "users"], grain: "week" });
+  expect(dash.description).toContain("Revenue (USD): weekly");
+  expect(dash.description).toContain("Users: no time grouping");
+  expect(dash.description).not.toContain("Each metric uses a supported reporting period");
+  expect(dash.tiles.find(t => t.chart === "stat")?.dimensions).toEqual([]);
+});
+
+it("describes the metric's allowed grain when it overrides the requested grain", () => {
+  const restricted = structuredClone(model);
+  restricted.metrics.revenue.timeGrains = ["month"];
+  restricted.metrics.revenue.timeDimension = "fct_sales.sold_on";
+  const dash = suggestDashboard(restricted, { metrics: ["revenue"], grain: "day" });
+  expect(dash.description).toContain("Revenue (USD): monthly");
+  expect(dash.description).not.toContain("daily");
+  expect(dash.tiles.find(t => t.chart === "kpi")?.dimensions).toEqual(["month:fct_sales.sold_on"]);
+});
+
+it("does not claim a date range or freshness for a dashboard without time grouping", () => {
+  const dash = suggestDashboard(model, { metrics: ["users"] });
+  expect(dash.description).toBe("Users: no time grouping. Reporting windows and filters can differ between charts.");
+  expect(dash.tiles.some(t => t.title?.endsWith("over time"))).toBe(false);
+});

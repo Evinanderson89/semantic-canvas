@@ -1,6 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { duckglueAdapter } from "../src/semantic/duckglue.ts";
 import { duckdbConnector } from "../src/connectors/duckdb.ts";

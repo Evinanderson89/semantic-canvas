@@ -1,3 +1,4 @@
+import { metricOf, type Model } from "../semantic/model.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import { arrange, overlaps } from "./geometry.ts";
 
@@ -76,23 +77,96 @@ export function sectionsOf(tiles: TileSpec[]): TileSpec[][] {
   let current = "";
   for (const t of ordered) {
     if (t.kind === "heading") { current = t.id; continue; }
-    const owner = t.section && groups.has(t.section) ? t.section : current;
+    const owner = t.section === null ? "" : t.section && groups.has(t.section) ? t.section : current;
     groups.get(owner)!.push(t);
   }
   return [...groups.values()].filter(g => g.length);
 }
 
-export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, stretch = true): TileSpec[] {
+/** A heading gives a pin an authored section to protect. Before any heading,
+ * a pin belongs only to its own tile, not every loose chart on the canvas. */
+export function pinnedContent(tiles: TileSpec[]): TileSpec[] {
+  return sectionsOf(tiles).flatMap(group => group[0].kind === "heading" && group.some(t => t.pinned)
+    ? group : group.filter(t => t.pinned));
+}
+
+/** Pack loose rows through the horizontal space around fixed content. A row
+ * can split across free bands, but its reading order and readable minimum
+ * widths survive. Explicit sections use the whole-section placement below. */
+function placeAroundPins(packed: TileSpec[], fixed: TileSpec[], width: number, startY: number, name: LayoutName, lead?: string): TileSpec[] {
+  const PAD = 24, GAP = 16, available = Math.max(1, width - 2 * PAD);
+  const rows = new Map<number, TileSpec[]>();
+  for (const tile of packed) { const row = rows.get(tile.layout.y) ?? []; row.push(tile); rows.set(tile.layout.y, row); }
+  const placed: TileSpec[] = [];
+  let y = startY;
+  const minWidth = (t: TileSpec) => Math.min(available, isKpiTile(t) ? 180
+    : name === "story" || name === "executive" && (t.id === lead || !isDataTile(t)) ? available
+    : isDataTile(t) ? 360 : Math.min(200, t.layout.w));
+  for (const row of rows.values()) {
+    const remaining = [...row].sort((a, b) => a.layout.x - b.layout.x);
+    while (remaining.length) {
+      const height = Math.max(...remaining.map(t => t.layout.h));
+      const blockers = fixed.filter(t => t.layout.y < y + height + GAP && t.layout.y + t.layout.h + GAP > y);
+      let bands = [{ left: PAD, right: PAD + available }];
+      for (const { layout: b } of blockers) bands = bands.flatMap(band => {
+        if (b.x - GAP >= band.right || b.x + b.w + GAP <= band.left) return [band];
+        return [{ left: band.left, right: Math.min(band.right, b.x - GAP) },
+          { left: Math.max(band.left, b.x + b.w + GAP), right: band.right }].filter(b => b.right > b.left);
+      });
+      let rowHeight = 0;
+      for (const band of bands) {
+        const space = band.right - band.left;
+        const fitting: TileSpec[] = [];
+        let used = 0;
+        while (remaining.length) {
+          const min = minWidth(remaining[0]);
+          if (used + (fitting.length ? GAP : 0) + min > space) break;
+          used += (fitting.length ? GAP : 0) + min;
+          fitting.push(remaining.shift()!);
+        }
+        if (!fitting.length) continue;
+        const extra = space - used;
+        const desiredExtra = fitting.map(t => Math.max(0, t.layout.w - minWidth(t)));
+        const totalExtra = desiredExtra.reduce((a, b) => a + b, 0);
+        let x = band.left;
+        fitting.forEach((t, i) => {
+          const w = minWidth(t) + (totalExtra ? Math.min(1, extra / totalExtra) * desiredExtra[i] : 0);
+          placed.push({ ...t, layout: { ...t.layout, x: Math.round(x), y: Math.round(y), w: Math.floor(w) } });
+          x += w + GAP; rowHeight = Math.max(rowHeight, t.layout.h);
+        });
+      }
+      if (rowHeight) y += rowHeight + GAP;
+      else {
+        // At least one fixed rectangle is withholding the required width.
+        // Jump to its next lower edge instead of scanning pixel by pixel.
+        const next = blockers.map(t => t.layout.y + t.layout.h + GAP).filter(bottom => bottom > y);
+        y = next.length ? Math.min(...next) : y + height + GAP;
+      }
+    }
+  }
+  return placed;
+}
+
+export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, stretch = true, model?: Model): TileSpec[] {
   const PAD = 24, GAP = 16, avail = Math.max(1, width - PAD * 2);
   const groups = sectionsOf(tiles);
+  const unsectioned = new Set(groups.filter(g => g[0].kind !== "heading").flat().map(t => t.id));
+  const hasHeadings = tiles.some(t => t.kind === "heading");
   const purposeful = name === "story" || name === "executive";
-  const lead = groups.filter(g => !g.some(t => t.pinned)).flat().find(t => isDataTile(t) && !isKpiTile(t) && t.dimensions.some(d => d.includes(":")))?.id;
-  // A pinned item anchors its whole section, so its title and notes stay meaningful.
-  const fixed = groups.filter(g => g.some(t => t.pinned)).flat();
+  const fixed = pinnedContent(tiles), fixedIds = new Set(fixed.map(t => t.id));
+  // Reserve an authored pinned section as a reading block, including its
+  // whitespace. Unrelated loose tiles must not slip between its notes/charts.
+  const obstacles = groups.flatMap(group => {
+    if (group[0].kind !== "heading" || !group.some(t => t.pinned)) return group.filter(t => t.pinned);
+    const top = Math.min(...group.map(t => t.layout.y)), bottom = Math.max(...group.map(t => t.layout.y + t.layout.h));
+    return [{ ...group[0], layout: { ...group[0].layout, x: PAD, y: top, w: avail, h: bottom - top } }];
+  });
+  const lead = groups.flat().find(t => !fixedIds.has(t.id) && isDataTile(t) && !isKpiTile(t) && t.dimensions.some(d => d.includes(":")))?.id;
   const out: TileSpec[] = [...fixed];
   let y = PAD;
-  for (const group of groups) {
-    if (group.some(t => t.pinned)) continue;
+  for (const originalGroup of groups) {
+    const group = originalGroup.filter(t => !fixedIds.has(t.id));
+    if (!group.length) continue;
     const heading = group[0].kind === "heading" ? group[0] : null;
     const members = heading ? group.slice(1) : group;
     const kpis = members.filter(isKpiTile);
@@ -110,6 +184,7 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
       do { run.push(body[i++]); } while (i < body.length && isKpiTile(body[i]) === isKpi && isDataTile(body[i]) === !text && !text);
       let row: TileSpec[];
       if (isKpi) {
+        if (model) { const priority = (t: TileSpec) => Math.max(0, ...t.metrics.map(m => metricOf(model, m)?.importance ?? 0)); run.sort((a, b) => priority(b) - priority(a)); }
         const cols = Math.max(1, Math.min(purposeful ? 3 : Infinity, Math.floor((avail + GAP) / (180 + GAP))));
         row = run.map((t, j) => {
           const count = Math.min(cols, run.length - Math.floor(j / cols) * cols);
@@ -122,15 +197,21 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
             : text ? Math.min(t.layout.w, avail) : Math.min(avail, Math.max(360, t.layout.w));
           const h = text ? t.layout.h : name === "story" ? 360 : name === "executive" ? (t.id === lead ? 320 : 280) : Math.max(280, t.layout.h);
           return { ...t, layout: { ...t.layout, w, h } };
-        }), width, { stretch });
+        }), width, { stretch, fillRows: name !== "grid" });
         row = row.map(t => ({ ...t, layout: { ...t.layout, y: t.layout.y - PAD } }));
       }
       packed.push(...row.map(t => ({ ...t, ...(heading ? { section: heading.id } : {}), layout: { ...t.layout, y: t.layout.y + localY } })));
       localY += Math.max(...row.map(t => t.layout.y + t.layout.h)) + GAP;
     }
+    if (!heading && fixed.length) {
+      const placed = placeAroundPins(packed, obstacles, width, y, name, lead);
+      out.push(...placed);
+      y = Math.max(y, ...placed.map(t => t.layout.y + t.layout.h + GAP));
+      continue;
+    }
     let collisions: TileSpec[];
     do {
-      collisions = fixed.filter(f => packed.some(t => overlaps({ ...t.layout, y: t.layout.y + y }, f.layout)));
+      collisions = obstacles.filter(f => packed.some(t => overlaps({ ...t.layout, y: t.layout.y + y }, f.layout)));
       if (collisions.length) y = Math.max(...collisions.map(t => t.layout.y + t.layout.h)) + GAP;
     } while (collisions.length);
     out.push(...packed.map(t => ({ ...t, layout: { ...t.layout, y: t.layout.y + y } })));
@@ -138,11 +219,16 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
   }
   // Keep document identity/order stable; geometry defines the visual reading order.
   const byId = new Map(out.map(t => [t.id, t]));
-  return tiles.map(t => byId.get(t.id) ?? t);
+  return tiles.map(t => {
+    const after = byId.get(t.id) ?? t;
+    // Moving a heading above a loose tile must not adopt it into that
+    // heading's section on the next arrangement (especially a pinned tile).
+    return hasHeadings && unsectioned.has(t.id) ? { ...after, section: null } : after;
+  });
 }
 
-export function applyBestLayout(tiles: TileSpec[], width: number): { name: LayoutName; tiles: TileSpec[] } {
+export function applyBestLayout(tiles: TileSpec[], width: number, model?: Model): { name: LayoutName; tiles: TileSpec[] } {
   if (!tiles.length) return { name: "grid", tiles };
   const name = bestLayout(tiles);
-  return { name, tiles: applyLayout(name, tiles, width) };
+  return { name, tiles: applyLayout(name, tiles, width, true, model) };
 }

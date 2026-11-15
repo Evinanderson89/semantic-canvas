@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { SparkOptions, TileSpec } from "../compiler/spec.ts";
 import { DEFAULT_SPARK } from "../compiler/spec.ts";
 import { metricOf, semanticHints, type Model } from "../semantic/model.ts";
 import { FONT_LABELS, FONT_STACKS, PALETTES, inferNumberStyle, mergeTextFormat,
          type FormatSpec, type NumberStyle } from "../format/format.ts";
-import { recommend, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
-import { inferChart } from "../suggest/chartRules.ts";
+import { recommend, type VizOption } from "../suggest/recommend.ts";
+import { useFieldProfiles } from "./useFieldProfiles.ts";
+import { resolvedChartKind } from "../suggest/chartRules.ts";
+import { cardComparison, withCardComparison, CARD_COMPARISONS } from "../charts/cardComparison.ts";
 import { pickImage } from "./imagePicker.ts";
 
 /**
@@ -14,25 +16,16 @@ import { pickImage } from "./imagePicker.ts";
  * it writes lands on the tile spec, so it survives Copy spec and an agent can
  * set the same fields.
  */
-export function Inspector({ model, tile, onChange, onClose }: {
-  model: Model; tile: TileSpec;
+export function Inspector({ model, tile, queryContext = "", onChange, onClose }: {
+  model: Model; tile: TileSpec; queryContext?: string;
   onChange: (t: TileSpec) => void; onClose: () => void;
 }) {
-  const [profiles, setProfiles] = useState<FieldProfile[] | null>(null);
   const f: FormatSpec = mergeTextFormat(tile.format);
   const inferred = inferNumberStyle(model, tile);
-  const kind = tile.chart ?? inferChart(model, tile);
+  const kind = resolvedChartKind(model, tile);
   const isKpi = kind === "kpi";
-  const bare = (tile.dimensions ?? []).map((d) => (d.includes(":") ? d.split(":")[1] : d));
   const base = tile.metrics.length ? metricOf(model, tile.metrics[0])?.baseTable : null;
-
-  useEffect(() => {
-    if (!base || !bare.length) { setProfiles([]); return; }
-    fetch(`/api/profile?base=${base}&fields=${encodeURIComponent(bare.join(","))}`)
-      .then((r) => r.json())
-      .then((d) => setProfiles((d.fields ?? []).map((p: FieldProfile, i: number) =>
-        tile.dimensions[i]?.includes(":") ? { ...p, role: "temporal" } : p)));
-  }, [tile.id, JSON.stringify(tile.dimensions)]);
+  const { profiles, error: profileError, retry } = useFieldProfiles(model, base, tile.dimensions ?? [], JSON.stringify([tile.id, tile.metrics, queryContext]));
 
   const options: VizOption[] = profiles
     ? recommend(tile.metrics, profiles, semanticHints(model, tile.metrics)) : [];
@@ -80,15 +73,7 @@ export function Inspector({ model, tile, onChange, onClose }: {
                   ))}
                 </select>
               </label>
-              <label className="mini-row">
-                <span>Size</span>
-                <input type="number" min={8} max={200} list="text-size-opts" value={f.textSize}
-                       onChange={(e) => fmt({ textSize: +e.target.value || 16 })} />
-                <em>px</em>
-                <datalist id="text-size-opts">
-                  {[12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 96].map((s) => <option key={s} value={s} />)}
-                </datalist>
-              </label>
+              <TextSizeInput key={tile.id} value={f.textSize} onChange={textSize => fmt({ textSize })} />
               <Segs value={(tile.format?.textAlign ?? "left") as "left" | "center" | "right"}
                     onChange={(v) => onChange({ ...tile, format: { ...tile.format, textAlign: v } })}
                     opts={[["left", "left"], ["center", "centre"], ["right", "right"]]} />
@@ -120,10 +105,13 @@ export function Inspector({ model, tile, onChange, onClose }: {
           </Section>
 
           <Section title="Visualization">
-            {!profiles ? <p className="muted sm">Profiling…</p> : (
+            <p className="muted sm">Suggestions use field profiles for the current source and role. Dashboard and chart filters are not included in these profiles.</p>
+            {profiles?.some(p => p.warning) && <><p className="sm" role="status">Some field evidence is unavailable. Suggestions use the available evidence and field types.</p><button className="review-action" onClick={retry}>Retry field profiles</button></>}
+            {profileError ? <><p className="sm" role="alert">{profileError}</p><button className="review-action" onClick={retry}>Retry field profiles</button></>
+              : !profiles ? <p className="muted sm" role="status">Profiling…</p> : (
               <div className="viz-list">
                 {options.map((o) => (
-                  <button key={o.kind} className={"viz-row " + o.fit + (kind === o.kind ? " on" : "")}
+                  <button key={o.kind} className={"viz-row " + o.fit + (kind === resolvedChartKind(model, { ...tile, chart: o.kind }) ? " on" : "")}
                           title={o.why}
                           onClick={() => onChange({ ...tile, chart: o.kind })}>
                     <span>{o.label}</span><em className={"fit " + o.fit}>{o.fit}</em>
@@ -133,18 +121,21 @@ export function Inspector({ model, tile, onChange, onClose }: {
             )}
           </Section>
 
-          {(tile.dimensions ?? []).some((d) => d.includes(":")) && (
+          {(isKpi || (tile.dimensions ?? []).some((d) => d.includes(":"))) && (
             <Section title="Compare">
-              <Segs value={(tile.compare ?? "none") as "none" | "prior" | "yoy"}
+              {isKpi ? <Segs value={cardComparison(tile)} onChange={v => onChange(withCardComparison(tile, v))}
+                opts={CARD_COMPARISONS.filter(([v]) => tile.dimensions.some(d => d.includes(":")) || v === "none" || v === "first")} />
+              : <Segs value={(tile.compare ?? "none") as "none" | "prior" | "yoy"}
                     onChange={(v) => onChange({ ...tile, compare: v })}
-                    opts={[["none", "none"], ["prior", "vs prior"], ["yoy", "vs last year"]]} />
-              {tile.compare && tile.compare !== "none" && (
+                    opts={[["none", "none"], ["prior", "vs prior"], ["yoy", "vs last year"]]} />}
+              {!isKpi && tile.compare && tile.compare !== "none" && (
                 <Segs value={(tile.compareShow ?? "value") as "value" | "delta" | "percent"}
                       onChange={(v) => onChange({ ...tile, compareShow: v })}
                       opts={[["value", "value"], ["delta", "change"], ["percent", "% change"]]} />
               )}
               <p className="muted sm">
-                Adds the prior period, the change and the % change alongside each measure.
+                {isKpi ? "Choose the baseline for the headline change. First shown uses the earliest returned period; missing baselines stay unavailable. None turns the change off."
+                  : "Adds the prior period, the change and the % change alongside each measure."}
               </p>
             </Section>
           )}
@@ -169,14 +160,12 @@ export function Inspector({ model, tile, onChange, onClose }: {
                     opts={[["line", "line"], ["area", "area"], ["bar", "bar"]] as [SparkOptions["shape"], string][]} />
               <Segs value={sp.scale} onChange={(v) => spark({ scale: v })}
                     opts={[["fit", "fit"], ["zero", "from 0"]] as [SparkOptions["scale"], string][]} />
-              <Segs value={sp.compare} onChange={(v) => spark({ compare: v })}
-                    opts={[["prior", "vs prior"], ["first", "vs first"]] as [SparkOptions["compare"], string][]} />
               <div className="checks">
                 <Check on={sp.showRange} onChange={(v) => spark({ showRange: v })}>Range labels</Check>
                 <Check on={sp.showMinMax} onChange={(v) => spark({ showMinMax: v })}>Min / max</Check>
               </div>
             </Section>
-          ) : (
+          ) : kind !== "stat" && kind !== "table" ? (
             <>
               <Section title="Axes">
                 <div className="checks">
@@ -186,6 +175,12 @@ export function Inspector({ model, tile, onChange, onClose }: {
                 </div>
                 <input className="txt" value={f.xTitle ?? ""} placeholder="X axis title"
                        onChange={(e) => fmt({ xTitle: e.target.value || null })} />
+                {kind === "line" && <label className="mini-row"><span>Line Y-axis</span>
+                  <select aria-label="Line Y-axis" value={f.lineScale} onChange={e => fmt({ lineScale: e.target.value as FormatSpec["lineScale"] })}>
+                    <option value="zero">Include zero</option><option value="fit">Fit to data</option>
+                  </select>
+                </label>}
+                {kind === "line" && f.lineScale === "fit" && <p className="muted sm">Shows variation within the observed range. The chart labels its fitted range; bars and areas keep their zero baseline.</p>}
                 <input className="txt" value={f.yTitle ?? ""} placeholder="Y axis title"
                        onChange={(e) => fmt({ yTitle: e.target.value || null })} />
               </Section>
@@ -205,7 +200,7 @@ export function Inspector({ model, tile, onChange, onClose }: {
                        onChange={(v) => fmt({ legend: v ? "auto" : "hide" })}>Legend</Check>
               </Section>
             </>
-          )}
+          ) : null}
 
           <Section title="Tile">
             <div className="checks">
@@ -224,6 +219,36 @@ export function Inspector({ model, tile, onChange, onClose }: {
       )}
     </aside>
   );
+}
+
+/** Keep incomplete input out of the dashboard spec and its saved history. */
+function TextSizeInput({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  const id = useId();
+  useEffect(() => setDraft(String(value)), [value]);
+  const number = Number(draft);
+  const valid = draft.trim() !== "" && Number.isFinite(number) && number >= 1 && number <= 500;
+  const commit = () => {
+    if (valid && number !== value) onChange(number);
+    setDraft(String(valid ? number : value));
+  };
+  return <>
+    <label className="mini-row">
+      <span>Size</span>
+      <input type="number" min={1} max={500} step="any" list={`${id}-sizes`} value={draft}
+        aria-invalid={!valid} aria-describedby={!valid ? `${id}-error` : undefined}
+        onChange={e => setDraft(e.target.value)} onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commit(); }
+          if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setDraft(String(value)); }
+        }} />
+      <em>px</em>
+      <datalist id={`${id}-sizes`}>
+        {[12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 96].map(s => <option key={s} value={s} />)}
+      </datalist>
+    </label>
+    {!valid && <p id={`${id}-error`} role="status" className="muted sm">Enter a size from 1 to 500 px. The current size stays unchanged until the value is valid.</p>}
+  </>;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

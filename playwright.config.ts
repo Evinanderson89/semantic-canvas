@@ -10,7 +10,7 @@ export default defineConfig({
   },
   workers: 2,
   webServer: [
-    { command: "npm run server", url: "http://127.0.0.1:5274/api/model", timeout: 60000,
+    { command: "node scripts/e2e-server.mjs", url: "http://127.0.0.1:5274/api/model", timeout: 60000,
       env: { PORT: "5274", SC_DATA_DIR: ".test-data", SEMANTIC_CANVAS_URL: "http://127.0.0.1:5274" } },
     { command: "npm run dev -- --port 5273 --strictPort", url: "http://127.0.0.1:5273", timeout: 60000,
       env: { SC_API_URL: "http://127.0.0.1:5274" } },

@@ -5,7 +5,8 @@ export const tabOf = (spec: DashboardSpec, tile: TileSpec) => tile.tabId ?? tabs
 export const currentTab = (spec: DashboardSpec, id: string) => tabsOf(spec).find(t => t.id === id) ?? tabsOf(spec)[0];
 export function tabView(spec: DashboardSpec, id: string): DashboardSpec {
   const active = currentTab(spec, id).id;
-  return { ...spec, tiles: spec.tiles.filter(t => tabOf(spec, t) === active) };
+  const tiles = spec.tiles.filter(t => tabOf(spec, t) === active), ids = new Set(tiles.map(t => t.id));
+  return { ...spec, tiles, ...(spec.filters ? { filters: spec.filters.map(f => ({ ...f, bindings: f.bindings.filter(b => ids.has(b.tileId)) })) } : {}) };
 }
 
 /** Replace only the visible page. All other pages remain in the document. */
@@ -16,11 +17,20 @@ export function mergeTab(spec: DashboardSpec | null, view: DashboardSpec, id: st
   const used = new Set(other.map(t => t.id));
   const remap = new Map(view.tiles.filter(t => used.has(t.id)).map(t => [t.id, crypto.randomUUID()]));
   const tiles = view.tiles.map(t => ({ ...t, id: remap.get(t.id) ?? t.id,
-    ...(spec.tabs ? { tabId: active } : {}), section: t.section ? remap.get(t.section) ?? t.section : undefined }));
+    ...(spec.tabs ? { tabId: active } : {}), section: t.section ? remap.get(t.section) ?? t.section : t.section }));
   const result = { ...spec, ...view, tiles: [...other, ...tiles] };
+  if (remap.size && result.tabs) result.tabs = result.tabs.map(tab => tab.id === active && tab.brief?.evidenceIds
+    ? { ...tab, brief: { ...tab.brief, evidenceIds: tab.brief.evidenceIds.map(id => remap.get(id) ?? id) } } : tab);
   const present = new Set(result.tiles.map(t => t.id));
   const removedControls = new Set(spec.tiles.filter(t => tabOf(spec, t) === active && t.kind === "filter" && !result.tiles.some(n => n.filterId === t.filterId)).map(t => t.filterId));
-  if (result.filters) result.filters = result.filters.filter(f => !removedControls.has(f.id)).map(f => ({ ...f, bindings: f.bindings.filter(b => present.has(b.tileId)) }));
+  if (result.filters) result.filters = result.filters.filter(f => !removedControls.has(f.id)).map(f => {
+    const edited = f.bindings.map(b => ({ ...b, tileId: remap.get(b.tileId) ?? b.tileId }));
+    const untouched = spec.filters?.find(previous => previous.id === f.id)?.bindings.filter(b => {
+      const tile = other.find(t => t.id === b.tileId);
+      return tile && (f.scope === "report" || f.tabId === tabOf(result, tile)) && !edited.some(e => e.tileId === b.tileId);
+    }) ?? [];
+    return { ...f, bindings: [...edited, ...untouched].filter(b => present.has(b.tileId)) };
+  });
   return result;
 }
 
@@ -28,7 +38,7 @@ export function copiedTiles(tiles: TileSpec[], tabId: string, y = 24): TileSpec[
   const ids = new Map(tiles.map(t => [t.id, crypto.randomUUID()]));
   const top = tiles.length ? Math.min(...tiles.map(t => t.layout.y)) : 0;
   return tiles.map(t => ({ ...structuredClone(t), id: ids.get(t.id)!, tabId, pinned: false,
-    section: t.section ? ids.get(t.section) : undefined, layout: { ...t.layout, y: t.layout.y - top + y } }));
+    section: t.section ? ids.get(t.section) ?? null : t.section, layout: { ...t.layout, y: t.layout.y - top + y } }));
 }
 
 export function removeTab(spec: DashboardSpec, id: string): DashboardSpec {
@@ -53,6 +63,7 @@ export function duplicateTab(spec: DashboardSpec, sourceId: string): DashboardSp
     return f.scope === "report" ? [{ ...f, bindings: [...f.bindings, ...extra] }]
       : local.has(f.id) ? [f, { ...structuredClone(f), id: local.get(f.id)!, tabId: id, bindings: extra }] : [f];
   });
-  return { ...spec, tabs: [...tabsOf(spec), { id, title: `${source.title.slice(0, 93)} (copy)` }],
+  const brief = source.brief ? { ...structuredClone(source.brief), ...(source.brief.evidenceIds ? { evidenceIds: source.brief.evidenceIds.map(tileId => map.get(tileId) ?? tileId) } : {}) } : undefined;
+  return { ...spec, tabs: [...tabsOf(spec), { id, title: `${source.title.slice(0, 93)} (copy)`, ...(brief ? { brief } : {}) }],
     tiles: [...spec.tiles, ...copies.map(t => ({ ...t, filterId: t.filterId ? local.get(t.filterId) ?? t.filterId : undefined }))], filters };
 }

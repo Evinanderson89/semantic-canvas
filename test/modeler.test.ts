@@ -30,7 +30,7 @@ describe("propose", () => {
     expect(l).toMatchObject({ kind: "fact", primaryKey: null, grain: "one row per event on clicked_at" });
     expect(p.warnings).toContain("raw_clicks: no unique column; write its grain before publishing.");
     expect(p.joins).toEqual([expect.objectContaining({ left: "fct_orders", leftOn: "customer_id", right: "dim_customers", rightOn: "customer_id", include: true, resolution: 0.998 })]);
-    expect(p.joins[0].evidence).toBe("customer_id is dim_customers's key; 99.8% of fct_orders.customer_id values resolve.");
+    expect(p.joins[0].evidence).toContain("99.8% of 1,000 non-null fct_orders.customer_id key rows resolve (998 matched; 2 unmatched)");
     const names = p.metrics.filter((m) => m.include).map((m) => m.name);
     expect(names).toEqual(expect.arrayContaining(["orders_count", "total_amount", "distinct_customers", "clicks_count"]));
     expect(p.metrics.find((m) => m.name === "total_amount")).toMatchObject({ baseTable: "fct_orders", expression: "SUM(fct_orders.amount)", label: "Total amount" });
@@ -40,7 +40,8 @@ describe("propose", () => {
     const p = propose({ id: "s", label: "S", tables: [orders, customers, { name: "dim_empty", rows: 0, columns: [col("empty_id", "string", 0)] }],
       probes: [{ left: "fct_orders", leftOn: "customer_id", right: "dim_customers", rightOn: "customer_id", leftRows: 1000, matched: 200 }] });
     expect(p.joins[0]).toMatchObject({ include: false, resolution: 0.2 });
-    expect(p.warnings).toContain("fct_orders.customer_id → dim_customers: only 20% of fct_orders.customer_id values resolve; left out.");
+    expect(p.warnings).toContainEqual(expect.stringContaining("200 matched; 800 unmatched"));
+    expect(p.warnings).toContainEqual(expect.stringContaining("Left out; review unmatched keys before including"));
     expect(p.tables.find((t) => t.name === "dim_empty")!.include).toBe(false);
   });
   it("helpers: key preference, type vocabulary, names", () => {
@@ -95,7 +96,8 @@ describe("modeler on the sample lake", () => {
     expect(findKey(users)!.name).toBe("user_id");
     const probes = await probeJoins(conn, profiles, joinCandidates(profiles));
     const eventsToUsers = probes.find((p) => p.left === "fct_events" && p.right === "dim_users")!;
-    expect(eventsToUsers.matched / eventsToUsers.leftRows).toBeGreaterThan(0.99);
+    expect(eventsToUsers.failure).toBeUndefined();
+    expect(eventsToUsers.matched! / eventsToUsers.leftRows!).toBeGreaterThan(0.99);
     const proposal = propose({ id: "lake", label: "Sample lake", tables: profiles, probes });
     expect(proposal.tables.find((t) => t.name === "dim_users")).toMatchObject({ kind: "dimension", grain: "one row per user_id" });
     expect(proposal.joins.some((j) => j.left === "fct_web_sessions" && j.right === "dim_users" && j.include)).toBe(true);
@@ -108,7 +110,7 @@ describe("modeler on the sample lake", () => {
     expect(validateTile(model, tile)).toEqual([]);
     const r = await conn.execute(compileTile(model, conn, tile), 50);
     expect(r.rows.length).toBeGreaterThan(0);
-  });
+  }, 15_000); // Full-table profiling plus every candidate join exceeds 5s on a loaded test host.
 });
 
 // Extending a model that exists, and drift against it: nothing the model

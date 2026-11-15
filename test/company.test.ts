@@ -11,6 +11,7 @@ import { join, resolve } from "node:path";
 import express from "express";
 import YAML from "yaml";
 import { accessSchema, loadAuthConfig, mapIdentity } from "../src/security/auth.ts";
+import { parseWorkspaceSession } from "../src/app/sessionContract.ts";
 
 let root = "", issuer = "", url = "", output = "", appProcess: ChildProcess, provider: ReturnType<typeof createServer>;
 const host = "canvas.example.test";
@@ -42,9 +43,37 @@ async function login(sub: string, groups: string[]): Promise<Login> {
   expect(setCookie).toContain("HttpOnly"); expect(setCookie).toContain("Secure"); expect(setCookie).toContain("SameSite=Lax");
   const cookie = setCookie.split(";")[0];
   const session = await (await call("/api/auth/session", { headers: { cookie } })).json();
+  expect(parseWorkspaceSession(session)).toMatchObject({ mode: "team", authenticated: true });
   expect(session.authenticated).toBe(true); return { cookie, csrf: session.csrf, user: session.user };
 }
 const headers = (s: Login) => ({ cookie: s.cookie, "x-sc-csrf": s.csrf, "content-type": "application/json" });
+
+it("reports actual filter-value truncation without dropping the last available value in small lists", async () => {
+  const admin = await login("admin", ["admins"]);
+  const values = async (field: string) => {
+    const response = await call(`/api/values?source=public&base=dim_users&field=${field}`, { headers: headers(admin) });
+    expect(response.status).toBe(200); return response.json();
+  };
+  const large = await values("user_id");
+  expect(large.values).toHaveLength(500); expect(large.truncated).toBe(true);
+  const small = await values("country");
+  expect(small.values.length).toBeGreaterThan(1); expect(small.values.length).toBeLessThan(500);
+  expect(small.truncated).toBe(false);
+  expect(small.values.every((v: any, i: number) => i === 0 || Number(small.values[i - 1].n) >= Number(v.n))).toBe(true);
+});
+
+for (const client of ["claude", "chatgpt"]) it(`keeps local ${client} setup unavailable in company mode and restricted to administrators`, async () => {
+  const endpoint = `/api/setup/${client}`;
+  expect((await call(endpoint)).status).toBe(401);
+  const viewer = await login("viewer", ["viewers"]);
+  expect((await call(endpoint, { headers: headers(viewer) })).status).toBe(403);
+  const admin = await login("admin", ["admins"]);
+  const setup = await (await call(endpoint, { headers: headers(admin) })).json();
+  expect(setup.available).toBe(false);
+  expect(setup.command).toBeUndefined();
+  expect(setup.mcpCommand).toBeUndefined();
+  expect((await call(endpoint + "/check", { method: "POST", headers: headers(admin) })).status).toBe(409);
+});
 
 const base = { adapter: "duckglue", model: resolve("sample-data/warehouse.yaml"), connector: { type: "duckdb", lakeRoot: resolve("sample-data/lake"), poolSize: 1 } };
 /** Every case that changes the registry puts it back: the two sources the suite started with, nothing else. No case depends on the one before it. */
@@ -104,6 +133,23 @@ it("completes HTTPS OIDC code exchange with PKCE and rejects state, nonce and re
   const wrongNonce = await begin("admin", ["admins"]); codes.get(wrongNonce.code)!.nonce = "forged";
   expect((await call(`/api/auth/callback?code=${wrongNonce.code}&state=${wrongNonce.state}`, { headers: { cookie: wrongNonce.cookie } })).status).toBe(400);
 });
+it("requires source-authorized sign-in for schema discovery and uses the session's catalog role", async () => {
+  expect((await call("/api/schema")).status).toBe(401);
+  for (const role of ["viewer", "editor", "admin"] as const) {
+    const session = await login(`schema-${role}`, [`${role}s`]);
+    const h = { ...headers(session), "x-sc-role": "admin", "x-sc-principal": "admin" };
+    const response = await call("/api/schema", { headers: h });
+    expect(response.status).toBe(200);
+    const schema = await response.json();
+    const model = await (await call("/api/model", { headers: h })).json();
+    expect(schema.scope).toBe("semantic-model"); // DuckDB has no raw schema() endpoint.
+    expect(schema.tables).toEqual(Object.values(model.tables).map((t: any) => ({ name: t.name, columns: t.columns.map((c: any) => ({ name: c.name, type: c.type })) })));
+    if (role !== "admin") {
+      expect((await call("/api/schema?source=private", { headers: h })).status).toBe(403);
+      expect((await call("/api/schema", { headers: { ...h, "x-sc-source": "private" } })).status).toBe(403);
+    }
+  }
+});
 it("enforces source access and server principal despite forged client headers", async () => {
   const s = await login("viewer", ["viewers"]);
   const list = await (await call("/api/sources", { headers: headers(s) })).json(); expect(list.sources.map((s: any) => s.id)).toEqual(["public"]);
@@ -150,12 +196,16 @@ it("keeps credentials, callback query strings and private content out of structu
   expect(output).toContain('"event":"audit.change"'); expect(output).toContain('"requestId"');
 });
 
-it("forwards the signed-in session for embedded tools and ignores forged scope arguments", async () => {
+it("forwards the signed-in session for embedded tools and rejects mismatched scope arguments", async () => {
   const s = await login("tool-editor", ["editors"]), previous = process.env.PORT;
   process.env.PORT = new URL(url).port;
   try {
-    const result = await runToolInContext({ source: "public", principal: "emea", auth: { cookie: s.cookie, csrf: s.csrf, host, origin: `https://${host}` } }, () => api("/api/query", { source: "private", principal: "admin", body: { metrics: ["event_count"], dimensions: [] } }));
+    const ctx = { source: "public", principal: "emea", auth: { cookie: s.cookie, csrf: s.csrf, host, origin: `https://${host}`, expires: Date.now() + 60_000 } };
+    await expect(runToolInContext(ctx, () => api("/api/query", { source: "private", body: { metrics: ["event_count"], dimensions: [] } }))).rejects.toThrow(/restricted to source/);
+    await expect(runToolInContext(ctx, () => api("/api/query", { principal: "admin", body: { metrics: ["event_count"], dimensions: [] } }))).rejects.toThrow(/restricted to principal/);
+    const result = await runToolInContext(ctx, () => api("/api/query", { source: "public", principal: "emea", body: { metrics: ["event_count"], dimensions: [] } }));
     expect(result.principal).toBe("emea");
+    expect(result.source.id).toBe("public");
   } finally { if (previous === undefined) delete process.env.PORT; else process.env.PORT = previous; }
 });
 it("scopes chart discussions to data permissions and watches to their authenticated owner", async () => {
@@ -218,6 +268,10 @@ it("lets editors register and disconnect ingested tables, admins publish them, a
   expect(editorModel.tables.ingest_orders.connected.status).toBe("unreviewed"); expect(editorModel.metrics.ingest_orders_rows.reviewed).toBe(false);
   const viewerModel = await (await call("/api/model", { headers: headers(viewer) })).json();
   expect(viewerModel.tables.ingest_orders).toBeUndefined(); expect(viewerModel.metrics.ingest_orders_rows).toBeUndefined();
+  const schemaNames = async (s: Login) => (await (await call("/api/schema", { headers: { ...headers(s), "x-sc-role": "admin" } })).json()).tables.map((t: any) => t.name);
+  expect(await schemaNames(viewer)).not.toContain("ingest_orders");
+  expect(await schemaNames(editor)).toContain("ingest_orders");
+  expect(await schemaNames(admin)).toContain("ingest_orders");
   expect((await (await call("/api/sources/public/connected", { headers: headers(viewer) })).json()).tables).toEqual([]);
   expect((await (await call("/api/sources/public/connected", { headers: headers(editor) })).json()).tables.map((t: any) => t.dataset)).toEqual(["ingest_orders"]);
   // The review screen reads the draft in full; a viewer cannot see an unreviewed one at all.
@@ -238,7 +292,37 @@ it("lets editors register and disconnect ingested tables, admins publish them, a
   expect(await published.json()).toMatchObject({ status: "published", metrics: [{ name: "ingest_orders_rows", reviewed: true }, { name: "ingest_orders_amount_total", reviewed: false }] });
   const viewerAfter = await (await call("/api/model", { headers: headers(viewer) })).json();
   expect(viewerAfter.tables.ingest_orders.grain).toBe("one row per order placed"); expect(viewerAfter.metrics.ingest_orders_rows.timeGrains).toEqual(["month"]); expect(viewerAfter.metrics.ingest_orders_amount_total).toBeUndefined();
+  expect(await schemaNames(viewer)).toContain("ingest_orders");
   expect((await (await call("/api/sources/public/connected", { headers: headers(viewer) })).json()).tables).toHaveLength(1);
+  // Withdrawal is an administrator action and is enforced by viewer query validation.
+  const reviewedDraft = await (await call("/api/sources/public/connected/ingest_orders", { headers: headers(admin) })).json();
+  const withdraw = { expectedRevision: reviewedDraft.revision, metrics: { ingest_orders_rows: { reviewed: false } } };
+  expect((await publish(editor, withdraw)).status).toBe(403);
+  expect((await publish(admin, withdraw)).status).toBe(200);
+  expect((await (await call("/api/model", { headers: headers(viewer) })).json()).metrics.ingest_orders_rows).toBeUndefined();
+  const withdrawnQuery = await call("/api/query", { method: "POST", headers: headers(viewer), body: JSON.stringify({ metrics: ["ingest_orders_rows"], dimensions: ["month:ingest_orders.created_at"] }) });
+  expect(withdrawnQuery.status).toBe(400);
+  expect(await withdrawnQuery.text()).toContain("not yet published");
+  expect((await publish(admin, { ...review, expectedRevision: reviewedDraft.revision })).status).toBe(409);
+  expect((await (await call("/api/model", { headers: headers(viewer) })).json()).metrics.ingest_orders_rows).toBeUndefined();
+  expect((await publish(admin, review)).status).toBe(200);
+  // A routine ingestion refresh keeps administrator-reviewed labels and grain.
+  const refresh = await register(editor, { ...registration, importId: "imp-refresh" });
+  expect(refresh.status).toBe(200);
+  const afterRefresh = await (await call("/api/model", { headers: headers(viewer) })).json();
+  expect(afterRefresh.tables.ingest_orders.grain).toBe("one row per order placed");
+  expect(afterRefresh.metrics.ingest_orders_rows.timeGrains).toEqual(["month"]);
+  const replacement = { ...registration, metrics: { ...registration.metrics, ingest_orders_rows: { label: "Inflated orders", expression: "count(*) * 100" } } };
+  expect((await register(editor, replacement)).status).toBe(403);
+  expect((await register(editor, { ...registration, metrics: {} })).status).toBe(403);
+  expect((await register(editor, { ...registration, table: { ...registration.table, columns: registration.table.columns.filter(c => c.name !== "amount") } })).status).toBe(403);
+  expect((await (await call("/api/model", { headers: headers(viewer) })).json()).metrics.ingest_orders_rows.expression).toBe("count(*)");
+  // Administrators may stage replacement logic, but it is not auto-approved.
+  expect((await register(admin, replacement)).status).toBe(200);
+  expect((await (await call("/api/model", { headers: headers(viewer) })).json()).metrics.ingest_orders_rows).toBeUndefined();
+  expect((await (await call("/api/model", { headers: headers(editor) })).json()).metrics.ingest_orders_rows).toMatchObject({ expression: "count(*) * 100", reviewed: false });
+  expect((await publish(admin, review)).status).toBe(200);
+  expect((await (await call("/api/model", { headers: headers(viewer) })).json()).metrics.ingest_orders_rows.expression).toBe("count(*) * 100");
   // Disconnect removes the entry only: the registrant may, another editor may not, the operator keeps the lake.
   expect((await disconnect(other)).status).toBe(403);
   expect((await disconnect(viewer)).status).toBe(403);
@@ -255,6 +339,10 @@ it("provisions the first source from an empty registry and keeps its uploaded mo
   await writeFile(join(root, "sources.yaml"), "sources: []\n");
   const add = await call("/api/sources", { method: "POST", headers: headers(s), body: JSON.stringify({ id: "first-source", label: "First source", adapter: "duckglue", model: path, connector: { type: "duckdb", lakeRoot: resolve("sample-data/lake"), poolSize: 1 } }) });
   expect(add.status, await add.clone().text()).toBe(200); expect((await add.json()).sources.map((s: any) => s.id)).toEqual(["first-source"]);
+  const viewer = await login("no-accessible-source", ["viewers"]);
+  const unavailable = await call("/api/model", { headers: headers(viewer) });
+  expect(unavailable.status).toBe(404);
+  expect(await unavailable.json()).toEqual({ error: "No accessible data source is ready. Connect a source or contact your workspace administrator." });
   const config = YAML.parse(await readFile(join(root, "sources.yaml"), "utf8")); expect(config.sources[0].model).toBe(path);
   const concurrent = await Promise.all(["second-source", "third-source"].map(id => call("/api/sources", { method: "POST", headers: headers(s), body: JSON.stringify({ id, adapter: "duckglue", model: path, connector: { type: "duckdb", lakeRoot: resolve("sample-data/lake"), poolSize: 1 } }) })));
   expect(concurrent.map(r => r.status)).toEqual([200, 200]);
@@ -378,3 +466,16 @@ it("Proposed metrics: an editor proposes an aggregate, charts it at once, viewer
   await propose(editor, { name: "short_sessions", label: "Short sessions", baseTable: "fct_web_sessions", expression: "COUNT(*)" });
   expect((await call(`/api/sources/${from}/metrics/short_sessions`, { method: "DELETE", headers: headers(editor) })).status).toBe(200);
 }, 60_000);
+
+it("protects saved version history with workspace and source access", async () => {
+  const admin = await login("version-admin", ["admins"]), viewer = await login("version-viewer", ["viewers"]);
+  const id = "private-version-history";
+  expect((await call("/api/dashboards", { method: "POST", headers: { ...headers(admin), "x-sc-source": "private" }, body: JSON.stringify({ id, spec: { title: "Private design", tiles: [] } }) })).status).toBe(200);
+  for (const suffix of ["versions", "versions/1"]) {
+    const path = `/api/dashboards/${id}/${suffix}`;
+    expect((await call(path)).status).toBe(401);
+    expect((await call(path, { headers: { ...headers(viewer), "x-sc-source": "private" } })).status).toBe(403);
+    expect((await call(path, { headers: { ...headers(viewer), "x-sc-source": "public" } })).status).toBe(404);
+    expect((await call(path, { headers: { ...headers(admin), "x-sc-source": "private" } })).status).toBe(200);
+  }
+});

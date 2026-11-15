@@ -5,6 +5,8 @@
  * whether the model came from duckglue, Cube, MetricFlow or Malloy. Adding a
  * layer means writing one adapter, not touching anything else.
  */
+import { numericType } from "./numericType.ts";
+
 export interface Column {
   name: string;
   type: string;
@@ -19,7 +21,12 @@ export interface Table {
   synonyms: string[];
   columns: Column[];
   partitionKeys: string[];
+  /** Authored default time axis; separate from physical partitions and period coverage. */
+  defaultDateColumn?: string;
   primaryKey?: string | null;
+  /** Each row represents this whole reporting-calendar period, named by a date column.
+   * This is authored coverage metadata, not proof of freshness or valid rollup arithmetic. */
+  period?: { column: string; grain: TimeGrain };
   /** Days after a period ends before its rows are all in ("orders settle after 2 days"). Declared as reporting_lag; drives the data-honesty review. */
   reportingLagDays?: number;
   relation?: { database?: string; schema?: string; table: string };
@@ -61,12 +68,14 @@ export interface Metric {
   /** ratio: the two metrics. */
   numerator?: string;
   denominator?: string;
-  /** cumulative: the metric summed along time, and how many periods the window trails (absent: since the start). */
+  /** cumulative: sum available input values over N reporting-calendar periods including the current period (absent: since the query input starts). */
   metric?: string;
   window?: number;
-  /** Declared native reporting grains. Omitted means the expression owns rollup semantics. */
+  /** Declared display unit, also used to check shared chart axes. */
+  unit?: "currency" | "percent" | "number" | "months" | "days" | "seconds" | "ratio";
   importance?: number;
   direction?: "higher" | "lower" | "neutral";
+  /** Declared native reporting grains. Omitted means the expression owns rollup semantics. */
   timeGrains?: TimeGrain[];
   timeDimension?: string;
   /** Always-on filter, e.g. status = 'active'. */
@@ -144,7 +153,7 @@ export function rowCountMetric(model: Pick<Model, "tables">, table: string): Met
   if (!t) return undefined;
   return { name: rowCountName(table), label: `Rows of ${table}`, baseTable: table, expression: "COUNT(*)", filter: null, synonyms: [],
     description: t.grain ? `How many rows: ${t.grain}.` : `How many rows of ${table}.`,
-    timeDimension: t.partitionKeys[0] ? `${table}.${t.partitionKeys[0]}` : undefined };
+    timeDimension: timeColumnOf(model, table) ?? undefined };
 }
 /** A metric by name: declared in the model, or the built-in row count of a table. Every lookup of a tile's metric goes through here.
  *  Typed like the map index it replaces (`model.metrics[name]`): callers that already check for absence keep doing so with `?.`. */
@@ -155,14 +164,20 @@ export function metricOf(model: Pick<Model, "tables" | "metrics">, name: string 
 }
 
 export const isUnreviewedTable = (t: Table | undefined) => t?.connected?.status === "unreviewed";
-export const isUnreviewed = (model: Model, m: Metric) => m.reviewed === false || isUnreviewedTable(model.tables[m.baseTable]);
+const directlyUnreviewed = (model: Model, m: Metric) => m.reviewed === false || isUnreviewedTable(model.tables[m.baseTable]);
+/** Computed metrics use simple components. Resolve against the full model,
+ * before removing drafts, or a hidden component would disappear from discovery. */
+export const unreviewedDependencies = (model: Model, m: Metric): Metric[] => metricType(m) === "simple" ? []
+  : metricComponents(model, m).filter(component => directlyUnreviewed(model, component));
+export const isUnreviewed = (model: Model, m: Metric) => directlyUnreviewed(model, m) || unreviewedDependencies(model, m).length > 0;
 
 /** The governed catalogue only: connected tables and draft metrics no admin has published are dropped.
  *  Suggestions, the agent's catalogue and viewer sessions all see this; editors and admins see the full model. */
 export function reviewedModel(model: Model): Model {
   if (!Object.values(model.tables).some((t) => t.connected) && !Object.values(model.metrics).some((m) => m.reviewed === false)) return model;
   const tables = Object.fromEntries(Object.entries(model.tables).filter(([, t]) => !isUnreviewedTable(t)));
-  const metrics = Object.fromEntries(Object.entries(model.metrics).filter(([, m]) => m.reviewed !== false && tables[m.baseTable]));
+  const metrics = Object.fromEntries(Object.entries(model.metrics).filter(([, m]) => !isUnreviewed(model, m) && tables[m.baseTable]
+    && metricComponents(model, m).every(component => tables[component.baseTable])));
   return { ...model, tables, metrics, joins: model.joins.filter((j) => tables[j.left] && tables[j.right]) };
 }
 export const visibleModel = (model: Model, role: string | undefined) => role === "viewer" ? reviewedModel(model) : model;
@@ -213,6 +228,23 @@ export function joinPath(model: Model, from: string, to: string): { joins: Join[
   return { joins: paths[0] };
 }
 
+/** Discover declared forward joins, nearest first. Keep rejected paths so the
+ * picker can explain a modeling problem; only `joins` paths may be offered.
+ * The compiler's joinPath remains the authority for ambiguity and fan-out. */
+export function joinedTableOptions(model: Model, from: string): { table: Table; path: ReturnType<typeof joinPath> }[] {
+  if (!model.tables[from]) return [];
+  const seen = new Set([from]), queue = [from];
+  const out: { table: Table; path: ReturnType<typeof joinPath> }[] = [];
+  for (let i = 0; i < queue.length; i++) {
+    for (const join of model.joins) {
+      if (join.left !== queue[i] || seen.has(join.right) || !model.tables[join.right]) continue;
+      seen.add(join.right); queue.push(join.right);
+      out.push({ table: model.tables[join.right], path: joinPath(model, from, join.right) });
+    }
+  }
+  return out;
+}
+
 /**
  * Free-text context for a metric selection: the base table's own
  * `description`/`synonyms` plus each selected metric's -- whatever the
@@ -254,7 +286,7 @@ export function isTemporal(c: Column): boolean {
 }
 
 export function isNumeric(c: Column): boolean {
-  return /^(double|float|decimal|numeric|int|bigint|smallint|real)/i.test(c.type);
+  return numericType(c.type) !== null;
 }
 
 /**
@@ -273,23 +305,44 @@ export function isNumeric(c: Column): boolean {
  * active MRR by started_on produces a cohort breakdown that looks like a
  * trend but isn't one -- each bucket only holds currently-active rows that
  * happen to share a start date, not the state of the world at that time.
- * Only two things are trustworthy here, both things the model's own author
- * declared on purpose: the table's partition key (a real periodic fact
- * date -- event_date, movement_date, spend_date), or a date-typed primary
- * key on a table whose own grain is "one row per period" (fct_saas_monthly:
- * primary_key month, grain "one row per calendar month"). A table with
- * neither -- fct_subscriptions -- genuinely has no column safe for this.
+ * Prefer an explicit period column, then a declared default date, then a partition key (event_date,
+ * movement_date, spend_date), then a date-typed primary key. These identify
+ * an authored time axis; a date key alone does not establish period coverage.
+ * A table with none of these, such as fct_subscriptions, has no declared
+ * trend axis safe for this automatic suggestion.
  */
-export function timeColumnOf(model: Model, tableName: string | null): string | null {
+export function timeColumnOf(model: Pick<Model, "tables">, tableName: string | null): string | null {
   if (!tableName) return null;
   const table = model.tables[tableName];
   if (!table) return null;
   const byName = (name: string | undefined) => name ? table.columns.find((c) => c.name === name) : undefined;
-  const col = byName(table.partitionKeys[0]) ?? (() => {
+  const col = byName(table.period?.column) ?? byName(table.defaultDateColumn) ?? byName(table.partitionKeys[0]) ?? (() => {
     const pk = byName(table.primaryKey ?? undefined);
     return pk && isTemporal(pk) ? pk : undefined;
   })();
   return col ? `${tableName}.${col.name}` : null;
+}
+
+export function defaultDateIssue(table: Table): string | null {
+  return table.defaultDateColumn !== undefined && !table.columns.some(c => c.name === table.defaultDateColumn && isTemporal(c))
+    ? `Table ${table.name}: default_date_column must name a date or timestamp column on this table` : null;
+}
+
+/** A date primary key proves uniqueness, not which period a row represents.
+ * Use an explicit table period, or unanimous native metric declarations on
+ * this exact time field. A native declaration on another axis is irrelevant. */
+export function nativePeriod(model: Model, owner: string, column: string, grain: string, metrics: Metric[]): boolean {
+  const period = model.tables[owner]?.period;
+  if (period?.column === column) return period.grain === grain;
+  return metrics.length > 0 && metrics.every(m => m.baseTable === owner && m.timeDimension === `${owner}.${column}` && m.timeGrains?.includes(grain as TimeGrain));
+}
+
+/** Only periods that nest without splitting a source row can be rolled up.
+ * Weeks cross month/year boundaries, so weekly summaries cannot be allocated
+ * to those periods without a separately defined business rule. */
+export function periodRollupAllowed(native: TimeGrain, requested: string): boolean {
+  return ({ day: ["day", "week", "month", "quarter", "year"], week: ["week"],
+    month: ["month", "quarter", "year"], quarter: ["quarter", "year"], year: ["year"] }[native]).includes(requested);
 }
 
 /** Can a filter on `field` be applied to a tile based on `baseTable`? */
@@ -326,6 +379,21 @@ export function metricComponents(model: Model, m: Metric): Metric[] {
 export const isCrossTableRatio = (model: Model, m: Metric) =>
   metricType(m) === "ratio" && !!m.numerator && !!m.denominator && metricOf(model, m.numerator)?.baseTable !== metricOf(model, m.denominator)?.baseTable;
 
+/** One reporting axis, evaluated on each ratio input's own date. Unqualified
+ * fields belong to the ratio's numerator, just as they do in tile validation. */
+export function ratioSideDimensions(model: Model, ratio: Metric, input: Metric, dimensions: string[]): string[] | null {
+  const aligned: string[] = [];
+  for (const dimension of dimensions) {
+    if (!dimension.includes(":")) { aligned.push(dimension); continue; }
+    const [grain, field] = dimension.split(":");
+    const [owner, column] = field.includes(".") ? field.split(".") : [ratio.baseTable, field];
+    const date = owner === input.baseTable ? `${owner}.${column}` : input.timeDimension ?? timeColumnOf(model, input.baseTable);
+    if (!date) return null;
+    aligned.push(`${grain}:${date}`);
+  }
+  return aligned;
+}
+
 /** Problems with a computed metric's definition, in words; null when it is sound. */
 export function computedMetricIssue(model: Model, m: Metric): string | null {
   const t = metricType(m);
@@ -343,7 +411,13 @@ export function computedMetricIssue(model: Model, m: Metric): string | null {
     if (m.baseTable !== metricOf(model, m.numerator!).baseTable) return `${m.name}: a ratio's base table is its numerator's (${metricOf(model, m.numerator!).baseTable}).`;
     return null;
   }
-  if (t === "cumulative") return simple(m.metric, "metric") ?? (m.window !== undefined && (!Number.isInteger(m.window) || m.window < 1) ? `${m.name}: window is a whole number of periods.` : null);
+  if (t === "cumulative") {
+    const issue = simple(m.metric, "metric");
+    if (issue) return issue;
+    const input = metricOf(model, m.metric!);
+    if (m.baseTable !== input.baseTable) return `${m.name}: a cumulative metric's base table is its input's (${input.baseTable}).`;
+    return m.window !== undefined && (!Number.isInteger(m.window) || m.window < 1) ? `${m.name}: window is a whole number of periods.` : null;
+  }
   const refs = derivedReferences(model, m.expression);
   if (!refs.length) return `${m.name}: a derived metric's expression names other metrics (revenue - cost).`;
   for (const r of refs) { const issue = simple(r, `"${r}"`); if (issue) return issue; if (metricOf(model, r).baseTable !== m.baseTable) return `${m.name}: "${r}" is on ${metricOf(model, r).baseTable}, not ${m.baseTable}; a derived metric stays on one table (a ratio may cross tables).`; }
@@ -354,6 +428,7 @@ export function computedMetricIssue(model: Model, m: Metric): string | null {
 /** Restricted metrics require their declared time dimension at a supported grain. */
 export function metricGrainIssue(metric: Metric, dimensions: string[]): string | null {
   if (!metric.timeGrains) return null;
+  if (!metric.timeDimension) return `${metric.label} declares reporting grains but has no time dimension. Update its metric definition before querying.`;
   const dimension = dimensions.find((d) => {
     const field = d.split(":")[1];
     return field && (field.includes(".") ? field : `${metric.baseTable}.${field}`) === metric.timeDimension;

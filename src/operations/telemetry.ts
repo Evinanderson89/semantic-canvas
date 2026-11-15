@@ -8,7 +8,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { identityOf } from "../security/auth.ts";
 
-const allowed = new Set(["requestId", "actor", "role", "method", "route", "status", "durationMs", "source", "operation", "errorType", "mode", "readySources", "totalSources", "rows", "truncated", "revision", "count"]);
+const allowed = new Set(["requestId", "actor", "role", "method", "route", "status", "durationMs", "source", "operation", "errorType", "providerStatus", "providerCategory", "mode", "readySources", "totalSources", "rows", "truncated", "revision", "count"]);
 /** Allowlisting deliberately excludes request bodies, SQL, cookies, tokens, user names and file contents. */
 export function logRecord(event: string, fields: Record<string, unknown> = {}, level = "info") {
   const safe = Object.fromEntries(Object.entries(fields).filter(([k, v]) => allowed.has(k) && ["string", "number", "boolean"].includes(typeof v)).map(([k, v]) => [k, typeof v === "string" ? v.slice(0, 256).replace(/[\r\n]/g, " ") : v]));

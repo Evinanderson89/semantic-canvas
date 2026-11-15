@@ -2,7 +2,7 @@ import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { dashboardSchema } from "../compiler/schema.ts";
-import { applyLayout, sectionsOf } from "../canvas/layouts.ts";
+import { applyLayout, pinnedContent, sectionsOf } from "../canvas/layouts.ts";
 import { inferChart } from "./chartRules.ts";
 import { metricOf } from "../semantic/model.ts";
 
@@ -95,7 +95,7 @@ function refineStoryLayout(dash: DashboardSpec, model: Model, width: number): St
   const available = width - 48;
   if (available < 180 || dash.tiles.some(t => validateTile(model, t).length)) return null;
   const groups = sectionsOf(dash.tiles);
-  const fixed = new Set(groups.filter(g => g.some(t => t.pinned)).flat().map(t => t.id));
+  const fixed = new Set(pinnedContent(dash.tiles).map(t => t.id));
   const trend = dash.tiles.filter(t => !fixed.has(t.id) && (t.kind ?? "metric") === "metric" &&
     !["kpi", "stat"].includes(inferChart(model, t)) && t.dimensions.some(d => /^(day|week|month|quarter|year):/.test(d)))
     .sort((a,b) => a.layout.y - b.layout.y || a.layout.x - b.layout.x)[0];
@@ -106,7 +106,7 @@ function refineStoryLayout(dash: DashboardSpec, model: Model, width: number): St
   if (!dashboardSchema.safeParse(spec).success) return null;
   return { spec, renamed: 0, refinement: true,
     guide: "Keep your section headings and commentary. Give the leading trend room, align supporting charts, and preserve pinned sections.",
-    sections: groups.filter(g => !g.some(t => t.pinned)).map(g => ({
+    sections: groups.map(g => g.filter(t => !fixed.has(t.id))).filter(g => g.length).map(g => ({
       title: g[0].kind === "heading" ? g[0].title ?? g[0].text ?? "Section" : "Dashboard layout",
       purpose: "Refine chart sizing and spacing within this section.",
       labels: g.filter(t => t.kind !== "heading").map(t => t.title ?? t.text ?? t.metrics.join(", ")),

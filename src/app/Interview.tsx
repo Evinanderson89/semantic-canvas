@@ -55,6 +55,7 @@ export function Interview({ model, onCancel, onDone }: {
   const set = (p: Partial<Brief>) => setBrief((b) => ({ ...b, ...p }));
 
   const finish = () => {
+    if (!chosen.length) return;
     const final: Brief = { ...brief, text, table: subject, metrics: chosen };
     if (remember) savePrefs(final);
     onDone(final);
@@ -97,11 +98,11 @@ export function Interview({ model, onCancel, onDone }: {
       {step === 1 && (
         <section>
           <h2>Is this the right subject?</h2>
-          <p className="lede">Everything on one tile has to come from one base table, so the
-            subject decides what can sit together.</p>
+          <p className="lede">Start with the business area that best answers your question. We’ll use its
+            governed metrics and supported reporting periods to build your first draft.</p>
           <div className="opts">
             {Object.entries(byTable).sort((a, b) => b[1].length - a[1].length).map(([name, ms]) => (
-              <button key={name} className={"optcard" + (subject === name ? " on" : "")}
+              <button key={name} className={"optcard" + (subject === name ? " on" : "")} aria-pressed={subject === name}
                       onClick={() => set({ table: name, metrics: undefined })}>
                 <b>{prettyTable(name)}</b>
                 <small>{model.tables[name]?.grain || `${ms.length} metrics`}</small>
@@ -115,13 +116,13 @@ export function Interview({ model, onCancel, onDone }: {
       {step === 2 && (
         <section>
           <h2>Which numbers lead?</h2>
-          <p className="lede">These become the headline cards. The rest of the model stays
-            available to add later.</p>
+          <p className="lede">Every selected metric becomes a headline card. Choose three or four for a focused
+            executive view; you can add supporting evidence later.</p>
           <div className="metric-grid">
             {available.map((m) => {
               const on = chosen.includes(m.name);
               return (
-                <button key={m.name} className={"optcard sm" + (on ? " on" : "")}
+                <button key={m.name} className={"optcard sm" + (on ? " on" : "")} aria-pressed={on}
                         onClick={() => set({ metrics: on
                           ? chosen.filter((x) => x !== m.name) : [...chosen, m.name] })}>
                   <b>{m.label}</b><small>{m.description?.slice(0, 64)}</small>
@@ -139,7 +140,7 @@ export function Interview({ model, onCancel, onDone }: {
             whether the underlying table comes along.</p>
           <div className="opts">
             {AUDIENCES.map((a) => (
-              <button key={a.id} className={"optcard" + (brief.audience === a.id ? " on" : "")}
+              <button key={a.id} className={"optcard" + (brief.audience === a.id ? " on" : "")} aria-pressed={brief.audience === a.id}
                       onClick={() => set({ audience: a.id,
                         includeBreakdowns: a.id !== "exec", includeTable: a.id === "analyst" })}>
                 <b>{a.label}</b><small>{a.hint}</small>
@@ -169,6 +170,8 @@ export function Interview({ model, onCancel, onDone }: {
               Include the detail table
             </label>
           </div>
+          {!chosen.length && <p role="status">Choose at least one metric to build a dashboard.</p>}
+          <div className="readback"><b>Your first dashboard:</b> {chosen.map(n => model.metrics[n]?.label ?? n).join(", ")}. Headline cards, a leading trend, and supporting context. All {chosen.length} selected metrics are included; restricted metrics use their supported reporting period.</div>
           <label className="check remember">
             <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
             Remember these preferences for next time
@@ -182,8 +185,8 @@ export function Interview({ model, onCancel, onDone }: {
         {step === 0 && <button className="ghost" onClick={() => onDone({ ...brief, metrics: undefined })}>
           Skip — just show me something</button>}
         {step < 3
-          ? <button className="primary" onClick={() => setStep((s) => s + 1)}>Continue</button>
-          : <button className="primary" onClick={finish}>Build it</button>}
+          ? <button className="primary" disabled={step === 2 && !chosen.length} onClick={() => setStep((s) => s + 1)}>Continue</button>
+          : <button className="primary" disabled={!chosen.length} onClick={finish}>Build it</button>}
       </div>
     </div>
   );

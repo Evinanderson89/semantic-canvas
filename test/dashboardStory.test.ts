@@ -3,7 +3,21 @@ const { create } = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("@anthropic-ai/sdk", () => ({ default: class { messages = { create }; } }));
 import { suggestDashboardStory } from "../src/agent/loop.ts";
 import { additionKey } from "../src/suggest/reviewSession.ts";
+import { model } from "./fixtures.ts";
 beforeEach(() => { create.mockReset(); });
+
+it("validates effective additions against the governed model and recognizes a required-period KPI", async () => {
+  const governed = structuredClone(model);
+  Object.assign(governed.metrics.revenue, { timeGrains: ["month"], timeDimension: "fct_sales.sold_on" });
+  const headline = { metrics: ["revenue"], title: "Revenue", reason: "Headline context", breakdown: "none" as const };
+  const trend = { ...headline, title: "Revenue trend", breakdown: "time" as const };
+  create.mockResolvedValue(response(JSON.stringify({ ...valid, additions: [headline, trend, { ...trend, metrics: ["users"] }] })));
+  const result = await suggestDashboardStory({ provider: "anthropic", model: "test", apiKey: "test" }, {},
+    [{ id: "trend", title: "Revenue", kind: "kpi", metrics: ["revenue"], dimensions: ["month:sold_on"] }],
+    Object.values(governed.metrics), undefined, governed);
+  expect(result.additions).toEqual([trend]);
+  expect(create.mock.calls[0][0].messages[0].content).toContain("required grains: month");
+});
 
 it("carries the building goal and choices forward while suppressing duplicates and dismissed additions", async () => {
   const existing = {metrics:["revenue"], title:"Revenue",reason:"Context",breakdown:"time" as const};

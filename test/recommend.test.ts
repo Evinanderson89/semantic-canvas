@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { betterKind, coarserGrain, detectDegenerate, detectNoisy, recommend, type FieldProfile } from "../src/suggest/recommend.ts";
 import { semanticHints, timeColumnOf, type Model } from "../src/semantic/model.ts";
 import { guidesFor, snapTo } from "../src/canvas/geometry.ts";
-import { inferNumberStyle, makeFormatter, resolveFormat, DEFAULT_FORMAT } from "../src/format/format.ts";
+import { inferNumberStyle, makeFormatter, resolveFormat, metricUnit, DEFAULT_FORMAT } from "../src/format/format.ts";
 import { matchModel } from "../src/suggest/match.ts";
 import { model, tile } from "./fixtures.ts";
 import type { TileSpec } from "../src/compiler/spec.ts";
@@ -16,7 +16,7 @@ describe("recommend", () => {
     const o = best(["revenue"], [dim({ field: "country", role: "geo", cardinality: 10,
                                        sample: ["US", "GB"], isoLike: true })]);
     expect(o.kind).toBe("map");
-    expect(o.why).toMatch(/country codes/);
+    expect(o.why).toMatch(/2 of 2 sampled values have a country shape/);
   });
 
   it("refuses to chart a high-cardinality field and says why", () => {
@@ -221,6 +221,27 @@ describe("snapTo", () => {
 
 describe("number formatting from the semantic layer", () => {
   const t = (metrics: string[]) => tile({ metrics }) as TileSpec;
+
+  for (const name of ["attach_rate", "trailing_nrr", "smoothed_grr", "RATE_attach", "cohort-rate"]) it(`recognizes the percent token in ${name}`, () => {
+    const candidate = { ...model, metrics: { ...model.metrics, [name]: { ...model.metrics.retention, name, label: "Performance", synonyms: [] } } };
+    expect(inferNumberStyle(candidate, t([name]))).toBe("percent");
+    expect(metricUnit(candidate, name)).toBe("percent");
+    expect(makeFormatter(resolveFormat(candidate, t([name])))(.42)).toBe("42.0%");
+  });
+
+  it("recognizes snake_case rate synonyms without matching a substring inside an unrelated word", () => {
+    const candidate: Model = { ...model, metrics: { ...model.metrics, corporate_score: { ...model.metrics.users, name: "corporate_score", label: "Corporate score", synonyms: [] } } };
+    expect(inferNumberStyle(candidate, t(["corporate_score"]))).toBe("compact");
+    candidate.metrics.corporate_score.synonyms = ["attach_rate"];
+    expect(inferNumberStyle(candidate, t(["corporate_score"]))).toBe("percent");
+  });
+
+  for (const unit of ["number", "currency", "ratio"] as const) it(`preserves explicit ${unit} units over inferred rate names`, () => {
+    const candidate = { ...model, metrics: { ...model.metrics, attach_rate: { ...model.metrics.users, name: "attach_rate", label: "Attachment", synonyms: [], unit } } };
+    expect(metricUnit(candidate, "attach_rate")).toBe(unit);
+    expect(inferNumberStyle(candidate, t(["attach_rate"]))).toBe(unit === "currency" ? "currency" : "plain");
+    expect(makeFormatter(resolveFormat(candidate, t(["attach_rate"])))(.42)).not.toContain("%");
+  });
 
   it("reads currency out of a metric label", () =>
     expect(inferNumberStyle(model, t(["revenue"]))).toBe("currency"));

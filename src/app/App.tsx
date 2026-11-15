@@ -1,3 +1,9 @@
+import { VersionHistory } from "./VersionHistory.tsx";
+import { Investigation } from "./Investigation.tsx";
+import type { InvestigationResult } from "../suggest/investigate.ts";
+import { ReviewHandoff } from "./ReviewHandoff.tsx";
+import { presentationContentKey, withPresentationBrief } from "./presentationBrief.ts";
+import { unappliedFilters } from "./filters.ts";
 import { ChartActivityProvider } from "./ChartActivity.tsx";
 import { ChartSettings, useChartPreferences } from "./ChartPreferences.tsx";
 import { LibraryBrowser, LibraryNavigation, SaveViewDialog, ViewPreviewDialog, useCoreLibrary } from "./CoreLibrary.tsx";
@@ -11,6 +17,7 @@ import { canvasSchema, dashboardSchema } from "../compiler/schema.ts";
 import { validateTile } from "../compiler/compile.ts";
 import React, { useCallback, useEffect, useState } from "react";
 import { Tile } from "./Tile.tsx";
+import { drillQueryKey, retainDrillSessions, type DrillSessions } from "./drill.ts";
 import { TileBoundary } from "./TileBoundary.tsx";
 import { Picker } from "./Picker.tsx";
 import { Sidebar } from "./Sidebar.tsx";
@@ -32,6 +39,7 @@ import type { Brief } from "../suggest/match.ts";
 import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
 import { applyLayout } from "../canvas/layouts.ts";
+import { prepareNewTile } from "../suggest/prepareTile.ts";
 import { downloadPng, slugForFilename } from "./export.ts";
 import { metricOf, calendarOf, prettifyModelName, todayOf, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
@@ -44,6 +52,7 @@ import { filtersForTile, validateDashboard } from "./filters.ts";
 import type { FilterValue } from "../compiler/spec.ts";
 
 import { DistributeDialog } from "./DistributeDialog.tsx";
+import { demoDashboard, demoDashboardAvailable } from "../suggest/demo.ts";
 import { ReferenceImport } from "./ReferenceImport.tsx";
 import { TabStrip } from "./TabStrip.tsx";
 import { FilterControl, FilterDesigner, filterTileSize } from "./FilterControls.tsx";
@@ -87,6 +96,9 @@ export function App() {
   const [canvas, setCanvas] = useState<CanvasSpec>({ ...DEFAULT_CANVAS, locked: !session.canEdit });
   const [zoom, setZoom] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
+  const [investigating, setInvestigating] = useState<{ id: string; result: InvestigationResult } | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [handoff, setHandoff] = useState(false);
   const [interview, setInterview] = useState(false);
   const [aiRedesign, setAiRedesign] = useState(false);
   // /modeler is the Modeler's own address on the gateway (registered as its own app); the SPA serves it like any path.
@@ -154,12 +166,29 @@ export function App() {
   React.useEffect(() => { refreshSources(); }, [refreshSources]);
 
   const [dashId, setDashId] = useState<string | null>(null);
-  const [saved, setSaved] = useState<{ id: string; name: string; updated_at: string }[]>([]);
+  const [saved, setSaved] = useState<{ id: string; name: string; updated_at: string | null }[]>([]);
   const [openList, setOpenList] = useState(false);
   const [savedFingerprint, setSavedFingerprint] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState("");
+  const [notice, updateNotice] = useState<{ message: string; kind: "error" | "success" | "info" } | null>(null);
+  const noticeOrigin = React.useRef<HTMLElement | null>(null);
+  const setNotice = useCallback((message: string, kind: "error" | "success" | "info" = "error") => {
+    if (message && document.activeElement instanceof HTMLElement && !document.activeElement.closest(".document-notice")) {
+      noticeOrigin.current = document.activeElement;
+    }
+    updateNotice(message ? { message, kind } : null);
+  }, []);
+  const dismissNotice = () => {
+    updateNotice(null);
+    requestAnimationFrame(() => {
+      if (document.activeElement !== document.body) return;
+      const origin = noticeOrigin.current;
+      const target = origin !== document.body && origin?.isConnected && origin.getClientRects().length ? origin
+        : document.querySelector<HTMLButtonElement>('button[aria-label="Save dashboard"]');
+      target?.focus({ preventScroll: true });
+    });
+  };
   const [refreshToken, setRefreshToken] = useState<string>(crypto.randomUUID());
   const dirty = session.canEdit && !!book && fingerprint(book, canvas) !== savedFingerprint;
   const documentEpoch = React.useRef(0);
@@ -192,7 +221,13 @@ export function App() {
   }, [stashDraft]);
 
   // Exploration state is reset on document and role changes.
-  const [drills, setDrills] = useState<Record<string, import("./drill.ts").DrillEntry[]>>({});
+  const [drillSessions, setDrillSessions] = useState<DrillSessions>({});
+  // Filter before rendering, so an edited chart never sends even one request
+  // with the previous query's drill range. Prune stored sessions as well so
+  // undo cannot revive stale exploration after a query change or removal.
+  const activeDrillSessions = React.useMemo(() => retainDrillSessions(book?.tiles ?? [], drillSessions), [book, drillSessions]);
+  const drills = React.useMemo(() => Object.fromEntries(Object.entries(activeDrillSessions).map(([id, session]) => [id, session.entries])), [activeDrillSessions]);
+  useEffect(() => { setDrillSessions(current => retainDrillSessions(book?.tiles ?? [], current)); }, [book]);
 
   // Same status the AgentChat toggle polls for -- whether "Explain this" on
   // a tile should even offer itself, rather than showing a button that
@@ -207,6 +242,8 @@ export function App() {
     const id = setInterval(poll, 4000);
     return () => { stopped = true; clearInterval(id); };
   }, []);
+
+  useEffect(() => { setInvestigating(null); }, [activeSourceId, asWho, refreshToken]);
 
   // Undo history. Every edit pushes; the canvas is a design surface and Cmd+Z is
   // the first thing anyone tries after moving something by accident.
@@ -229,7 +266,7 @@ export function App() {
 
   React.useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if (document.querySelector("dialog[open]")) return;
+      if (canvas.locked || document.querySelector("dialog[open]")) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable) return;
       const meta = e.metaKey || e.ctrlKey;
@@ -254,8 +291,8 @@ export function App() {
     setDash(spec); setCanvas(surface);
   };
   const changeCanvas = (next: CanvasSpec) => {
-    if (book) { past.current.push(documentSnapshot(book, canvas)); future.current = []; }
-    setCanvas(next);
+    if (book && fingerprint(book, canvas) !== fingerprint(book, next)) { past.current.push(documentSnapshot(book, canvas)); future.current = []; }
+    setSelected([]); setCanvas(next);
   };
   const beginDocument = useCallback((next: DashboardSpec | null, options: {
     id?: string | null; revision?: number; canvas?: CanvasSpec; saved?: boolean; draftKey?: string; folderId?: string | null;
@@ -264,14 +301,14 @@ export function App() {
     documentEpoch.current++;
     draftKey.current = options.draftKey ?? crypto.randomUUID();
     past.current = []; future.current = [];
-    const surface = { ...DEFAULT_CANVAS, ...options.canvas, ...(!session.canEdit ? { locked: true } : {}) };
+    const surface = { ...DEFAULT_CANVAS, ...options.canvas, locked: !session.canEdit };
     if (next?.tiles.length && !options.canvas) surface.height = Math.max(surface.height, ...next.tiles.map((t) => t.layout.y + t.layout.h + 24));
     setBook(next); setActiveTabId(next ? tabsOf(next)[0].id : "main"); setFilterValues({});
     setCanvas(surface); setDashId(options.id ?? null); setRevision(options.revision ?? 0);
     setSavedFingerprint(next && options.saved ? fingerprint(next, surface) : null);
     setGrain(documentGrain(next));
-    setSelected([]); setReferenceImport(false); setDistributing(false); setFilterEditing(null); setDrills({}); setNotice(""); setSaving(false); setTemplateId(null); setDashboardFolder(options.folderId ?? null);
-    setPicking(false); setViewPicker(false); setSaveViewOpen(false); setViewPreview(null); setViewPickError(""); setViewPickBusy(false); setRefreshed(null); setRefreshToken(crypto.randomUUID());
+    setSelected([]); setReferenceImport(false); setDistributing(false); setFilterEditing(null); setDrillSessions({}); setNotice(""); setSaving(false); setTemplateId(null); setDashboardFolder(options.folderId ?? null);
+    setHistoryOpen(false); setInvestigating(null); setHandoff(false); setPicking(false); setViewPicker(false); setSaveViewOpen(false); setViewPreview(null); setViewPickError(""); setViewPickBusy(false); setRefreshed(null); setRefreshToken(crypto.randomUUID());
     return true;
   }, [stashDraft]);
   const refreshData = () => { setRefreshToken(crypto.randomUUID()); setRefreshed(new Date()); };
@@ -328,11 +365,11 @@ export function App() {
     }
   };
 
-  const save = async (asCopy = false, throwOnFailure = false) => {
+  const save = async (asCopy = false, throwOnFailure = false, candidate = book) => {
     if (!book || saving) return;
     const epoch = documentEpoch.current, key = draftKey.current;
     const id = asCopy ? crypto.randomUUID() : dashId ?? crypto.randomUUID();
-    const snapshot = documentSnapshot(book, canvas);
+    const snapshot = documentSnapshot(candidate ?? book, canvas);
     const body = JSON.stringify({ id, name: book.title, ...snapshot, revision: asCopy ? 0 : revision, schemaVersion: 1, ...(!dashId || asCopy ? { folderId: dashboardFolder } : {}) });
     setSaving(true); setNotice("");
     try {
@@ -375,7 +412,7 @@ export function App() {
     if (new Blob([JSON.stringify(next.spec)]).size > MAX_DOCUMENT_BYTES) throw new Error("Adding this view would exceed the 8 MB dashboard limit.");
     commitBook(next.spec); setCanvas(next.canvas); setSelected([]);
     pendingReveal.current = { x: 24, y: next.top, w: Math.max(100, canvas.width - 48), h: 180 };
-    setViewPicker(false); setViewPreview(null); setNotice(`“${view.name}” added. Undo restores the previous canvas.`);
+    setViewPicker(false); setViewPreview(null); setNotice(`“${view.name}” added. Undo restores the previous canvas.`, "success");
   };
   const chooseLibraryView = async (item: LibraryItem) => {
     if (viewPickBusy) return; const epoch = documentEpoch.current;
@@ -388,6 +425,16 @@ export function App() {
   };
   const backupInput = React.useRef<HTMLInputElement>(null);
   const mainRef = React.useRef<HTMLElement>(null);
+  const topbarRef = React.useRef<HTMLDivElement>(null);
+  React.useLayoutEffect(() => {
+    const header = topbarRef.current;
+    if (!header) return;
+    const measure = () => mainRef.current?.parentElement?.style.setProperty("--dashboard-header-height", `${header.getBoundingClientRect().height}px`);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [Boolean(dash), view]);
   // New compositions start at a readable size for this workspace. Saved
   // documents keep their authored dimensions when opened or resized.
   const freshCanvas = useCallback((): CanvasSpec => ({ ...DEFAULT_CANVAS, preset: "custom",
@@ -423,55 +470,8 @@ export function App() {
     ? dash.tiles.find((t) => t.id === selected[0]) ?? null : null;
   const inspecting = !!selectedTile && selectedTile.kind !== "filter" && !canvas.locked;
 
-  // Selecting a tile opens the Inspector, which takes real width out of the
-  // canvas viewport (the `.shell` grid's third column) -- so a tile sitting
-  // near the right edge, fully visible a moment ago, can end up with part
-  // of itself behind the panel that just opened to edit it. Scrolling alone
-  // can't fix this when the tile itself is wider than what's left of the
-  // viewport -- bringing the right edge into view pushes the left edge out,
-  // and vice versa, there's no scroll position that shows both. So this
-  // shrinks zoom just enough to make the WHOLE tile fit first (never grows
-  // it -- only ever gives back room the Inspector took), the same clamped
-  // fit-to-available-space `fit()` already does for the whole canvas.
-  useEffect(() => {
-    if (!selectedTile) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    const pad = 16;
-    const { w, h } = selectedTile.layout;
-    const viewW = el.clientWidth, viewH = el.clientHeight;
-    const neededW = w + pad * 2, neededH = h + pad * 2;
-    if (neededW * zoom > viewW || neededH * zoom > viewH) {
-      // Floor, not round, and stop here for this pass -- the resulting
-      // reflow re-fires this same effect (zoom is a dependency), and only
-      // THEN is it safe to measure the real DOM below: rounding up, or
-      // trusting the arithmetic without a real re-measure, can leave the
-      // tile a few px past the very edge it was just rescued from (fixed
-      // chrome around the canvas -- padding, the surface's own margin --
-      // doesn't scale with zoom the way the tile itself does).
-      const z = Math.floor(Math.max(0.25, Math.min(zoom, viewW / neededW, viewH / neededH)) * 100) / 100;
-      if (z < zoom) { setZoom(z); return; }
-    }
-    // Measured from the actual rendered node, not reconstructed from the
-    // layout spec's x/y/w/h -- that formula would have to know every bit of
-    // fixed chrome between the canvas edge and the tile, and getting one
-    // wrong is exactly how the first version of this effect still left the
-    // tile a few pixels into the Inspector.
-    const node = el.querySelector<HTMLElement>(".node.selected");
-    if (!node) return;
-    const elRect = el.getBoundingClientRect(), nodeRect = node.getBoundingClientRect();
-    let { scrollLeft, scrollTop } = el;
-    const left = nodeRect.left - elRect.left + scrollLeft - pad;
-    const top = nodeRect.top - elRect.top + scrollTop - pad;
-    const right = nodeRect.right - elRect.left + scrollLeft + pad;
-    const bottom = nodeRect.bottom - elRect.top + scrollTop + pad;
-    if (right - scrollLeft > viewW) scrollLeft = right - viewW;
-    if (left < scrollLeft) scrollLeft = left;
-    if (bottom - scrollTop > viewH) scrollTop = bottom - viewH;
-    if (top < scrollTop) scrollTop = top;
-    el.scrollTo({ left: Math.max(0, scrollLeft), top: Math.max(0, scrollTop), behavior: "auto" });
-  }, [selectedTile?.id, inspecting, zoom]);
-
+  // Selection opens the Inspector without moving the user's canvas. Fit and
+  // zoom remain explicit controls; revealing newly inserted content is separate.
   /** Zoom so the authored canvas fits the space actually available. */
   const fit = React.useCallback(() => {
     const avail = (mainRef.current?.clientWidth ?? 900) - 44;
@@ -583,16 +583,30 @@ export function App() {
   };
 
   const addMany = (drafts: Omit<TileSpec, "id" | "layout">[]) => {
-    if (!dash) return;
+    if (!dash || !drafts.length) return;
     const PAD = 24, GAP = 16;
-    const w = Math.round((canvas.width - PAD * 2 - GAP * (drafts.length - 1)) / drafts.length);
-    const y = dropPoint(w, 156).y;
-    const made = drafts.map((d, i) => ({ ...d, id: nextId(),
-      layout: { x: PAD + i * (w + GAP), y, w, h: 156, z: 1 } }));
+    let prepared: TileSpec[];
+    try {
+      prepared = drafts.map(d => prepareNewTile(model, { ...d, id: nextId(), layout: { x: 0, y: 0, w: 300, h: 156, z: 1 } }));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not prepare these metrics for a KPI group.");
+      return;
+    }
+    const available = Math.max(1, canvas.width - PAD * 2);
+    const columns = Math.max(1, Math.min(prepared.length, Math.floor((available + GAP) / (260 + GAP))));
+    const w = Math.floor((available - GAP * (columns - 1)) / columns);
+    const h = prepared.some(t => t.dimensions.length) ? 220 : 156;
+    const groupHeight = Math.ceil(prepared.length / columns) * (h + GAP) - GAP;
+    // Reserve the whole group, including wrapped rows, and use the exact
+    // origin we collision-tested. Existing authored content stays in place.
+    const at = dropPoint(available, groupHeight);
+    const made = prepared.map((d, i) => ({ ...d,
+      layout: { ...d.layout, x: at.x + (i % columns) * (w + GAP), y: at.y + Math.floor(i / columns) * (h + GAP), w, h } }));
     commit({ ...dash, tiles: [...dash.tiles, ...made] });
     setSelected(made.map((m) => m.id));
-    growCanvasFor(y + 156 + 24);
-    pendingReveal.current = { x: PAD, y, w: canvas.width - PAD * 2, h: 156 };
+    growCanvasFor(at.y + groupHeight + PAD);
+    // A tall wrapped group cannot all fit in the viewport. Reveal its start.
+    pendingReveal.current = { x: at.x, y: at.y, w: available, h };
   };
 
   return (
@@ -616,7 +630,7 @@ export function App() {
                  asWhoRef.current = id;
                  setAsWho(id);
                  try { localStorage.setItem("sc:principal", id); } catch {}
-                 setDrills({}); setFilterValues({}); refreshData();
+                 setDrillSessions({}); setFilterValues({}); refreshData();
                }}
                sources={sources} activeSource={activeSource} />
 
@@ -630,15 +644,15 @@ export function App() {
             if (data.source && data.source !== activeSourceId) throw new Error(`Select the backup's source (${data.source}) before importing it`);
             const spec = dashboardSchema.parse(data.spec), surface = canvasSchema.parse(data.canvas);
             const issues = validateDashboard(model, spec); if (issues.length) throw new Error(issues[0].problem);
-            if (beginDocument(spec, { canvas: surface })) { setView("home"); setNotice("Backup restored as a new dashboard. Save to keep a server copy."); }
+            if (beginDocument(spec, { canvas: surface })) { setView("home"); setNotice("Backup restored as a new dashboard. Save to keep a server copy.", "success"); }
           } catch (error: any) { setNotice(`Could not import backup: ${error.message}`); }
         }} />
-        {notice && <div className="document-notice" role="alert"><span>{notice}</span>{dash && <button className="link" onClick={() => {
+        {notice && <div className={`document-notice ${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"} aria-atomic="true"><span>{notice.message}</span>{notice.kind === "error" && dash && <button className="link" onClick={() => {
           const url = URL.createObjectURL(new Blob([JSON.stringify({ schemaVersion: 1, source: activeSourceId, ...documentSnapshot(book!, canvas) }, null, 2)], { type: "application/json" }));
           const a = document.createElement("a"); a.href = url; a.download = `${slugForFilename(dash.title)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-        }}>Download backup</button>}{dash && notice.startsWith("Recovery backup failed") && <button className="link" onClick={() => {
+        }}>Download backup</button>}{notice.kind === "error" && dash && notice.message.startsWith("Recovery backup failed") && <button className="link" onClick={() => {
           if (window.confirm("Leave this dashboard without saving? Download a backup first if you want to keep these changes.")) { currentDocument.current.dirty = false; beginDocument(null); setView("home"); }
-        }}>Discard and leave</button>}</div>}
+        }}>Discard and leave</button>}<button type="button" className="link" aria-label="Dismiss notification" onClick={dismissNotice}>Dismiss</button></div>}
         {!dash && view === "library" ? (
           <LibraryBrowser key={activeSourceId} data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} refresh={refreshSaved} folderId={libraryFolder} onFolder={setLibraryFolder} onOpen={openLibraryItem}
             onNewDashboard={folderId => { if (beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas(), folderId })) pendingFit.current = true; }} />
@@ -656,7 +670,7 @@ export function App() {
         ) : !dash && view === "modeler" ? (
           <Modeler sources={sources} onPublished={() => refreshSources()} />
         ) : !dash ? (
-          <>{session.canEdit ? <Entry model={model} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)}
+          <>{session.canEdit ? <Entry model={model} onDemo={demoDashboardAvailable(model) ? () => { const c = freshCanvas(); if (beginDocument(demoDashboard(c.width), { canvas: c })) { pendingFit.current = true; setView("home"); } } : undefined} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)}
                  onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} /> : <div className="explore"><span className="eyebrow">Company workspace</span><h1>Your metrics, in focus.</h1><p className="lede">Open a shared dashboard below, or browse CoreCanvas Library. Filters and drill-downs follow your company’s data permissions.</p></div>}
         <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>{session.mode === "team" ? "Shared dashboards and your drafts in this tab" : "Saved dashboards and drafts on this computer"}</span></div>
           <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
@@ -664,14 +678,18 @@ export function App() {
           {drafts.filter((d) => d.source === activeSourceId).map((d) => <div key={d.key}>
             <button className="link" onClick={() => beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key, folderId: d.folderId })}>Recover draft: {d.spec.title}</button>
             <button className="link" aria-label={`Discard draft ${d.spec.title}`} onClick={() => {
-              storage.setItem(draftStorageKey, JSON.stringify(drafts.filter((x) => x.key !== d.key))); readDrafts();
+              try {
+                const current = parseDrafts(storage.getItem(draftStorageKey));
+                storage.setItem(draftStorageKey, JSON.stringify(current.filter(x => x.key !== d.key)));
+                readDrafts();
+              } catch { setNotice("Could not discard the draft. Recovery storage is unavailable or unreadable; your saved recovery data has not been replaced."); }
             }}>Discard</button>
           </div>)}
         </div>
           </>
         ) : (
           <>
-            <div className="topbar">
+            <div className="topbar" ref={topbarRef}>
               <button className="link back-link" onClick={() => beginDocument(null)}>← <span>Workspace</span></button>
               <div className="dashboard-identity">
                 <h1 className="dash-title">{dash.title}</h1>
@@ -682,11 +700,11 @@ export function App() {
                   {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
                 </div>
               </div>
-              <span className="spacer" />
+              <div className="dashboard-actions">
               <label className="period-control">
                 <span>Period</span>
-                <select aria-label="Period" value={documentGrain(dash)} onChange={(e) => { const next = withGrain(dash, e.target.value); const issues = next.tiles.flatMap(t => validateTile(model, t)); if (issues.length) { setNotice(issues[0].problem); return; } setNotice(""); setGrain(e.target.value); setDrills({}); commit(next); }}>
-                  {documentGrain(dash) === "mixed" && <option value="mixed" disabled>Mixed periods</option>}
+                <select aria-label="Period" disabled={canvas.locked} value={documentGrain(dash)} onChange={(e) => { const next = withGrain(dash, e.target.value); const issues = next.tiles.flatMap(t => validateTile(model, t)); if (issues.length) { setNotice(issues[0].problem); return; } setNotice(""); setGrain(e.target.value); setDrillSessions({}); commit(next); }}>
+                  {documentGrain(dash) === "mixed" && <option value="mixed" disabled>Per-chart periods</option>}
                   {GRAINS.map((g) => <option key={g} value={g}>{g === "day" ? "Daily" : g[0].toUpperCase() + g.slice(1) + "ly"}</option>)}
                 </select>
               </label>
@@ -698,6 +716,7 @@ export function App() {
               <button className="save-button" onClick={() => save()} disabled={saving || !session.canEdit} aria-label="Save dashboard">
                 {saving ? "Saving…" : "Save"}
               </button>
+              <button className="review-action" disabled={!dash.tiles.length} onClick={() => setHandoff(true)}>Review and share</button>
               <Popover label="Dashboard actions" trigger={<span aria-hidden="true">•••</span>} align="end" className="document-menu">
                 {(close) => <>
                   <button onClick={() => { close(); refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
@@ -711,10 +730,23 @@ export function App() {
                   <button onClick={() => { close(); navigator.clipboard?.writeText(JSON.stringify(book, null, 2)); }}>Copy dashboard spec</button>
                 </>}
               </Popover>
+              </div>
+            </div>
+
+            <div className={`document-state-bar${canvas.locked ? " preview" : ""}`} aria-label="Dashboard mode">
+              <span className="mode-label">{!session.canEdit ? "VIEWER" : canvas.locked ? "PREVIEW" : "EDIT MODE"}</span>
+              <span>{!session.canEdit ? "Read-only dashboard · filters and drill-downs remain interactive." : canvas.locked ? "Previewing your current work. Preview does not publish or save changes." : "Changes stay in your draft until you save."}</span>
+              <span><strong>{dashId ? `Saved version ${revision}` : "Not saved yet"}</strong> · {session.mode === "team" ? "Workspace access" : "Local workspace"}</span>
+              <span className="spacer" />
+              <button disabled={!dashId} title={!dashId ? "Save once to start version history" : "Browse and restore saved dashboard designs"} onClick={() => setHistoryOpen(true)}>Version history</button>
+              {session.canEdit && <div className="mode-switch" aria-label="Dashboard viewing mode">
+                <button aria-label="Edit dashboard" aria-pressed={!canvas.locked} onClick={() => changeCanvas({ ...canvas, locked: false })}>Edit</button>
+                <button aria-label="Preview dashboard" aria-pressed={canvas.locked} onClick={() => changeCanvas({ ...canvas, locked: true })}>Preview</button>
+              </div>}
             </div>
 
             <TabStrip spec={book!} active={activeTabId} locked={canvas.locked} onChange={commitBook} onSelect={id => {
-              setActiveTabId(id); setSelected([]); setDrills({}); setBook(b => b ? { ...b, crossFilters: [] } : b); pendingFit.current = true;
+              setActiveTabId(id); setSelected([]); setDrillSessions({}); setBook(b => b ? { ...b, crossFilters: [] } : b); pendingFit.current = true;
             }} />
             {(book!.filters ?? []).some(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)) && <div className="shared-filter-shelf" aria-label="Dashboard filters">
               {(book!.filters ?? []).filter(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)).map(f => <FilterControl key={f.id} compact filter={f} value={filterValues[f.id] ?? f.defaultValue ?? {}} onChange={v => setFilterValues(values => ({ ...values, [f.id]: v }))} spec={book!} model={model} activeTab={currentTab(book!, activeTabId).id} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onEdit={!canvas.locked ? () => setFilterEditing(f.id) : undefined} />)}
@@ -724,17 +756,10 @@ export function App() {
                        selected={selected} tiles={dash.tiles}
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
-                       beautify={<DashboardBeautify key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} dash={dash} canvas={canvas} model={model}
+                       beautify={<DashboardBeautify key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} dash={dash} canvas={canvas} model={model} activeTabId={currentTab(book!, activeTabId).id}
                                                      aiAvailable={aiAvailable} canConfigureAi={session.canAdmin} onConnections={() => setView("connections")} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))} />} />
             )}
-            {canvas.locked && session.canEdit && (
-              <div className="editbar slim">
-                <span className="spacer" />
-                <button className="lock on" onClick={() => changeCanvas({ ...canvas, locked: false })}>
-                  Edit dashboard
-                </button>
-              </div>
-            )}
+
 
             {(dash.crossFilters?.length ?? 0) > 0 && (
               <div className="xfilters">
@@ -744,7 +769,7 @@ export function App() {
                           onClick={() => setDash({ ...dash,
                             crossFilters: dash.crossFilters!.filter((x) => x.id !== f.id) })}>
                     <b>{f.field.split(".").pop()}</b>
-                    <span>{(f.values ?? []).join(", ")}</span>
+                    <span>{(f.values ?? []).map(v => v === null ? "Missing (null)" : String(v)).join(", ")}</span>
                     <i>✕</i>
                   </button>
                 ))}
@@ -759,7 +784,9 @@ export function App() {
                       <div className="empty-composition" aria-hidden="true"><i /><i /><i /></div>
                       <h2>Every story starts somewhere.</h2>
                       <p>Add your first metric, then make it your own.</p>
-                      <button className="save-button" onClick={() => setPicking(true)}>Add a chart</button>
+                      <button className="save-button" onClick={() => setAiRedesign(true)}>Build with AI</button>
+                      <button className="link" onClick={() => setInterview(true)}>Choose a guided starting point</button>
+                      <button className="link" onClick={() => setPicking(true)}>Add a chart</button>
                       <span>Or add a heading or note from the toolbar below.</span>
                     </div> : undefined}
                     selected={selected} onSelect={setSelected}
@@ -774,18 +801,21 @@ export function App() {
                     })() : (
                       <TileBoundary label={t.title ?? t.metrics.join(", ")}>
                       <Tile key={`${activeSourceId}:${asWho}:${refreshToken}`} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} model={model} spec={t} locked={canvas.locked}
+                            scopeWarnings={unappliedFilters(book!, t, filterValues, model)}
                             crossFilters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]}
                             onCrossFilter={(f) => setDash((d) => !d ? d : ({
                               ...d,
                               crossFilters: [
                                 ...(d.crossFilters ?? []).filter((x) => x.field !== f.field), f],
                             }))}
+                            onInvestigate={result => setInvestigating({ id: t.id, result })}
                             aiAvailable={aiAvailable}
                             drill={drills[t.id]}
-                            onDrill={(entry) => setDrills((d) => ({ ...d, [t.id]: [...(d[t.id] ?? []), entry] }))}
-                            onDrillUp={(toIndex) => setDrills((d) => ({
-                              ...d, [t.id]: (d[t.id] ?? []).slice(0, toIndex) }))}
-                            onRemove={(id) => commit({ ...dash, tiles: dash.tiles.filter((x) => x.id !== id).map(x => ({ ...x, section: x.section === id ? undefined : x.section })) })}
+                            onDrill={(entry) => setDrillSessions((d) => ({ ...d, [t.id]: { query: drillQueryKey(t),
+                              entries: [...(d[t.id]?.query === drillQueryKey(t) ? d[t.id].entries : []), entry] } }))}
+                            onDrillUp={(toIndex) => setDrillSessions((d) => ({ ...d, [t.id]: { query: drillQueryKey(t),
+                              entries: (d[t.id]?.query === drillQueryKey(t) ? d[t.id].entries : []).slice(0, toIndex) } }))}
+                            onRemove={(id) => commit({ ...dash, tiles: dash.tiles.filter((x) => x.id !== id).map(x => ({ ...x, section: x.section === id ? null : x.section })) })}
                             onUpdate={(next) => {
                               const merged = dash.tiles.map((x) => (x.id === next.id ? next : x));
                               // A tile's own edit can change its HEIGHT (Beautify's
@@ -813,7 +843,15 @@ export function App() {
       </main>
 
       {settingsOpen && <ChartSettings preferences={chartPreferences.preferences} onChange={chartPreferences.update} error={chartPreferences.error} onClose={() => setSettingsOpen(false)} />}
-      {saveViewOpen && book && <SaveViewDialog key={`${activeSourceId}:${asWho}`} book={book} canvas={canvas} activeTab={activeTabId} selected={selected} folders={coreLibrary.data.folders} defaultFolder={coreLibrary.data.folders.some(f => f.id === libraryFolder) ? libraryFolder : null} model={model} onClose={() => setSaveViewOpen(false)} onSaved={() => { setSaveViewOpen(false); coreLibrary.refresh(); setNotice("View saved to CoreCanvas Library. Find it under Views → Browse saved views."); }} />}
+      {historyOpen && dashId && book && <VersionHistory key={`${activeSourceId}:${dashId}`} id={dashId} current={book} currentCanvas={canvas} dirty={dirty} canEdit={session.canEdit && !saving} onClose={() => setHistoryOpen(false)} onRestore={version => {
+        const issues = validateDashboard(model, version.spec);
+        if (issues.length) throw new Error(`This version needs updated metric definitions: ${issues[0].problem}`);
+        if (beginDocument(version.spec, { id: dashId, revision, canvas: version.canvas, folderId: dashboardFolder })) {
+          setNotice(`Version ${version.revision} restored as an unsaved draft. Save to create version ${revision + 1}; earlier versions remain available.`, "success");
+          pendingFit.current = true;
+        } else throw new Error("Could not preserve your current draft. Download a backup before restoring.");
+      }} />}
+      {saveViewOpen && book && <SaveViewDialog key={`${activeSourceId}:${asWho}`} book={book} canvas={canvas} activeTab={activeTabId} selected={selected} folders={coreLibrary.data.folders} defaultFolder={coreLibrary.data.folders.some(f => f.id === libraryFolder) ? libraryFolder : null} model={model} onClose={() => setSaveViewOpen(false)} onSaved={() => { setSaveViewOpen(false); coreLibrary.refresh(); setNotice("View saved to CoreCanvas Library. Find it under Views → Browse saved views.", "success"); }} />}
       {viewPicker && book && <StudioDialog title="CoreCanvas Library" wide onClose={() => { if (!viewPickBusy) setViewPicker(false); }}>
         <LibraryBrowser key={activeSourceId} viewsOnly data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} refresh={coreLibrary.refresh} folderId={libraryFolder} onFolder={setLibraryFolder} onOpen={chooseLibraryView} />
         {viewPickError && <p className="library-error" role="alert">{viewPickError}</p>}{viewPickBusy && <p className="library-error" role="status">Adding your view…</p>}
@@ -823,9 +861,9 @@ export function App() {
         onOpen={v => { const issues = validateDashboard(model, v.spec); if (issues.length) { setViewPreview(null); setNotice(issues[0].problem); return; } if (beginDocument({ ...v.spec, title: v.name }, { canvas: v.canvas })) { setView("home"); pendingFit.current = true; } }} />}
 
       {referenceImport && <ReferenceImport key={`${activeSourceId}:${asWho}`} model={model} width={freshCanvas().width} aiAvailable={aiAvailable} onClose={() => setReferenceImport(false)} onConnections={() => { if (beginDocument(null)) setView("connections"); }} onCreate={(spec, height) => {
-        if (beginDocument(spec, { canvas: { ...freshCanvas(), height } })) { setView("home"); pendingFit.current = true; setNotice("Reference recreated with live catalogue metrics. Review the matches and save when ready."); }
+        if (beginDocument(spec, { canvas: { ...freshCanvas(), height } })) { setView("home"); pendingFit.current = true; setNotice("Reference recreated with live catalogue metrics. Review the matches and save when ready.", "success"); }
       }} />}
-      {distributing && book && <DistributeDialog key={`${activeSourceId}:${asWho}`} spec={book} selected={selected} activeTab={activeTabId} currentId={dashId} model={model} canvas={canvas} onChange={(s, c) => { commitBook(s); setCanvas(c); }} onClose={() => setDistributing(false)} onNotice={setNotice} />}
+      {distributing && book && <DistributeDialog key={`${activeSourceId}:${asWho}`} spec={book} selected={selected} activeTab={activeTabId} currentId={dashId} model={model} canvas={canvas} filterValues={filterValues} onChange={(s, c) => { commitBook(s); setCanvas(c); }} onClose={() => setDistributing(false)} onNotice={message => setNotice(message, "success")} />}
       {filterEditing && book && <FilterDesigner key={filterEditing} spec={book} model={model} tabId={currentTab(book, activeTabId).id} existing={book.filters?.find(f => f.id === filterEditing)} onClose={() => setFilterEditing(null)} onDelete={() => {
         commitBook({ ...book, filters: book.filters?.filter(f => f.id !== filterEditing), tiles: book.tiles.filter(t => t.filterId !== filterEditing) }); setFilterEditing(null);
       }} onSave={f => {
@@ -839,6 +877,7 @@ export function App() {
       }} />}
       {inspecting && (
         <Inspector model={model}
+                   queryContext={`${activeSourceId}:${asWho}:${refreshToken}`}
                    tile={selectedTile!}
                    onChange={(next) => commit({ ...dash!,
                      tiles: dash!.tiles.map((x) => (x.id === next.id ? next : x)) })}
@@ -851,7 +890,7 @@ export function App() {
                 ? <p className="lede">Nothing saved yet. Build a dashboard and hit save.</p>
                 : saved.map((d) => (
                     <button key={d.id} className="optcard" onClick={() => openSaved(d.id)}>
-                      <b>{d.name}</b><small>{d.updated_at}</small>
+                      <b>{d.name}</b><small>{d.updated_at ? new Date(d.updated_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "Earlier save · time zone unavailable"}</small>
                     </button>
                   ))}
             </section>
@@ -861,18 +900,41 @@ export function App() {
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
-      {aiRedesign && dash && session.canEdit && <AiRedesign key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
+      {investigating && dash?.tiles.some(t => t.id === investigating.id) && <Investigation
+        key={JSON.stringify([activeSourceId, asWho, refreshToken, dash, filterValues, drills, investigating.id])}
+        source={dash.tiles.find(t => t.id === investigating.id)!} result={investigating.result} model={model}
+        filters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, dash.tiles.find(t => t.id === investigating.id)!, filterValues, todayOf(model), calendarOf(model))]}
+        drill={drills[investigating.id] ?? []} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`}
+        scopeWarnings={unappliedFilters(book!, dash.tiles.find(t => t.id === investigating.id)!, filterValues, model)}
+        canKeep={session.canEdit && !canvas.locked} onClose={() => setInvestigating(null)}
+        onKeep={candidate => {
+          if (!session.canEdit || canvas.locked) return;
+          const issues = validateTile(model, candidate); if (issues.length) { setNotice(issues[0].problem); return; }
+          const { id, layout, ...draft } = candidate;
+          addTile(draft, { w: Math.min(900, canvas.width - 48), h: 440 }); setInvestigating(null);
+          setNotice("Investigation added with its captured period and filters. One undo removes it.", "success");
+        }} />}
+      {handoff && dash && <ReviewHandoff canEdit={session.canEdit} activeTabId={activeTabId} canSave={session.canEdit && !saving} key={`${activeSourceId}:${asWho}:${refreshToken}:${activeTabId}:${draftKey.current}:${presentationContentKey(dash)}:${JSON.stringify([filterValues, drills])}`} spec={dash} canvas={canvas} model={model} dirty={dirty}
+        evidenceScope={JSON.stringify({ source: activeSourceId, principal: asWho, user: session.user?.id, policy: session.policy })}
+        queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills}
+        filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))}
+        scopeWarnings={Object.fromEntries(dash.tiles.map(t => [t.id, unappliedFilters(book!, t, filterValues, model)]))}
+        onClose={() => setHandoff(false)} onKeepBrief={brief => { if (book && session.canEdit) { const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); } }}
+        onSave={async brief => { if (!book || !session.canEdit || saving) throw new Error("Saving is unavailable"); const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); await save(false, true, next); }}
+        onWatch={() => { chartPreferences.update("alerts", true); setHandoff(false); setNotice("Chart alerts are visible. Choose a chart’s bell to preview a watch. Save edits first; watches use saved filter defaults.", "info"); }} />}
+      {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify(filterValues)} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model))]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
+        resolveScopeWarnings={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, unappliedFilters(proposed, t, filterValues, model)]))}
         onClose={() => setAiRedesign(false)} onConfigure={() => { setAiRedesign(false); setView("connections"); }}
         queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))}
         onApply={(proposal, expected) => {
           if (!session.canEdit || canvas.locked || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Generate a fresh redesign first."); return false; }
-          try { const next = validateRedesign(dash, canvas, proposal, model); compose(next.spec, next.canvas); setNotice("Redesign applied. One undo restores the previous version."); return true; }
+          try { const next = validateRedesign(dash, canvas, proposal, model, currentTab(book!, activeTabId).id); compose(next.spec, next.canvas); setNotice("Redesign applied. One undo restores the previous version.", "success"); return true; }
           catch (e: any) { setNotice(`Could not apply redesign: ${e.message}`); return false; }
         }} />}
-      <AgentChat key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} document={dash && session.canEdit ? { spec: dash, canvas, selected } : null}
+      <AgentChat key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} document={dash && session.canEdit && !canvas.locked ? { spec: dash, canvas, selected, activeTabId: currentTab(book!, activeTabId).id } : null}
         onApply={(proposal, expected) => {
-          if (!session.canEdit || !dash || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Request a fresh proposal before applying it."); return false; }
-          try { const next = applyProposal(dash, canvas, proposal, model); compose(next.spec, next.canvas); setNotice("Changes applied. Undo restores the previous version."); return true; }
+          if (!session.canEdit || canvas.locked || !dash || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Request a fresh proposal before applying it."); return false; }
+          try { const next = applyProposal(dash, canvas, proposal, model, currentTab(book!, activeTabId).id); compose(next.spec, next.canvas); setNotice("Changes applied. Undo restores the previous version.", "success"); return true; }
           catch (e: any) { setNotice(`Could not apply proposal: ${e.message}`); return false; }
         }} />
       {dash && !canvas.locked && (
@@ -880,17 +942,18 @@ export function App() {
                     onLibrary={() => { setViewPickError(""); coreLibrary.refresh(); setViewPicker(true); }} onSaveView={() => { coreLibrary.refresh(); setSaveViewOpen(true); }} canSaveView={dash.tiles.length > 0}
                     onOpenPicker={() => setPicking(true)} onFilter={() => setFilterEditing("new")} />
       )}
-      {picking && <Picker model={model} onAdd={(d) => addTile(d)} onClose={() => setPicking(false)} />}
+      {picking && <Picker model={model} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onAdd={(d) => addTile(d)} onClose={() => setPicking(false)} />}
     </div>
   );
 }
 
-function Entry({ model, onSuggest, onScratch, onReference }: any) {
+function Entry({ model, onSuggest, onScratch, onReference, onDemo }: any) {
   return (
     <div className="entry">
       <div className="eyebrow">Semantic Canvas</div>
       <h2>Dashboards from<br /><em>governed metrics.</em></h2>
       <p className="lede">Ask a question, sketch a layout, or start blank. Every chart comes from a metric your team published, and the review says what it leaves out.</p>
+      {onDemo && <button className="demo-entry-link" onClick={onDemo}>Try the design playground <span aria-hidden="true">→</span><small>Start with a messy dashboard. Improve the charts, then shape the story.</small></button>}
       <div className="model-summary"><span className="dot ready" />{prettifyModelName(model.name)}<span>· {Object.keys(model.metrics).length} metrics ready to explore</span></div>
       <div className="paths">
         <button className="path suggested" onClick={onSuggest}>

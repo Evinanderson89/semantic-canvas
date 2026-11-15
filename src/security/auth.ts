@@ -21,7 +21,11 @@ export function checkAccessPrincipals(access: AccessConfig | undefined, principa
 export interface Identity { id: string; name: string; role: "viewer" | "editor" | "admin"; principal: string; sources: string[];
   /** Rules the gateway signed onto this request; every query is filtered by them or refused. */
   policy?: GatewayPolicyRule[] }
-interface Session { identity: Identity; csrf: string; expires: number }
+export interface ForwardedAuth {
+  cookie?: string; authorization?: string; csrf: string; host: string; origin: string; expires: number;
+  gatewayPolicy?: { body: string; signature: string };
+}
+interface Session { identity: Identity; csrf: string; expires: number; forwarded?: ForwardedAuth }
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
 export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string; scopes: string; sessionSeconds: number; access?: AccessConfig;
   /** Shared with the gateway's control API; verifies the data policy it signs onto each request (gateway-platform/docs/policy.md). Absent: policies are not read. */
@@ -35,12 +39,13 @@ export interface GatewayPolicyRule { field: string; mode: "only" | "not"; values
  * The gateway's x-gateway-policy header (base64url JSON) and its HMAC-SHA256
  * signature, as produced by gateway-platform's control API. Returns the rules
  * only when the signature verifies, the policy is for this subject and this
- * app, and it has not expired; anything else is no policy at all, never a
- * partial one. A policy signed for another app carries that app's rules, not
- * ours, so it counts as none (`app` is left undefined only by callers that
- * have no slug, such as older tests).
+ * app, and it has not expired. Null means verification failed; callers must
+ * reject supplied-but-invalid policies rather than treating them as absent.
  */
 export function readGatewayPolicy(body: string | undefined, sig: string | undefined, secret: string, sub: string, now = Date.now(), app?: string): GatewayPolicyRule[] | null {
+  return verifyGatewayPolicy(body, sig, secret, sub, now, app)?.rules ?? null;
+}
+function verifyGatewayPolicy(body: string | undefined, sig: string | undefined, secret: string, sub: string, now: number, app?: string): { rules: GatewayPolicyRule[]; expires: number } | null {
   if (!body || !sig) return null;
   const want = createHmac("sha256", secret).update(body).digest();
   let got: Buffer;
@@ -48,14 +53,14 @@ export function readGatewayPolicy(body: string | undefined, sig: string | undefi
   if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
   let payload: any;
   try { payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")); } catch { return null; }
-  if (payload?.v !== 1 || payload.sub !== sub || typeof payload.exp !== "number" || payload.exp * 1000 < now || !Array.isArray(payload.rules)) return null;
+  if (payload?.v !== 1 || payload.sub !== sub || typeof payload.exp !== "number" || !Number.isFinite(payload.exp) || payload.exp * 1000 <= now || !Array.isArray(payload.rules)) return null;
   if (app !== undefined && payload.app !== app) return null;
   const rules: GatewayPolicyRule[] = [];
   for (const r of payload.rules) {
     if (!r || typeof r.field !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$/.test(r.field) || (r.mode !== "only" && r.mode !== "not") || !Array.isArray(r.values) || r.values.some((v: unknown) => typeof v !== "string")) return null;
     rules.push({ field: r.field, mode: r.mode, values: r.values });
   }
-  return rules;
+  return { rules, expires: payload.exp * 1000 };
 }
 const token = () => randomBytes(32).toString("base64url");
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -128,8 +133,9 @@ export class CompanyAuth {
   mount(app: Express) {
     if (this.config.mode === "gateway" && !this.config.policySecret) console.error(JSON.stringify({ event: "auth.policy_secret_missing", level: "warn", message: "SC_GATEWAY_POLICY_SECRET is not set: a data policy the gateway delivers cannot be verified, and any request carrying one is refused." }));
     if (this.config.mode === "gateway") app.use("/api", (req, res, next) => {
+      const policySupplied = "x-gateway-policy" in req.headers || "x-gateway-policy-sig" in req.headers;
       // A policy we cannot verify is not one we may ignore: refusing is the only honest answer.
-      if (!this.config.policySecret && (req.header("x-gateway-policy") || req.header("x-gateway-policy-sig"))) return res.status(503).json({ error: "The gateway sent a data policy for this request, but this app has no secret to verify it. Ask an administrator to set SC_GATEWAY_POLICY_SECRET." });
+      if (!this.config.policySecret && policySupplied) return res.status(503).json({ error: "The gateway sent a data policy for this request, but this app has no secret to verify it. Ask an administrator to set SC_GATEWAY_POLICY_SECRET." });
       // The portal sends the Gateway token as a cookie; the gateway CLI and other
       // non-browser clients send the same token as a bearer. Envoy has already
       // verified either form; we verify again here and never trust proxy headers.
@@ -140,15 +146,28 @@ export class CompanyAuth {
         try {
           const { payload } = await jwtVerify(decodeURIComponent(raw), this.gatewayKeys!, { issuer: this.config.issuer, audience: this.config.clientId, algorithms: ["RS256", "ES256"], requiredClaims: ["sub", "exp"] });
           let identity = mapIdentity(payload, this.config.issuer!, this.config.access!);
-          if (identity && this.config.policySecret) {
+          let expires = Number(payload.exp) * 1000;
+          let gatewayPolicy: ForwardedAuth["gatewayPolicy"];
+          if (identity && policySupplied) {
             // The gateway strips these from clients and only ext_authz adds them; the signature makes that trust explicit here.
-            const rules = readGatewayPolicy(req.header("x-gateway-policy"), req.header("x-gateway-policy-sig"), this.config.policySecret, String(payload.sub), Date.now(), this.config.appSlug ?? new URL(this.config.publicUrl!).hostname.split(".")[0]);
-            if (rules) identity = { ...identity, policy: rules };
+            const body = req.header("x-gateway-policy"), signature = req.header("x-gateway-policy-sig");
+            const verified = verifyGatewayPolicy(body, signature, this.config.policySecret!, String(payload.sub), Date.now(), this.config.appSlug ?? new URL(this.config.publicUrl!).hostname.split(".")[0]);
+            if (!verified) {
+              this.lastVerified.delete(identity.id);
+              this.audit("auth.policy_rejected");
+              return res.status(403).json({ error: "The gateway data policy could not be verified. Refresh your session or ask an administrator to check the policy configuration." });
+            }
+            identity = { ...identity, policy: verified.rules };
+            expires = Math.min(expires, verified.expires);
+            gatewayPolicy = { body: body!, signature: signature! };
           }
           if (identity) {
-            (req as any).gatewaySession = { identity, csrf: digest(`${this.gatewayCsrfSecret}\0${raw}`), expires: Number(payload.exp) * 1000 } satisfies Session;
+            const csrf = digest(`${this.gatewayCsrfSecret}\0${raw}`);
+            const forwarded: ForwardedAuth = { ...(cookie(req, "gw_session") !== undefined ? { cookie: `gw_session=${raw}` } : { authorization: `Bearer ${raw}` }),
+              csrf, host: new URL(this.config.publicUrl!).host, origin: this.config.publicUrl!, expires, ...(gatewayPolicy ? { gatewayPolicy } : {}) };
+            (req as any).gatewaySession = { identity, csrf, expires, forwarded } satisfies Session;
             if (this.lastVerified.size >= 5000) this.prune();
-            this.lastVerified.set(identity.id, { identity, exp: Number(payload.exp) * 1000 });
+            this.lastVerified.set(identity.id, { identity, exp: expires });
           }
         } catch { /* An invalid token remains unauthenticated; proxy headers never confer access. */ }
         next();
@@ -161,6 +180,7 @@ export class CompanyAuth {
       return res.json(session ? { mode: "team", authenticated: true, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined, user: { id: session.identity.id, name: session.identity.name, role: session.identity.role }, csrf: session.csrf, canEdit: session.identity.role !== "viewer", canAdmin: session.identity.role === "admin", expiresAt: session.expires, ...(session.identity.policy?.length ? { policy: session.identity.policy } : {}) } : { mode: "team", authenticated: false, gatewayUrl: this.config.mode === "gateway" ? this.config.portalUrl : undefined });
     });
     app.get("/api/auth/login", async (_req, res) => {
+      if (this.config.mode === "local") return res.redirect("/");
       // The portal owns the session: its refresh route renews an expired token
       // when it can, otherwise starts sign-in, and either way returns here.
       if (this.config.mode === "gateway") return res.redirect(`${this.config.portalUrl}/auth/refresh?next=${encodeURIComponent(this.config.publicUrl ?? "/")}`);
@@ -220,8 +240,10 @@ export class CompanyAuth {
     // Headers never select a different principal in team mode.
     next();
   };
-  forwarded(req: Request) {
+  forwarded(req: Request): ForwardedAuth | undefined {
     const session = this.session(req);
-    return session ? { cookie: this.config.mode === "gateway" ? `gw_session=${cookie(req, "gw_session")}` : `__Host-sc_session=${cookie(req, "__Host-sc_session")}`, csrf: session.csrf, host: new URL(this.config.publicUrl!).host, origin: this.config.publicUrl! } : undefined;
+    if (!session) return undefined;
+    if (this.config.mode === "gateway") return session.forwarded;
+    return { cookie: `__Host-sc_session=${cookie(req, "__Host-sc_session")}`, csrf: session.csrf, host: new URL(this.config.publicUrl!).host, origin: this.config.publicUrl!, expires: session.expires };
   }
 }

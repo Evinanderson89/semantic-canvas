@@ -1,6 +1,13 @@
 import type { QueryResult } from "../connectors/types.ts";
 import type { TileSpec } from "./spec.ts";
-import { parseDimension } from "./compile.ts";
+import { parseDimension, type PartialEdges } from "./compile.ts";
+
+export function coverageWarnings(partial: PartialEdges): string[] {
+  return [
+    partial.selected?.start || partial.selected?.end ? "Selected partial observed periods are retained; comparisons involving those periods are unavailable." : null,
+    partial.ratio?.length ? `${partial.ratio.length} returned ratio rows have missing, different or partial input coverage. Inspect partial.ratio before interpreting values; comparisons involving those periods are unavailable.` : null,
+  ].filter((s): s is string => s != null);
+}
 
 export const resultLimit = (tile: Pick<TileSpec, "limit">) => Math.min(tile.limit ?? 500, 5000);
 

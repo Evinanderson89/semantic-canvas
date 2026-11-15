@@ -1,0 +1,122 @@
+/* Shared action controls. Navigation tabs and descriptive option cards retain
+   their own layouts; standard actions use one size and three visual roles. */
+:root {
+  --button-height: 32px;
+  --button-compact-height: 26px;
+  --button-radius: var(--r-m);
+  --button-font-size: 12px;
+}
+
+:is(button.primary:not(.icon), button.save-button, button.review-action,
+    .studio-dialog footer button, .arrange-preview .story-actions button,
+    .canvas-proposal .story-actions button, .ai-redesign-directions button,
+    .ai-redesign-preview-bar button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--button-height);
+  flex-shrink: 0;
+  padding: 5px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--button-radius);
+  background: var(--surface);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--button-font-size);
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+button.primary:not(.icon), button.save-button:not(.icon),
+.studio-dialog button.primary:not(.icon),
+.arrange-preview .story-actions button.primary,
+.canvas-proposal .story-actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent-edge);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+:is(button.review-action, .studio-dialog footer button:not(.primary),
+    .arrange-preview .story-actions button:not(.primary),
+    .ai-redesign-directions button, .ai-redesign-preview-bar button):hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  color: var(--ink);
+}
+button.primary:not(.icon):hover:not(:disabled), button.save-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 90%, var(--ink));
+  filter: none;
+}
+.ai-redesign-preview-bar button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Toolbar labels stay on one line; space pressure wraps the whole control. */
+:is(.editbar > .tgl, .editbar > .lock,
+    .editbar > .studio-popover > .studio-trigger) {
+  min-height: var(--button-height);
+  padding: 5px 10px;
+  font-size: var(--button-font-size);
+  line-height: 20px;
+  border-radius: var(--button-radius);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.editbar > .lock { border: 1px solid var(--line-2); }
+.topbar { flex-wrap: wrap; }
+.dashboard-identity { flex: 1 1 160px; min-width: min(160px, 100%); }
+.dashboard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin-left: auto;
+}
+.dashboard-actions > *, .topbar .back-link { flex-shrink: 0; }
+.dashboard-actions .period-control { margin: 0; }
+.dashboard-actions .period-control select {
+  min-height: var(--button-height);
+  padding: 5px 9px;
+  line-height: 20px;
+}
+.dashboard-actions .icon, .dashboard-actions .document-menu .studio-trigger {
+  width: var(--button-height);
+  height: var(--button-height);
+  padding: 0;
+}
+.studio-dialog footer { flex-wrap: wrap; gap: 8px; }
+.studio-dialog footer > span:first-child { flex: 1 1 240px; }
+.studio-dialog footer > .spacer { display: none; }
+.ai-redesign-preview-bar, .ai-redesign-preview-bar [role="group"] { flex-wrap: wrap; }
+
+/* Chart actions use the same shape at a deliberately compact size. */
+button.investigate-trigger {
+  min-height: var(--button-compact-height);
+  padding: 3px 8px;
+  font-size: 11px;
+  line-height: 18px;
+  border-radius: var(--button-radius);
+  border-color: var(--line-2);
+}
+button.investigate-trigger:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+:is(button.primary:not(.icon), button.save-button, button.review-action,
+    .studio-dialog footer button, .arrange-preview .story-actions button,
+    .ai-redesign-directions button, .ai-redesign-preview-bar button):disabled {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--ink-3);
+  opacity: 1;
+  cursor: not-allowed;
+  filter: none;
+}
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

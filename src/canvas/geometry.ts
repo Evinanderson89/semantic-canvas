@@ -47,11 +47,23 @@ export function overlaps(a: Box, b: Box): boolean {
 }
 
 export function boundsOf(boxes: Box[]): Box {
+  if (!boxes.length) return { x: 0, y: 0, w: 0, h: 0 };
   const x = Math.min(...boxes.map((b) => b.x));
   const y = Math.min(...boxes.map((b) => b.y));
   const r = Math.max(...boxes.map((b) => b.x + b.w));
   const bt = Math.max(...boxes.map((b) => b.y + b.h));
   return { x, y, w: r - x, h: bt - y };
+}
+
+/** Keep a stable relative order within both groups and normalize away negative/unbounded z values. */
+export function reorderLayers<T extends { id: string; layout: Box & { z?: number } }>(items: T[], selected: string[], direction: "front" | "back"): T[] {
+  const ids = new Set(selected);
+  if (!items.some(item => ids.has(item.id))) return items;
+  const ordered = [...items].sort((a, b) => (a.layout.z ?? 1) - (b.layout.z ?? 1));
+  const chosen = ordered.filter(item => ids.has(item.id)), rest = ordered.filter(item => !ids.has(item.id));
+  const stacked = direction === "front" ? [...rest, ...chosen] : [...chosen, ...rest];
+  const positions = new Map(stacked.map((item, i) => [item.id, i + 1]));
+  return items.map(item => ({ ...item, layout: { ...item.layout, z: positions.get(item.id)! } }));
 }
 
 /**
@@ -78,7 +90,7 @@ export function boundsOf(boxes: Box[]): Box {
  */
 export function arrange<T extends { layout: Box }>(
   items: T[], width: number,
-  opts: { pad?: number; gap?: number; stretch?: boolean } = {},
+  opts: { pad?: number; gap?: number; stretch?: boolean; fillRows?: boolean } = {},
 ): T[] {
   if (!items.length) return items;
   const pad = opts.pad ?? 24, gap = opts.gap ?? 16, stretch = opts.stretch ?? true;
@@ -130,7 +142,9 @@ export function arrange<T extends { layout: Box }>(
     // the exact "have to scroll forever" a growing dashboard shouldn't
     // produce. Leaving raw widths alone there means a same-sized tile added
     // right after still fits beside it.
-    const cap = Math.max(avail * 0.72, ...rawWidths);
+    // Finished report layouts can fill a row; incremental packing retains
+    // the usual cap so a future tile still has room to join it.
+    const cap = opts.fillRows ? avail : Math.max(avail * 0.72, ...rawWidths);
     const widths = stretch && leftover > 0
       ? rawWidths.map((w) => Math.min(w + leftover * (w / rawSum), cap))
       : rawWidths;

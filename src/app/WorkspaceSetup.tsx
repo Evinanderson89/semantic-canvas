@@ -8,7 +8,7 @@ const steps = [
   ["catalogue", "Bring your metrics", "Choose your semantic model and check its metrics in the registry."],
   ["signIn", "Invite your company", "An administrator configures company sign-in and group access on the server."],
   ["monitoring", "Connect monitoring", "Send logs and request traces to your company’s OpenTelemetry collector."],
-  ["ai", "Enable the assistant", "Optional. Add an AI provider below for story review and reference imports."],
+  ["ai", "Enable the assistant", "Optional. Add an Anthropic key below for story review and reference imports. Configuration does not verify current provider availability."],
 ];
 export function WorkspaceSetup({ refreshKey }: { refreshKey: unknown }) {
   const [setup, setSetup] = useState<Setup | null>(null), [ops, setOps] = useState<Operations | null>(null);
@@ -29,7 +29,7 @@ export function WorkspaceSetup({ refreshKey }: { refreshKey: unknown }) {
       <button className="link" aria-expanded={expanded} onClick={() => { setExpanded(!expanded); if (!expanded) refresh(); }}>{expanded ? "Close setup" : "Review setup"}</button>
     </div>
     {expanded && <>
-      <ol className="setup-steps">{steps.map(([key, title, detail]) => <li key={key}><span className={"setup-check" + (setup?.checks[key] ? " complete" : "")}>{setup?.checks[key] ? "✓" : "○"}</span><div><b>{title}</b><p>{detail}</p></div><span>{setup?.checks[key] ? key === "monitoring" ? "Configured" : "Ready" : key === "ai" ? "Optional" : "To do"}</span></li>)}</ol>
+      <ol className="setup-steps">{steps.map(([key, title, detail]) => <li key={key}><span className={"setup-check" + (setup?.checks[key] ? " complete" : "")}>{setup?.checks[key] ? "✓" : "○"}</span><div><b>{title}</b><p>{detail}</p></div><span>{setup?.checks[key] ? key === "monitoring" || key === "ai" ? "Configured" : "Ready" : key === "ai" ? "Optional" : "To do"}</span></li>)}</ol>
       {ops && <div className="workspace-health"><b>{ops.ready ? "Service is running" : "Service is starting"}</b><span>{ops.counters.requests} requests · {ops.counters.failures} server errors · {ops.counters.queries} queries since restart</span></div>}
       <div className="setup-actions"><button onClick={backup}>Download dashboard library</button><button className="link" onClick={refresh}>Refresh status</button><a href="/api/setup/guide" target="_blank" rel="noreferrer">Installation guide ↗</a></div>
       <p className="setup-note">The library backup includes dashboards across all sources. Keep server configuration, credentials, and warehouse backups separately. Monitoring shows configuration; verify delivery in your logging tool.</p>

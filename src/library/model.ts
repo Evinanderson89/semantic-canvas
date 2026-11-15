@@ -11,7 +11,7 @@ export const itemKindSchema = z.enum(["dashboard", "view"]);
 export type LibraryKind = z.infer<typeof itemKindSchema>;
 export type LibraryFolder = z.infer<typeof folderSchema>;
 export type LibraryView = z.infer<typeof viewSaveSchema>;
-export interface LibraryItem { id: string; kind: LibraryKind; name: string; description: string; folderId: string | null; revision: number; updatedAt: string; tileCount: number; isTemplate?: boolean }
+export interface LibraryItem { id: string; kind: LibraryKind; name: string; description: string; folderId: string | null; revision: number; updatedAt: string | null; tileCount: number; isTemplate?: boolean }
 export interface CoreLibrary { folders: LibraryFolder[]; items: LibraryItem[] }
 export const itemUpdateSchema = z.object({ revision: z.number().int().positive(), name: name.optional(), folderId: id.nullable().optional() }).strict();
 

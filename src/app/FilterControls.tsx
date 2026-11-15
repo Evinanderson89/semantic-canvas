@@ -6,15 +6,15 @@ import { fieldKind, hasFilterValue, presentationOf, suggestedBindings } from "./
 import { PRESETS, PRESET_IDS, resolvePreset } from "./datePresets.ts";
 import { tabOf, tabsOf } from "./tabs.ts";
 import { StudioDialog } from "./StudioDialog.tsx";
-import { readResponse } from "./http.ts";
+import { filterValueLabels, useFilterMetadata } from "./useFilterMetadata.ts";
+import { numericInput } from "../format/numericInput.ts";
 
 const PRESENTATION_LABELS: Record<FilterPresentation, string> = { dropdown: "Dropdown", chips: "Chips", segmented: "Segmented", range: "Range", presets: "Presets" };
 /** Chips and segmented rows need room; a dropdown or range does not. */
 export const filterTileSize = (f: Pick<DashboardFilter, "control" | "presentation">) => presentationOf(f) === "dropdown" || presentationOf(f) === "range" ? { w: 360, h: 150 } : { w: 520, h: 120 };
 const MAX_CHIPS = 40;
 type Option = { value: string | number | boolean | null; n?: number };
-const text = (v: Option["value"]) => v == null ? "(empty)" : String(v);
-const shortDate = (iso: string) => new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const shortDate = (iso: string, year = false) => new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric", ...(year ? { year: "numeric" as const } : {}), timeZone: "UTC" });
 
 export function FilterDesigner({ spec, model, tabId, existing, onSave, onDelete, onClose }: {
   spec: DashboardSpec; model: Model; tabId: string; existing?: DashboardFilter;
@@ -54,37 +54,44 @@ export function FilterControl({ filter, value, onChange, spec, model, queryConte
 }) {
   const presentation = presentationOf(filter);
   const [choosing, setChoosing] = useState(false), [custom, setCustom] = useState(false);
-  const [options, setOptions] = useState<Option[]>([]), [error, setError] = useState(""), [loading, setLoading] = useState(false), [search, setSearch] = useState("");
-  const load = () => {
-    if (filter.control !== "select") return;
-    setLoading(true); setError("");
-    const binding = filter.bindings.find(b => b.field === filter.field), tile = spec.tiles.find(t => t.id === binding?.tileId);
-    const base = tile ? metricOf(model, tile.metrics[0])?.baseTable : filter.field.split(".")[0];
-    const ac = new AbortController();
-    fetch(`/api/values?field=${encodeURIComponent(filter.field)}&base=${encodeURIComponent(base ?? "")}`, { signal: ac.signal }).then(readResponse).then(d => { setOptions(d.values); setLoading(false); }).catch(e => { if (!ac.signal.aborted) { setError(e.message); setLoading(false); } });
-    return () => ac.abort();
-  };
-  useEffect(() => { setOptions([]); setSearch(""); return load(); }, [filter.field, JSON.stringify(filter.bindings), queryContext]);
+  const [search, setSearch] = useState("");
+  const binding = filter.bindings.find(b => b.field === filter.field), tile = spec.tiles.find(t => t.id === binding?.tileId);
+  const base = tile ? metricOf(model, tile.metrics[0])?.baseTable : filter.field.split(".")[0];
+  const { data, error, retry } = useFilterMetadata(model, base ?? "", {
+    id: filter.id, field: filter.field, source: "dimension", mode: "discrete",
+  }, queryContext, filter.control === "select");
+  const options: Option[] = data?.kind === "values" ? data.values : [];
+  const loading = filter.control === "select" && !data && !error;
+  useEffect(() => { setSearch(""); }, [filter.field, base, queryContext]);
   const selected = value.values ?? [];
+  const labels = filterValueLabels([...selected, ...options.map(o => o.value)]);
+  const text = (v: Option["value"]) => labels.get(v)!;
   const label = selected.length ? selected.map(text).join(", ") : "All values";
   const invalid = value.min != null && value.max != null && value.min > value.max;
   const toggle = (v: Option["value"]) => onChange({ values: selected.includes(v) ? selected.filter(x => x !== v) : presentation === "segmented" ? [v] : [...selected, v] });
   // The first values by frequency, plus anything already selected so a choice is never invisible.
   const shown = options.slice(0, MAX_CHIPS), hidden = options.slice(MAX_CHIPS).filter(o => !selected.includes(o.value)).length;
   const pills = [...shown, ...selected.filter(v => !shown.some(o => o.value === v)).map(v => options.find(o => o.value === v) ?? { value: v })];
-  const picker = choosing && <StudioDialog title={`Choose ${filter.label}`} onClose={() => setChoosing(false)}><section><input aria-label={`Search ${filter.label}`} placeholder="Find a value…" value={search} onChange={e => setSearch(e.target.value)} />
-    {loading && <p role="status">Loading values…</p>}{error && <p role="alert">{error}</p>}
-    <div className="filter-options">{[...new Set([...selected, ...options.map(o => o.value)])].filter(v => text(v).toLowerCase().includes(search.toLowerCase())).map(v => <label key={JSON.stringify(v)}><input type="checkbox" checked={selected.includes(v)} onChange={e => onChange({ values: e.target.checked ? [...selected, v] : selected.filter(x => x !== v) })} />{text(v)}</label>)}</div>
-    {!loading && !error && <small>Up to 500 available values</small>}
+  const valuesStatus = <>
+    {loading && <p role="status" className="muted">Loading values…</p>}
+    {error && <div><p role="alert">{error}</p><button type="button" className="link" onClick={retry}>Retry filter values</button></div>}
+    {data?.kind === "values" && <small className="filter-values-note">{options.length ? `${options.length} choices returned.` : "No choices returned in this source and role."}{data.truncated ? " Result limit reached. Other values may exist." : ""}</small>}
+  </>;
+  const picker = choosing && <StudioDialog title={`Choose ${filter.label}`} className="filter-choice-dialog" onClose={() => setChoosing(false)}><section><input className="filter-choice-search" aria-label={`Search ${filter.label}`} placeholder="Find a value…" value={search} onChange={e => setSearch(e.target.value)} />
+    {valuesStatus}
+    <p className="muted">Choices come from this source and role before dashboard and chart filters. Search checks the returned choices only. Selected values remain available to remove.</p>
+    <div className="filter-options">{[...new Set([...selected, ...options.map(o => o.value)])].filter(v => text(v).toLowerCase().includes(search.toLowerCase())).map(v => <label key={JSON.stringify(v)}><input type={presentation === "segmented" ? "radio" : "checkbox"} name={presentation === "segmented" ? `filter:${filter.id}` : undefined} checked={selected.includes(v)} onChange={e => onChange({ values: presentation === "segmented" ? [v] : e.target.checked ? [...selected, v] : selected.filter(x => x !== v) })} />{text(v)}</label>)}</div>
+    {search && !loading && !error && ![...selected, ...options.map(o => o.value)].some(v => text(v).toLowerCase().includes(search.toLowerCase())) && <p>No matches among returned choices or selected values.</p>}
     <button className="link" onClick={() => onChange({})}>Clear selection</button>
   </section><footer><span className="spacer" /><button className="primary" onClick={() => setChoosing(false)}>Done</button></footer></StudioDialog>;
-  const range = <div className="filter-range">{(["min", "max"] as const).map((key, i) => <label key={key}><span>{i ? "To" : "From"}</span><input aria-label={`${filter.label} ${i ? "to" : "from"}`} type={filter.control === "date" ? "date" : "number"} value={value[key] ?? ""} onChange={e => onChange({ ...value, preset: undefined, [key]: e.target.value === "" ? undefined : filter.control === "number" ? Number(e.target.value) : e.target.value })} /></label>)}</div>;
+  const range = <div className="filter-range">{(["min", "max"] as const).map((key, i) => <label key={key}><span>{i ? "To" : "From"}</span><input aria-label={`${filter.label} ${i ? "to" : "from"}`} type={filter.control === "date" ? "date" : "number"} value={value[key] ?? ""} onChange={e => onChange({ ...value, preset: undefined, [key]: e.target.value === "" ? undefined : filter.control === "number" ? numericInput(e.target.value) : e.target.value })} /></label>)}</div>;
   const resolved = value.preset ? resolvePreset(value, todayOf(model), calendarOf(model)) : null, customOpen = !value.preset && (custom || hasFilterValue(value));
+  const showRangeYear = resolved != null && String(resolved.min).slice(0, 4) !== String(resolved.max).slice(0, 4);
   const body = presentation === "dropdown" ? <><button className="studio-trigger" aria-label={`Choose ${filter.label}`} onClick={() => setChoosing(true)}><span className="filter-selection">{label}</span><span>⌄</span></button>{picker}</>
     : presentation === "chips" || presentation === "segmented" ? <div className="filter-pills-wrap">
-      {loading && !options.length && <p role="status" className="muted">Loading values…</p>}{error && <p role="alert">{error}</p>}
+      {!choosing && (loading || error || !options.length || data?.kind === "values" && data.truncated) && valuesStatus}
       <div className="filter-pills" role={presentation === "segmented" ? "radiogroup" : "group"} aria-label={filter.label}>
-        {pills.map(o => { const on = selected.includes(o.value); return <button key={JSON.stringify(o.value)} type="button" className={"pill" + (on ? " on" : "")} role={presentation === "segmented" ? "radio" : undefined} aria-checked={presentation === "segmented" ? on : undefined} aria-pressed={presentation === "chips" ? on : undefined} onClick={() => toggle(o.value)}>{text(o.value)}{o.n != null && <small>{o.n.toLocaleString()}</small>}</button>; })}
+        {pills.map(o => { const on = selected.includes(o.value); return <button key={JSON.stringify(o.value)} type="button" className={"pill" + (on ? " on" : "")} role={presentation === "segmented" ? "radio" : undefined} aria-checked={presentation === "segmented" ? on : undefined} aria-pressed={presentation === "chips" ? on : undefined} onClick={() => toggle(o.value)}>{text(o.value)}{o.n != null && <small title="Matching rows in this source and role, before dashboard and chart filters">{o.n.toLocaleString()}</small>}</button>; })}
         {hidden > 0 && <button type="button" className="link" onClick={() => setChoosing(true)}>and {hidden} more, use the dropdown</button>}
         {presentation === "chips" && selected.length > 0 && <button type="button" className="link" onClick={() => onChange({})}>Clear</button>}
       </div>{picker}</div>
@@ -92,7 +99,7 @@ export function FilterControl({ filter, value, onChange, spec, model, queryConte
       <div className="filter-pills" role="radiogroup" aria-label={`${filter.label} period`}>
         {PRESET_IDS.map(p => <button key={p} type="button" role="radio" aria-checked={value.preset === p} className={"pill" + (value.preset === p ? " on" : "")} onClick={() => { setCustom(false); onChange(value.preset === p ? {} : { preset: p }); }}>{PRESETS[p].label}</button>)}
         <button type="button" role="radio" aria-checked={customOpen} className={"pill" + (customOpen ? " on" : "")} onClick={() => { setCustom(true); if (value.preset) onChange({}); }}>Custom</button>
-        {resolved && <small className="filter-resolved">{shortDate(String(resolved.min))} to {shortDate(String(resolved.max))}</small>}
+        {resolved && <small className="filter-resolved">{shortDate(String(resolved.min), showRangeYear)} to {shortDate(String(resolved.max), showRangeYear)}</small>}
       </div>{customOpen && range}</div>
     : range;
   return <div className={`filter-control ${presentation}${compact ? " compact" : ""}`} onPointerDown={e => { if ((e.target as HTMLElement).closest("button,input,select,label,dialog")) e.stopPropagation(); }}>

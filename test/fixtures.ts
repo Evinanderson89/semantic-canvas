@@ -1,5 +1,6 @@
 import type { Connector, QueryResult } from "../src/connectors/types.ts";
 import type { Model } from "../src/semantic/model.ts";
+import type { TileSpec } from "../src/compiler/spec.ts";
 
 export const model: Model = {
   source: "test", name: "t",
@@ -58,7 +59,7 @@ export const conn: Connector = {
   async close() {},
 };
 
-export const tile = (over: Partial<any> = {}) => ({
+export const tile = (over: Partial<TileSpec> = {}): TileSpec => ({
   id: "t1", metrics: ["revenue"], dimensions: [] as string[],
   layout: { x: 0, y: 0, w: 100, h: 100 }, ...over,
 });

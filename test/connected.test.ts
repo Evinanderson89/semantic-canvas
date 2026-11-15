@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { connectOne } from "../src/sources/registry.ts";
-import { mergeOverlay, metricIssues, readOverlay, registerSchema, writeOverlay, type Overlay } from "../src/sources/connected.ts";
+import { mergeOverlay, metricIssues, registrationEntry, readOverlay, registerSchema, writeOverlay, type Overlay } from "../src/sources/connected.ts";
 import { suggestDashboard } from "../src/suggest/suggest.ts";
 import { reviewedModel, visibleModel, type Model } from "../src/semantic/model.ts";
 import { validateTile } from "../src/compiler/compile.ts";
@@ -115,16 +115,16 @@ it("explains a draft metric in plain language and sends the review exactly as pu
   const draft = { dataset: "salesforce_account", status: "unreviewed" as const, table: { default_date_column: "created_date", columns: [{ name: "created_date", type: "date" }] },
     metrics: { salesforce_account_rows: { label: "Accounts", expression: "count(*)", reviewed: false }, salesforce_account_employees_total: { label: "Employees", expression: "sum(employees)", reviewed: true, direction: "higher" as const, importance: 40 } } };
   const reviews = Object.fromEntries(Object.entries(draft.metrics).map(([n, m]) => [n, reviewOf(draft, m)]));
-  // The draft's default date column is offered as the time dimension; unticked metrics never travel; blanks are dropped, a blank description clears.
+  // The draft's default date column is offered as the time dimension; publication is explicit and blank optional metadata clears.
   expect(reviews.salesforce_account_rows).toMatchObject({ publish: false, timeDimension: "salesforce_account.created_date", importance: "" });
   expect(reviews.salesforce_account_employees_total).toMatchObject({ publish: true, direction: "higher", importance: "40" });
   const body = publishBody({ grain: " one row per account ", description: "", dateColumn: "created_date" },
     { ...reviews, salesforce_account_rows: { ...reviews.salesforce_account_rows, publish: true, label: "Accounts ", grains: ["month", "quarter"], direction: "", importance: " " } });
   expect(body).toEqual({ table: { description: "", grain: "one row per account", default_date_column: "created_date" }, metrics: {
-    salesforce_account_rows: { reviewed: true, description: "", label: "Accounts", time_grains: ["month", "quarter"], time_dimension: "salesforce_account.created_date" },
-    salesforce_account_employees_total: { reviewed: true, description: "", label: "Employees", direction: "higher", importance: 40 } } });
+    salesforce_account_rows: { reviewed: true, description: "", label: "Accounts", time_grains: ["month", "quarter"], time_dimension: "salesforce_account.created_date", direction: null, importance: null },
+    salesforce_account_employees_total: { reviewed: true, description: "", label: "Employees", direction: "higher", importance: 40, time_grains: null, time_dimension: null } } });
   expect(publishSchema.safeParse(body).success).toBe(true);
-  expect(publishSchema.safeParse(publishBody({ grain: "", description: "", dateColumn: "" }, reviews)).data).toEqual({ table: { description: "" }, metrics: { salesforce_account_employees_total: { reviewed: true, description: "", label: "Employees", direction: "higher", importance: 40 } } });
+  expect(publishSchema.safeParse(publishBody({ grain: "", description: "", dateColumn: "" }, reviews)).data).toEqual({ table: { description: "", grain: null, default_date_column: null }, metrics: { salesforce_account_rows: { reviewed: false }, salesforce_account_employees_total: { reviewed: true, description: "", label: "Employees", direction: "higher", importance: 40, time_grains: null, time_dimension: null } } });
 });
 
 it("reads ?source= and &table= from an Open in Semantic Canvas link and ignores what it cannot use", async () => {
@@ -138,4 +138,19 @@ it("reads ?source= and &table= from an Open in Semantic Canvas link and ignores 
   expect(linkedSource(parseLink(""), sources)).toBeNull();
   expect(stripLink("http://canvas.test/?source=duckglue-local&table=x&keep=1#h")).toBe("http://canvas.test/?keep=1#h");
   expect(stripLink("http://canvas.test/?source=duckglue-local")).toBe("http://canvas.test/");
+});
+
+
+it("invalidates every approval when an administrator changes a published table schema", () => {
+  const previous = entry("salesforce_account", "published");
+  const name = Object.keys(previous.metrics)[0];
+  previous.metrics[name].reviewed = true;
+  const body = registerSchema.parse({ dataset: previous.dataset, importId: "refresh", provenance: previous.provenance,
+    table: { ...previous.table, columns: previous.table.columns.map(c => c.name === "employees" ? { ...c, type: "integer" } : c) },
+    metrics: Object.fromEntries(Object.entries(previous.metrics).map(([key, m]) => [key, { label: m.label, expression: m.expression }])) });
+  expect(() => registrationEntry(body, "editor", previous)).toThrow(/approved definition has been kept/);
+  const next = registrationEntry(body, "admin", previous, true);
+  expect(next.status).toBe("unreviewed");
+  expect(Object.values(next.metrics).every(m => m.reviewed === false)).toBe(true);
+  expect(previous.status).toBe("published"); expect(previous.metrics[name].reviewed).toBe(true);
 });

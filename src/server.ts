@@ -1,14 +1,17 @@
+import { countryCodes } from "./charts/countryCodes.ts";
 import { reviewContextSchema } from "./suggest/reviewSession.ts";
 import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
 import { createTelemetry } from "./operations/telemetry.ts";
+import { providerFailureDiagnostic, requestFailure } from "./operations/requestFailure.ts";
 import { resolve } from "node:path";
 import { analyzeReference, validateReferenceUpload } from "./reference/analyze.ts";
 import { validateDashboard } from "./app/filters.ts";
 import { tabsOf, tabView } from "./app/tabs.ts";
-import { finishResult, resultLimit } from "./compiler/result.ts";
+import { finishResult, resultLimit, coverageWarnings } from "./compiler/result.ts";
+import { queryEvidence } from "./suggest/queryEvidence.ts";
 import express from "express";
 // Load .env before anything reads process.env, so a source that needs
 // SNOWFLAKE_* (or any other) credentials picks them up with no shell setup.
@@ -20,13 +23,15 @@ if (typeof process.loadEnvFile === "function") {
 import { compileTile, splitPartialPeriods, validateTile } from "./compiler/compile.ts";
 import { suggestDashboard } from "./suggest/suggest.ts";
 import type { Connector } from "./connectors/types.ts";
-import { metricOf, reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
-import { metricIssues, publishSchema, readOverlay, registerSchema, summarize, writeOverlay, type ConnectedEntry } from "./sources/connected.ts";
+import { executionBudget } from "./connectors/execution.ts";
+import { fieldReachable, isNumeric, metricOf, reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
+import { metricIssues, publicationEntry, publicationRevision, publishSchema, readOverlay, registrationEntry, registerSchema, summarize, writeOverlay, type ConnectedEntry } from "./sources/connected.ts";
 import { connectConnector } from "./sources/registry.ts";
+import { discoverSchema } from "./sources/schema.ts";
 import { joinCandidates, probeJoins, profileTables } from "./modeler/introspect.ts";
 import { propose } from "./modeler/propose.ts";
 import { proposalIssues, proposalToExtension, proposalToYaml } from "./modeler/yaml.ts";
-import { driftOf, extendProposal } from "./modeler/extend.ts";
+import { driftOf, extendProposal, dashboardDriftImpact, type DriftFinding } from "./modeler/extend.ts";
 import { updateExtension, writeExtension } from "./sources/extensions.ts";
 import { proposalProblems } from "./modeler/proposals.ts";
 import { draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
@@ -34,17 +39,23 @@ import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import YAML from "yaml";
 import { describe as describeSource, connectOne, expand, loadSources, type AiConfig, type Source } from "./sources/registry.ts";
-import { exportLibrary, closeStore, deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources } from "./store/store.ts";
+import { listDashboardVersions, loadDashboardVersion, exportLibrary, closeStore, deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources } from "./store/store.ts";
 import { initializeCoreLibrary, listCoreLibrary, saveLibraryFolder, deleteLibraryFolder, loadLibraryView, saveLibraryView, updateLibraryItem, deleteLibraryView } from "./store/store.ts";
 import { viewSaveSchema } from "./library/model.ts";
 import { loadRls, type RlsConfig } from "./security/rls.ts";
 import { applyBestLayout, applyLayout, LAYOUTS } from "./canvas/layouts.ts";
 import { requireScope, scopedField } from "./security/queryScope.ts";
-import { saveSchema, querySchema, dashboardSchema, canvasSchema, MAX_DOCUMENT_BYTES } from "./compiler/schema.ts";
+import { saveSchema, querySchema, dashboardSchema, canvasSchema, MAX_DOCUMENT_BYTES, profileRequestSchema } from "./compiler/schema.ts";
+import { profileEvidence, PROFILE_REQUEST_TIMEOUT_MS } from "./suggest/profileEvidence.ts";
 import { z } from "zod";
 import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardStory,
          type ChatMessage, type DashboardTileSummary } from "./agent/loop.ts";
 import Anthropic from "@anthropic-ai/sdk";
+import { claudeSetup, checkClaudeConnection, chatgptSetup, checkChatgptConnection } from "./mcp/connection.ts";
+import { chatgptScopeSchema } from "./mcp/chatgpt.ts";
+import { sourceReloader } from "./sources/reload.ts";
+import { managedAiKey } from "./sources/ai.ts";
+import { aiConfigurationIssue, aiProviderIssue, requireAiConfiguration } from "./agent/configuration.ts";
 
 const SOURCES_PATH = process.env.SOURCES_PATH ?? "./sources.yaml";
 const ENV_PATH = process.env.SC_ENV_PATH ?? ".env"; // matches the bare process.loadEnvFile() call above
@@ -57,6 +68,7 @@ let sources: Source[] = [];
 let defaultPrincipal: string | null = null;
 let rls: RlsConfig = { policies: [], principals: {} };
 let ai: AiConfig | null = null;
+let aiCredentialRevision = 0;
 
 /** Resolve the source for a request; falls back to the first ready one. */
 function pick(req: any): Source {
@@ -65,7 +77,7 @@ function pick(req: any): Source {
   const found = sources.find((s) => s.id === want && s.status === "ready");
   if (want && !found) throw Object.assign(new Error(`Source "${want}" is unavailable`), { status: 404 });
   const ready = found ?? sources.find((s) => s.status === "ready" && canUseSource(identityOf(req), s.id));
-  if (!ready) throw new Error("no data source is available");
+  if (!ready) throw Object.assign(new Error("No accessible data source is ready. Connect a source or contact your workspace administrator."), { status: 404 });
   return ready;
 }
 /** Local mode simulates an administrator; in company mode the role comes from the verified session. */
@@ -124,7 +136,7 @@ app.get("/readyz", (_req, res) => res.status(ready ? 200 : 503).json({ status: r
 app.use(express.json({ limit: MAX_DOCUMENT_BYTES }));
 app.use((error: any, _req: any, res: any, next: any) => {
   if (!error) return next();
-  res.status(error.status ?? 400).json({ error: error.status === 413 ? "Dashboard exceeds the 8 MB save limit" : "Invalid JSON request" });
+  res.status(error.status ?? 400).json({ error: error.status === 413 ? "Request body exceeds the 8 MB limit" : "Invalid JSON request" });
 });
 
 auth.mount(app);
@@ -152,7 +164,7 @@ const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => 
   const run = async () => {
     if (res.destroyed) return;
     try { await fn(req, res); }
-    catch (e: any) { telemetry.log("request.failed", { requestId: res.locals.requestId, errorType: e?.name ?? "Error" }, "error"); res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
+    catch (e: any) { telemetry.log("request.failed", { requestId: res.locals.requestId, errorType: e?.name ?? "Error", ...providerFailureDiagnostic(e) }, "error"); const failure = requestFailure(e); res.status(failure.status).json({ error: failure.error }); }
   };
   // Covers /api/sources/:id/connected* too: overlay writes share the queue with sources.yaml edits.
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(sources|agent\/key|setup\/model|modeler)(\/|$)/.test(req.path.toLowerCase())) {
@@ -167,8 +179,37 @@ app.get("/api/sources", safe((req, res) => res.json({
 })));
 
 app.get("/api/setup/guide", safe((_req, res) => res.type("text/plain").sendFile(resolve("docs/self-hosting.md"))));
+app.get("/api/setup/claude", safe((_req, res) => res.json(auth.config.mode === "local" ? claudeSetup(PORT) : {
+  available: false, reason: "Claude Desktop and Claude Code connections currently require a local Canvas installation. Authenticated company connections are not supported yet.",
+})));
+let checkingClaude = false;
+let checkingChatgpt = false;
+app.get("/api/setup/chatgpt", safe((req, res) => {
+  if (auth.config.mode !== "local") return res.json({ available: false, reason: "This ChatGPT tunnel setup currently supports local Canvas installations. Company sign-in delegation is not supported yet." });
+  if (!req.query.principal) return res.json({ available: true, needsScope: true });
+  const scope = chatgptScopeSchema.parse({ source: pick(req).id, principal: req.query.principal, access: req.query.access });
+  if (!Object.hasOwn(rls.principals, scope.principal)) return res.status(400).json({ error: "Choose an available row-access principal." });
+  res.json(chatgptSetup(PORT, scope));
+}));
+app.post("/api/setup/chatgpt/check", safe(async (req, res) => {
+  if (auth.config.mode !== "local") return res.status(409).json({ error: "This ChatGPT tunnel setup supports local installations only." });
+  const scope = chatgptScopeSchema.parse({ source: pick(req).id, principal: req.query.principal, access: req.query.access });
+  if (!Object.hasOwn(rls.principals, scope.principal)) return res.status(400).json({ error: "Choose an available row-access principal." });
+  if (checkingChatgpt) return res.status(429).json({ error: "A ChatGPT connection check is already running. Try again shortly." });
+  checkingChatgpt = true;
+  try { res.json(await checkChatgptConnection(PORT, scope)); }
+  finally { checkingChatgpt = false; }
+}));
+app.post("/api/setup/claude/check", safe(async (req, res) => {
+  if (auth.config.mode !== "local") return res.status(409).json({ error: "External Claude connections are available only for local installations." });
+  const source = pick(req).id;
+  if (checkingClaude) return res.status(429).json({ error: "A connection check is already running. Try again shortly." });
+  checkingClaude = true;
+  try { res.json(await checkClaudeConnection(PORT, source)); }
+  finally { checkingClaude = false; }
+}));
 app.get("/api/setup", safe((_req, res) => res.json({ mode: auth.config.mode,
-  checks: { signIn: auth.config.mode !== "local", sources: sources.some(s => s.status === "ready"), catalogue: sources.some(s => Object.keys(s.model?.metrics ?? {}).length > 0), ai: Boolean(ai?.apiKey), monitoring: telemetry.enabled },
+  checks: { signIn: auth.config.mode !== "local", sources: sources.some(s => s.status === "ready"), catalogue: sources.some(s => Object.keys(s.model?.metrics ?? {}).length > 0), ai: aiConfigurationIssue(ai) === null, monitoring: telemetry.enabled },
   sources: sources.map(describeSource), sessionSeconds: auth.config.sessionSeconds,
 })));
 app.get("/api/operations/status", safe((_req, res) => res.json({ ready, uptimeSeconds: Math.floor(process.uptime()), monitoring: telemetry.enabled, counters: telemetry.counters,
@@ -287,14 +328,26 @@ async function renderConnectorLines(id: string, label: string, connectorType: st
 /** Sets each var in .env (in place if it already exists there) and in
  *  process.env directly -- more reliable than re-running loadEnvFile, which
  *  by design never overwrites a key that's already set. */
-async function upsertEnv(vars: Record<string, string>, label: string) {
+let pendingEnvWrite: Promise<void> = Promise.resolve();
+function upsertEnv(vars: Record<string, string>, label: string): Promise<void> {
+  const result = pendingEnvWrite.then(() => writeEnv(vars, label));
+  pendingEnvWrite = result.catch(() => {});
+  return result;
+}
+async function writeEnv(vars: Record<string, string>, label: string) {
   if (!Object.keys(vars).length) return;
   const lines = existsSync(ENV_PATH) ? (await readFile(ENV_PATH, "utf8")).split("\n") : [""];
   const added: string[] = [];
   for (const [name, value] of Object.entries(vars)) {
-    const idx = lines.findIndex((l) => l.startsWith(`${name}=`));
     const rendered = `${name}=${quoteEnvValue(value)}`;
-    if (idx !== -1) lines[idx] = rendered; else added.push(rendered);
+    const assignment = new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=`);
+    let replaced = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (!assignment.test(lines[i])) continue;
+      if (!replaced) { lines[i] = rendered; replaced = true; }
+      else lines.splice(i--, 1); // A later duplicate must not restore the old value.
+    }
+    if (!replaced) added.push(rendered);
   }
   let text = lines.join("\n");
   if (added.length) text = `${text.replace(/\n+$/, "")}\n\n# ${label.replace(/[\r\n]/g, " ")} (via Connections)\n${added.join("\n")}\n`;
@@ -335,25 +388,31 @@ async function readExistingBlock(id: string):
   }
 }
 
-async function initializeLibraries() {
-  for (const source of sources) if (source.status === "ready" && source.model) {
+async function initializeLibraries(candidates = sources) {
+  for (const source of candidates) if (source.status === "ready" && source.model) {
     const skipped = await initializeCoreLibrary({ source: source.id, model: source.model.name }, source.model);
     if (skipped.length) telemetry.log("library.skipped_invalid_document", { source: source.id, count: skipped.length, ids: skipped.slice(0, 20).join(",") }, "warn");
   }
 }
 
-async function hotReload() {
-  const loaded = await loadSources(SOURCES_PATH);
+const reloadSources = sourceReloader(async () => {
+  const credentialRevision = aiCredentialRevision;
+  return { ...await loadSources(SOURCES_PATH), credentialRevision };
+}, initializeLibraries, loaded => {
   const retired = sources;
   sources = loaded.sources;
-  await initializeLibraries();
-  void Promise.allSettled(retired.map(s => s.conn?.close()));
   defaultPrincipal = loaded.defaultPrincipal;
-  ai = loaded.ai;
+  // A source reload can prepare slowly. It must not replace a credential that
+  // Connections saved or removed while that older configuration was loading.
+  if (loaded.credentialRevision === aiCredentialRevision) ai = loaded.ai;
+  return retired;
+});
+async function hotReload() {
+  const loaded = await reloadSources();
   return {
-    sources: sources.map(describeSource),
-    active: sources.find((x) => x.status === "ready")?.id ?? null,
-    defaultPrincipal,
+    sources: loaded.sources.map(describeSource),
+    active: loaded.sources.find((x) => x.status === "ready")?.id ?? null,
+    defaultPrincipal: loaded.defaultPrincipal,
   };
 }
 
@@ -437,16 +496,16 @@ const draftCreateSchema = z.object({
   extend: z.string().regex(SLUG).optional(),
 }).strict().refine((b) => [b.connector, b.fromSource, b.extend].filter(Boolean).length === 1, "Give one of: a connector, a source to read, or a source to extend");
 
-/** Dashboards in a source that chart any of these metrics: what a drift finding would break for readers. */
-async function dashboardsUsing(source: Source, metrics: Set<string>): Promise<{ id: string; name: string; metrics: string[] }[]> {
-  if (!metrics.size || !source.model) return [];
+/** Saved dashboards with modeled dependencies on changed schema; no query execution. */
+async function dashboardsUsing(source: Source, drift: DriftFinding[]) {
+  if (!drift.length || !source.model) return [];
   const scope = { source: source.id, model: source.model.name };
-  const out: { id: string; name: string; metrics: string[] }[] = [];
+  const out: ({ id: string; name: string } & ReturnType<typeof dashboardDriftImpact>)[] = [];
   for (const d of await listDashboards(scope)) {
     const doc = await loadDashboard(d.id, scope).catch(() => null);
     if (!doc) continue;
-    const used = [...new Set(doc.spec.tiles.flatMap((t) => t.metrics ?? []).filter((m) => metrics.has(m)))].sort();
-    if (used.length) out.push({ id: d.id, name: d.name, metrics: used });
+    const impact = dashboardDriftImpact(source.model, doc.spec, drift);
+    if (impact.charts.length) out.push({ id: d.id, name: d.name, ...impact });
   }
   return out;
 }
@@ -459,7 +518,7 @@ app.get("/api/modeler/drift", safe(async (req, res) => {
   if (!s.conn.catalog) return res.status(400).json({ error: "This connector cannot list its tables, so drift cannot be checked." });
   const catalog = await s.conn.catalog();
   const drift = driftOf(s.model, catalog);
-  const dashboards = await dashboardsUsing(s, new Set(drift.flatMap((f) => f.metrics)));
+  const dashboards = await dashboardsUsing(s, drift);
   res.json({ source: s.id, checkedAt: new Date().toISOString(), tables: catalog.length, drift, dashboards });
 }));
 
@@ -759,14 +818,7 @@ app.post("/api/sources/:sourceId/connected", safe(async (req, res) => {
   const overlay = await readOverlay(source.id), existing = overlay.tables[body.dataset];
   if (existing && !ownsEntry(req, existing)) return res.status(403).json({ error: `${body.dataset} was connected by someone else; only they or an administrator can replace it` });
   if (source.model?.tables[body.dataset] && !source.model.tables[body.dataset].connected) return res.status(409).json({ error: `"${body.dataset}" is already a table of the base model` });
-  // Draft metrics are regenerated unreviewed; a published metric of the same name keeps its review as long as it still validates.
-  const metrics: ConnectedEntry["metrics"] = {};
-  for (const [name, m] of Object.entries(body.metrics)) {
-    const kept = existing?.metrics[name];
-    metrics[name] = kept?.reviewed ? { ...kept, ...m, reviewed: true } : { ...m, reviewed: false };
-  }
-  const entry: ConnectedEntry = { status: existing?.status ?? "unreviewed", dataset: body.dataset, importId: body.importId, provenance: body.provenance,
-    registeredBy: existing?.registeredBy ?? actorOf(req), table: body.table, metrics };
+  const entry = registrationEntry(body, actorOf(req), existing, roleOf(req) === "admin");
   const issue = metricIssues(entry);
   if (issue) return res.status(400).json({ error: issue });
   overlay.tables[body.dataset] = entry;
@@ -781,22 +833,19 @@ app.post("/api/sources/:sourceId/connected", safe(async (req, res) => {
 app.get("/api/sources/:sourceId/connected/:dataset", safe(async (req, res) => {
   const source = connectedSource(req), overlay = await readOverlay(source.id), existing = overlay.tables[String(req.params.dataset)];
   if (!existing || (roleOf(req) === "viewer" && existing.status !== "published")) return res.status(404).json({ error: `no connected table "${req.params.dataset}" on ${source.id}` });
-  res.json({ dataset: existing.dataset, status: existing.status, table: existing.table, metrics: existing.metrics });
+  res.json({ dataset: existing.dataset, status: existing.status, revision: publicationRevision(existing), table: existing.table, metrics: existing.metrics });
 }));
 
 app.post("/api/sources/:sourceId/connected/:dataset/publish", safe(async (req, res) => {
   const source = connectedSource(req), body = publishSchema.parse(req.body);
   const overlay = await readOverlay(source.id), existing = overlay.tables[String(req.params.dataset)];
   if (!existing) return res.status(404).json({ error: `no connected table "${req.params.dataset}" on ${source.id}` });
-  const unknown = Object.keys(body.metrics).find((name) => !existing.metrics[name]);
-  if (unknown) return res.status(400).json({ error: `"${unknown}" is not a metric of ${existing.dataset}` });
-  const entry: ConnectedEntry = { ...existing, status: "published", table: { ...existing.table, ...body.table },
-    metrics: Object.fromEntries(Object.entries(existing.metrics).map(([name, m]) => [name, body.metrics[name] ? { ...m, ...body.metrics[name] } : m])) };
+  const entry = publicationEntry(existing, body);
   const issue = metricIssues(entry);
   if (issue) return res.status(400).json({ error: issue });
   overlay.tables[existing.dataset] = entry;
   await writeOverlay(source.id, overlay);
-  telemetry.log("audit.connected_published", { actor: actorOf(req), source: source.id, dataset: existing.dataset, metrics: Object.keys(body.metrics).length });
+  telemetry.log("audit.connected_published", { actor: actorOf(req), source: source.id, dataset: existing.dataset, metrics: Object.keys(body.metrics).length, publishedMetrics: Object.keys(body.metrics).filter(name => body.metrics[name].reviewed), withdrawnMetrics: Object.keys(body.metrics).filter(name => !body.metrics[name].reviewed && existing.metrics[name].reviewed) });
   await hotReload();
   res.json(summarize(entry));
 }));
@@ -814,18 +863,10 @@ app.delete("/api/sources/:sourceId/connected/:dataset", safe(async (req, res) =>
 }));
 
 app.get("/api/model", safe((req, res) => res.json(modelOf(req))));
-/** Schema introspection, for "the warehouse schema is fully readable". */
+/** Source-authorized schema discovery. */
 app.get("/api/schema", safe(async (req, res) => {
   const src = pick(req);
-  const c: any = src.conn;
-  if (typeof c.schema !== "function")
-    return res.json({
-      tables: Object.values(modelOf(req).tables).map((t) => ({
-        name: t.name, columns: t.columns.map((x) => ({ name: x.name, type: x.type })) })),
-      source: `${src.label} (from the semantic model)`,
-    });
-  try { res.json({ tables: await c.schema(), source: c.label }); }
-  catch (e: any) { res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) }); }
+  res.json(await discoverSchema(src.model!, roleOf(req), src.label, src.conn!));
 }));
 
 app.get("/api/stats", safe((req, res) => res.json((connOf(req) as any).stats?.() ?? {})));
@@ -845,10 +886,7 @@ app.get("/api/suggest", safe((req, res) =>
  * about. Chart choice hinges on facts you cannot get from the schema alone --
  * how many distinct values there are, and whether they look like places.
  */
-const ISO2 = new Set(("AD AE AF AG AL AM AO AR AT AU AZ BA BD BE BG BR BW BY CA CH CL CN CO CR CU CY CZ " +
-  "DE DK DO DZ EC EE EG ES ET FI FJ FR GB GE GH GR GT HK HN HR HU ID IE IL IN IQ IR IS IT JM JO JP KE " +
-  "KH KR KW KZ LB LK LT LU LV MA MD MK MM MN MT MX MY NG NL NO NP NZ OM PA PE PH PK PL PT PY QA RO RS " +
-  "RU SA SE SG SI SK SN TH TN TR TW TZ UA UG US UY VE VN ZA ZM ZW").split(" "));
+const ISO2 = new Set(countryCodes.map(([alpha2]) => alpha2));
 const GEO_NAME = /(country|nation|region|state|province|city|market|territory|geo|iso)/i;
 
 const dashboardScope = (req: any) => ({ source: pick(req).id, model: modelOf(req).name });
@@ -880,18 +918,26 @@ app.get("/api/dashboards/:id", safe(async (req, res) => {
   const d = await loadDashboard(req.params.id, dashboardScope(req));
   return d ? res.json(d) : res.status(404).json({ error: "Dashboard not found in this source" });
 }));
+app.get("/api/dashboards/:id/versions", safe(async (req, res) => {
+  res.json({ versions: await listDashboardVersions(req.params.id, dashboardScope(req)) });
+}));
+app.get("/api/dashboards/:id/versions/:revision", safe(async (req, res) => {
+  const revision = z.coerce.number().int().positive().parse(req.params.revision);
+  res.json(await loadDashboardVersion(req.params.id, revision, dashboardScope(req)));
+}));
 app.delete("/api/dashboards/:id", safe(async (req, res) => {
   const revision = z.number().int().positive().parse(req.body?.revision);
   res.json(await deleteDashboard(req.params.id, dashboardScope(req), revision));
 }));
 app.post("/api/dashboards/:id/arrange", safe(async (req, res) => {
+  const model = modelOf(req);
   const d = await loadDashboard(req.params.id, dashboardScope(req));
   if (!d) return res.status(404).json({ error: "Dashboard not found in this source" });
   const requested = req.body?.layout;
   if (requested && !LAYOUTS.some((l) => l.name === requested)) return res.status(400).json({ error: "Unknown layout" });
   const pages = tabsOf(d.spec).map(tab => {
     const tiles = tabView(d.spec, tab.id).tiles;
-    return requested ? { name: requested, tiles: applyLayout(requested, tiles, d.canvas.width) } : applyBestLayout(tiles, d.canvas.width);
+    return requested ? { name: requested, tiles: applyLayout(requested, tiles, d.canvas.width, true, model) } : applyBestLayout(tiles, d.canvas.width, model);
   });
   const arranged = { name: requested ?? "per-tab", tiles: pages.flatMap(p => p.tiles) };
   const bottom = Math.max(d.canvas.height, ...arranged.tiles.map((t) => t.layout.y + t.layout.h + 24));
@@ -970,18 +1016,16 @@ const agentConversations = new Map<string, ChatMessage[]>();
 
 app.post("/api/reference/analyze", safe(async (req, res) => {
   try { await validateReferenceUpload(req.body); } catch (e: any) { return res.status(400).json({ error: e.message }); }
-  if (!ai?.apiKey) return res.status(503).json({ error: "Connect an AI provider in Connections to read a dashboard reference." });
+  requireAiConfiguration(ai);
   const controller = new AbortController();
   const stop = () => controller.abort(); res.on("close", stop);
   try { const blueprint = await analyzeReference(req.body, modelOf(req), ai, controller.signal); if (!res.destroyed) res.json({ blueprint }); }
   finally { res.off("close", stop); }
 }));
 
-/** Said plainly, as a 503, so the person (and the CLI) know what to do, rather than a 500 that says nothing. */
-const NO_AI = "The AI agent is not set up on this Canvas. An administrator can add an Anthropic key under Connections, or set ANTHROPIC_API_KEY.";
-
 app.get("/api/agent/status", safe((_req, res) => res.json({
-  configured: Boolean(ai?.apiKey && ai.provider === "anthropic"), provider: ai?.provider ?? "anthropic", model: ai?.model ?? "claude-opus-5",
+  configured: aiConfigurationIssue(ai) === null, provider: ai?.provider ?? "anthropic", model: ai?.model ?? "claude-opus-5",
+  issue: aiConfigurationIssue(ai), canSetKey: aiProviderIssue(ai) === null,
 })));
 
 /**
@@ -997,6 +1041,8 @@ app.post("/api/agent/key", safe(async (req, res) => {
   if (!apiKey) return res.status(400).json({ error: "apiKey is required" });
   const provider = ai?.provider ?? "anthropic";
   const model = ai?.model ?? "claude-opus-5";
+  const providerIssue = aiProviderIssue(ai);
+  if (providerIssue) return res.status(422).json({ error: providerIssue });
   try {
     await new Anthropic({ apiKey }).models.retrieve(model);
   } catch (e: any) {
@@ -1005,19 +1051,21 @@ app.post("/api/agent/key", safe(async (req, res) => {
       : String(e?.message ?? e);
     return res.status(422).json({ error: msg });
   }
-  await upsertEnv({ ANTHROPIC_API_KEY: apiKey }, "AI agent (via Connections)");
+  await upsertEnv(managedAiKey(apiKey), "AI agent");
+  aiCredentialRevision++;
   ai = { provider, model, apiKey };
   res.json({ configured: true, provider, model });
 }));
 
 app.delete("/api/agent/key", safe(async (_req, res) => {
-  await upsertEnv({ ANTHROPIC_API_KEY: "" }, "AI agent (via Connections)");
+  await upsertEnv(managedAiKey(""), "AI agent");
+  aiCredentialRevision++;
   if (ai) ai = { ...ai, apiKey: "" };
   res.json({ configured: false });
 }));
 
 app.post("/api/agent/chat", safe(async (req, res) => {
-  if (!ai?.apiKey) return res.status(503).json({ error: NO_AI });
+  requireAiConfiguration(ai);
   const conversationId = String(req.body?.conversationId ?? "").trim();
   const message = String(req.body?.message ?? "").trim();
   if (!conversationId) return res.status(400).json({ error: "conversationId is required" });
@@ -1026,17 +1074,17 @@ app.post("/api/agent/chat", safe(async (req, res) => {
   const source = pick(req).id;
   const historyKey = JSON.stringify([identityOf(req)?.id ?? "local", source, principal, conversationId]);
   const history = agentConversations.get(historyKey) ?? [];
-  const active = req.body.document ? z.object({ spec: dashboardSchema, canvas: canvasSchema, selected: z.array(z.string()).max(500).default([]) }).strict().parse(req.body.document) : undefined;
+  const active = req.body.document ? z.object({ spec: dashboardSchema, canvas: canvasSchema, selected: z.array(z.string()).max(500).default([]), activeTabId: z.string().min(1).max(1000).optional() }).strict().parse(req.body.document) : undefined;
   const controller = new AbortController();
   res.on("close", () => controller.abort());
   const review = reviewContextSchema.safeParse(req.body?.review ?? {});
   if (!review.success) return res.status(400).json({ error: "Invalid building-session context" });
   const mode = z.enum(["chat", "redesign"]).parse(req.body?.mode ?? "chat");
   if (mode === "redesign" && !active) return res.status(400).json({ error: "A current canvas is required for redesign" });
-  const { text, messages, proposal } = await agentChat(ai, history.slice(-12), message, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined, review.data, mode);
+  const { text, messages, proposal, providerSchemaFallback } = await agentChat(ai, history.slice(-12), message, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined, review.data, mode);
   if (agentConversations.size >= 500) agentConversations.delete(agentConversations.keys().next().value!);
   agentConversations.set(historyKey, messages.slice(-12));
-  res.json({ text, proposal });
+  res.json({ text, proposal, ...(providerSchemaFallback ? { providerSchemaFallback } : {}) });
 }));
 
 /**
@@ -1044,19 +1092,25 @@ app.post("/api/agent/chat", safe(async (req, res) => {
  * not a conversation, so there's no conversationId or history here.
  */
 app.post("/api/agent/explain", safe(async (req, res) => {
-  if (!ai?.apiKey) return res.status(503).json({ error: NO_AI });
+  requireAiConfiguration(ai);
   const body = req.body ?? {};
   const metrics = Array.isArray(body.metrics) ? body.metrics : [];
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
   const principal = principalOf(req)?.id ?? "";
   const source = pick(req).id;
-  const text = await explainTile(ai, { source, principal, auth: auth.forwarded(req) }, {
-    title: String(body.title ?? metrics.join(", ")),
-    metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
-    where: body.where, compare: body.compare,
-    columns: body.columns, rows: body.rows,
-  });
-  res.json({ text });
+  const controller = new AbortController();
+  const cancel = () => controller.abort(); res.on("close", cancel);
+  try {
+    const text = await explainTile(ai, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, {
+      title: String(body.title ?? metrics.join(", ")),
+      metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
+      where: body.where, compare: body.compare,
+      columns: body.columns, rows: body.rows,
+      scopeNotes: Array.isArray(body.scopeNotes) ? body.scopeNotes.filter((s: unknown) => typeof s === "string").slice(0, 10).map((s: string) => s.slice(0, 5000)) : undefined,
+    });
+    if (!res.destroyed) res.json({ text });
+  } catch (error) { if (!controller.signal.aborted) throw error; }
+  finally { res.off("close", cancel); }
 }));
 
 /**
@@ -1065,19 +1119,25 @@ app.post("/api/agent/explain", safe(async (req, res) => {
  * same one-shot, read-only shape (see suggestImprovements).
  */
 app.post("/api/agent/beautify", safe(async (req, res) => {
-  if (!ai?.apiKey) return res.status(503).json({ error: NO_AI });
+  requireAiConfiguration(ai);
   const body = req.body ?? {};
   const metrics = Array.isArray(body.metrics) ? body.metrics : [];
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
   const principal = principalOf(req)?.id ?? "";
   const source = pick(req).id;
-  const text = await suggestImprovements(ai, { source, principal, auth: auth.forwarded(req) }, {
-    title: String(body.title ?? metrics.join(", ")),
-    metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
-    where: body.where, compare: body.compare,
-    columns: body.columns, rows: body.rows,
-  });
-  res.json({ text });
+  const controller = new AbortController();
+  const cancel = () => controller.abort(); res.on("close", cancel);
+  try {
+    const text = await suggestImprovements(ai, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, {
+      title: String(body.title ?? metrics.join(", ")),
+      metrics, dimensions: Array.isArray(body.dimensions) ? body.dimensions : [],
+      where: body.where, compare: body.compare,
+      columns: body.columns, rows: body.rows,
+      scopeNotes: Array.isArray(body.scopeNotes) ? body.scopeNotes.filter((s: unknown) => typeof s === "string").slice(0, 10).map((s: string) => s.slice(0, 5000)) : undefined,
+    });
+    if (!res.destroyed) res.json({ text });
+  } catch (error) { if (!controller.signal.aborted) throw error; }
+  finally { res.off("close", cancel); }
 }));
 
 /**
@@ -1088,12 +1148,13 @@ app.post("/api/agent/beautify", safe(async (req, res) => {
  * displaying it.
  */
 app.post("/api/agent/dashboard-story", safe(async (req, res) => {
-  if (!ai?.apiKey) return res.status(503).json({ error: NO_AI });
+  requireAiConfiguration(ai);
   const body = req.body ?? {};
   const tiles: DashboardTileSummary[] = Array.isArray(body.tiles) ? body.tiles.map((t: any) => ({
     id: String(t.id ?? ""), title: String(t.title ?? ""), kind: String(t.kind ?? ""),
     metrics: Array.isArray(t.metrics) ? t.metrics : [],
     dimensions: Array.isArray(t.dimensions) ? t.dimensions : [],
+    where: Array.isArray(t.where) ? t.where : undefined, compare: t.compare,
     text: typeof t.text === "string" ? t.text.slice(0, 100000) : undefined,
     layout: t.layout, section: t.section, pinned: t.pinned,
   })).filter((t: DashboardTileSummary) => t.id) : [];
@@ -1105,51 +1166,56 @@ app.post("/api/agent/dashboard-story", safe(async (req, res) => {
   // propose is exactly what this model actually has, the same governance
   // every other agent-facing surface in this app already enforces.
   const catalog = Object.values(reviewedModel(modelOf(req)).metrics).map((m) => ({
-    name: m.name, label: m.label, description: m.description, baseTable: m.baseTable,
+    name: m.name, label: m.label, description: m.description, baseTable: m.baseTable, timeDimension: m.timeDimension, timeGrains: m.timeGrains,
   }));
   const review = reviewContextSchema.safeParse(body.review ?? {});
   if (!review.success) return res.status(400).json({ error: "Invalid building-session context" });
   const controller = new AbortController(); res.on("close", () => controller.abort());
-  const result = await suggestDashboardStory(ai, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, tiles, catalog, review.data);
+  const result = await suggestDashboardStory(ai, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, tiles, catalog, review.data, reviewedModel(modelOf(req)));
   res.json(result);
 }));
 
 app.get("/api/profile", safe(async (req, res) => {
-  const base = String(req.query.base ?? "");
-  const fields = String(req.query.fields ?? "").split(",").filter(Boolean);
-  const out: any[] = [];
-  for (const field of fields) {
+  const { base, fields } = profileRequestSchema.parse(req.query);
+  const model = modelOf(req), conn = connOf(req);
+  // Validate and authorize the entire batch before the first warehouse query.
+  const plans = fields.map(field => {
     const [t, c] = field.includes(".") ? field.split(".", 2) : [base, field];
-    const col = modelOf(req).tables[t]?.columns.find((x) => x.name === c);
-    if (!col) continue;
-    const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req), identityOf(req)?.policy);
-    let cardinality: number | null = null;
-    let sample: string[] = [];
-    try {
-      const r = await connOf(req).execute(
-        `SELECT count(DISTINCT value) FROM ${relation}`, 1);
-      cardinality = Number(r.rows[0]?.[0] ?? 0);
-      const sv = await connOf(req).execute(
-        `SELECT DISTINCT value FROM ${relation} WHERE value IS NOT NULL LIMIT 40`, 40);
-      sample = sv.rows.map((row) => String(row[0]));
-    } catch { /* profiling is advisory; a failure just means fewer hints */ }
+    const col = model.tables[t]?.columns.find((x) => x.name === c);
+    if (!col || !fieldReachable(model, base || t, field))
+      throw Object.assign(new Error(`Unknown or unreachable profile field: ${field}`), { status: 400 });
+    const relation = scopedField(model, conn, base || t, field, rls, principalOf(req), identityOf(req)?.policy);
+    return { field, c, col, relation };
+  });
+  const controller = new AbortController();
+  const budget = executionBudget({ signal: controller.signal, timeoutMs: PROFILE_REQUEST_TIMEOUT_MS });
+  const cancel = () => controller.abort();
+  res.on("close", cancel);
+  const out = [];
+  try {
+    for (const { field, c, col, relation } of plans) {
+      if (res.destroyed) return;
+      const { cardinality, sample, warning } = await profileEvidence(conn, relation, budget.signal);
+      if (res.destroyed) return;
 
-    const temporal = /date|timestamp/i.test(col.type);
-    const numeric = /^(double|float|decimal|numeric|int|bigint|smallint|real)/i.test(col.type);
-    // Geographic if the NAME says so and the VALUES agree. Name alone is not
-    // enough -- "region" is as often a sales territory as a place.
-    const looksIso = sample.length > 0 &&
-      sample.filter((v) => ISO2.has(v.toUpperCase())).length / sample.length > 0.7;
-    const geo = looksIso || (GEO_NAME.test(c) && !numeric && !temporal &&
-      cardinality != null && cardinality > 1 && cardinality < 400);
+      const temporal = /date|timestamp/i.test(col.type);
+      const numeric = isNumeric(col);
+      // Geographic if the NAME says so and the VALUES agree. Name alone is not
+      // enough -- "region" is as often a sales territory as a place.
+      const looksIso = sample.length > 0 &&
+        sample.filter((v) => ISO2.has(v.toUpperCase())).length / sample.length > 0.7;
+      const geo = looksIso || (GEO_NAME.test(c) && !numeric && !temporal &&
+        cardinality != null && cardinality > 1 && cardinality < 400);
 
-    out.push({
-      field, type: col.type, cardinality, sample: sample.slice(0, 8),
-      role: temporal ? "temporal" : geo ? "geo" : numeric ? "numeric" : "categorical",
-      isoLike: looksIso,
-    });
-  }
-  res.json({ fields: out });
+      out.push({
+        field, type: col.type, cardinality, sample: sample.slice(0, 8),
+        role: temporal ? "temporal" : geo ? "geo" : numeric ? "numeric" : "categorical",
+        isoLike: looksIso,
+        ...(warning ? { warning } : {}),
+      });
+    }
+    res.json({ fields: out });
+  } finally { budget.dispose(); res.off("close", cancel); }
 }));
 
 app.get("/api/values", safe(async (req, res) => {
@@ -1162,9 +1228,9 @@ app.get("/api/values", safe(async (req, res) => {
   try {
     const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req), identityOf(req)?.policy);
     const sql = `SELECT value, count(*) AS n FROM ${relation} ` +
-                `GROUP BY 1 ORDER BY n DESC LIMIT 500`;
-    const r = await connOf(req).execute(sql, 500);
-    res.json({ values: r.rows.map((row) => ({ value: row[0], n: row[1] })), ms: r.ms });
+                `GROUP BY 1 ORDER BY n DESC, value ASC LIMIT 501`;
+    const r = await connOf(req).execute(sql, 501);
+    res.json({ values: r.rows.slice(0, 500).map((row) => ({ value: row[0], n: row[1] })), truncated: r.rows.length > 500, ms: r.ms });
   } catch (e: any) {
     res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) });
   }
@@ -1210,7 +1276,7 @@ app.post("/api/query", safe(async (req, res) => {
   const query = querySchema.parse(req.body);
   const tile = { ...query, id: query.id ?? "query", layout: { x: 0, y: 0, w: 1, h: 1 } };
   // The full model with the caller's role: a viewer asking for an unreviewed table gets told why, not "unknown metric".
-  const model = pick(req).model!, role = roleOf(req);
+  const source = pick(req), model = source.model!, role = roleOf(req);
   const issues = validateTile(model, tile, { role });
   if (issues.length) return res.status(400).json({ issues });
   try {
@@ -1226,13 +1292,20 @@ app.post("/api/query", safe(async (req, res) => {
     // full period, comes back flagged rather than silently dropped -- split
     // out here, right at the query's only consumer, so no caller of
     // compileTile() has to know these two columns exist at all.
-    const { columns, rows, partial } = splitPartialPeriods(out);
-    res.json({ ...finishResult({ ...out, columns, rows }, tile),
+    // Ratio coverage is retained-row evidence, so its probe row must be
+    // removed before collecting that evidence. Ordinary edge flags can
+    // omit rows and retain their existing split-before-limit behavior.
+    const limitedRatio = out.columns.includes("__ratio_coverage_issue") ? finishResult(out, tile) : null;
+    const { columns, rows, partial } = splitPartialPeriods(limitedRatio ?? out);
+    const finished = limitedRatio ? { ...limitedRatio, columns, rows } : finishResult({ ...out, columns, rows }, tile);
+    res.json({ ...finished, warnings: [...finished.warnings, ...coverageWarnings(partial)],
       partial,
+      source: { id: source.id, label: source.label },
       coverage: tile.dimensions.some((d) => d.includes(":")) ? "unknown" : undefined,
       principal: who?.id ?? null,
       rlsApplied: scope.filters.map((f) => f.id),
-      rlsUnenforceable: scope.unenforceable.map((p) => p.id) });
+      rlsUnenforceable: scope.unenforceable.map((p) => p.id),
+      ...(req.query.evidence === "1" ? { evidence: queryEvidence(visibleModel(model, role), tile, { ...finished, partial }) } : {}) });
   } catch (e: any) {
     res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) });
   }

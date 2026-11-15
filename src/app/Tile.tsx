@@ -1,37 +1,46 @@
+import { tableDisplay } from "../format/tableDisplay.ts";
+import { dimensionProfiles } from "./useFieldProfiles.ts";
+import { prepareMap } from "../charts/geo.ts";
+import { numericValue } from "../charts/values.ts";
+import { chartEvidence } from "./evidenceFingerprint.ts";
+import { useEvidenceDigest } from "./useEvidenceDigest.ts";
+import { readResponse } from "./http.ts";
+import { grainReviewKey, noiseSeriesReady, worthwhileCoarsening } from "../suggest/reviewChecks.ts";
+import { readableChartTitle } from "../suggest/storyStructure.ts";
+import { breakdownStatement, reviewBreakdown } from "../suggest/breakdownReview.ts";
+import type { InvestigationResult } from "../suggest/investigate.ts";
+import { resultIssue, type Readiness } from "./readiness.ts";
+import { checkResultQuality, isScopeNote } from "../suggest/resultQuality.ts";
+import { queryObservations } from "../suggest/queryObservations.ts";
+import { MetricEvidence } from "./MetricEvidence.tsx";
+import { DataExportActions } from "./DataExportActions.tsx";
+import { aiError } from "./aiError.ts";
 import { ChartActivityButtons } from "./ChartActivity.tsx";
 import { visibleQuery } from "./query.ts";
+import { chartResult, chartUnits, dimensionAlias as dimAlias } from "./chartResult.ts";
 import { validateTile } from "../compiler/compile.ts";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Chart, DataTable, Stat } from "../charts/Chart.tsx";
 import { Kpi } from "./Kpi.tsx";
 import { TileActions } from "./TileChrome.tsx";
+import { FloatingPanel } from "./FloatingPanel.tsx";
 import { FONT_STACKS, makeFormatter, mergeTextFormat, resolveFormat, tileFill } from "../format/format.ts";
 import { pickImage } from "./imagePicker.ts";
-import { inferChart } from "../suggest/chartRules.ts";
+import { resolvedChartKind, tileChartShape } from "../suggest/chartRules.ts";
+import { cardComparison, withCardComparison } from "../charts/cardComparison.ts";
+import { chartShapeIssue } from "../charts/capabilities.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
-import { metricOf, semanticHints, timeColumnOf } from "../semantic/model.ts";
+import { calendarOf, metricOf, semanticHints, timeColumnOf } from "../semantic/model.ts";
 import { dataAsOf } from "./connected.tsx";
 import type { FilterSpec } from "../compiler/spec.ts";
-import { drillInto, type DrillEntry, type DrillGrain } from "./drill.ts";
-import { downloadCsv, downloadPng, slugForFilename } from "./export.ts";
+import { drillInto, NEXT_GRAIN, type DrillEntry, type DrillGrain } from "./drill.ts";
+import { downloadCsv, downloadSpreadsheet, downloadPng, slugForFilename } from "./export.ts";
 import { renderMarkdown } from "./markdown.tsx";
-import { betterKind, coarserGrain, detectDegenerate, detectNoisy, recommend,
+import { betterKind, coarserGrain, detectNoisy, noiseScores, recommend,
          type DegenerateFinding, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
 import { useSession } from "./Session.tsx";
-
-/** The column alias a dimension resolves to in query results, matching the
- *  compiler's own convention exactly (compile.ts: `${column}_${grain}` for
- *  a time bucket, else the bare column) -- needed to map a chart's clicked
- *  column name back to the dimension string that produced it. */
-function dimAlias(d: string): string {
-  if (d.includes(":")) {
-    const [grain, rest] = d.split(":", 2);
-    return `${rest.includes(".") ? rest.split(".")[1] : rest}_${grain}`;
-  }
-  return d.includes(".") ? d.split(".")[1] : d;
-}
 
 /** A KPI card's natural height -- matches the headline tiles Exec Summary
  *  already packs at this height (layouts.ts: layoutExecSummary). A chart
@@ -51,8 +60,17 @@ export function scopedBy(applied: string[] | undefined, policy: { field: string;
   };
 }
 
+function EvidenceWarning({ message, label, onInspect, title }: { message: string; label: string; onInspect: () => void; title?: string }) {
+  return <div className="result-warning" role="status" title={title}>{message} <button className="warning-evidence-action" data-export-ignore
+    onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onInspect(); }}>{label}</button></div>;
+}
+
 function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCrossFilter,
-                     drill, onDrill, onDrillUp, aiAvailable, queryContext }: {
+                     drill, onDrill, onDrillUp, aiAvailable, queryContext, onReadiness, scopeWarnings, onInvestigate, presentation = false }: {
+  presentation?: boolean;
+  onInvestigate?: (result: InvestigationResult) => void;
+  onReadiness?: (id: string, state: Readiness) => void;
+  scopeWarnings?: string[];
   queryContext?: string;
   model: Model; spec: TileSpec; onRemove: (id: string) => void;
   onUpdate?: (t: TileSpec) => void; locked?: boolean;
@@ -73,15 +91,30 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   const [state, setState] = useState<any>({ status: "loading" });
   const session = useSession();
   const [explain, setExplain] = useState<{ status: "loading" | "ok" | "error"; text: string } | null>(null);
+  const explainRequest = useRef<AbortController | null>(null);
+  const closeExplain = () => { explainRequest.current?.abort(); setExplain(null); };
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [spreadsheetBusy, setSpreadsheetBusy] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const exportRequest = useRef<AbortController | null>(null);
+  const reviewedGrains = useRef(new Set<string>());
+  const explorationFocus = useRef(false);
   const [beautifyOpen, setBeautifyOpen] = useState(false);
   const [ruleSuggestion, setRuleSuggestion] = useState<VizOption | null | "checking">(null);
+  const [ruleError, setRuleError] = useState("");
   const [noiseSuggestion, setNoiseSuggestion] = useState<{ measure: string; grain: string; next: string } | null>(null);
+  const [breakdownScopeNote, setBreakdownScopeNote] = useState<string | undefined>();
+  const reviewRequest = useRef<AbortController | null>(null);
+  const tipsRequest = useRef<AbortController | null>(null);
+  const closeReview = () => { reviewRequest.current?.abort(); tipsRequest.current?.abort(); setBeautifyOpen(false); setAgentTips(null); };
   const [degenerateSuggestion, setDegenerateSuggestion] =
     useState<(DegenerateFinding & { timeDimension: string | null }) | null>(null);
   const [agentTips, setAgentTips] = useState<{ status: "loading" | "ok" | "error"; text: string } | null>(null);
   const tileRef = useRef<HTMLDivElement>(null);
   const kindOf = spec.kind ?? "metric";
+  const readiness = useRef(onReadiness); readiness.current = onReadiness;
+  const [rendered, setRendered] = useState<{ key: string; error: string | null } | null>(null);
 
   // One key covering everything the query depends on. `where` and `limit` were
   // missing before, so changing a filter left the tile showing the previous
@@ -99,6 +132,16 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     m: spec.metrics, d: dimensions, w: where, l: spec.limit,
     c: query.compare, queryContext,
   });
+  const reviewContext = useRef({ key: queryKey, chart: spec.chart, model });
+  reviewContext.current = { key: queryKey, chart: spec.chart, model };
+  useEffect(() => {
+    reviewRequest.current?.abort();
+    tipsRequest.current?.abort(); setAgentTips(null);
+    explainRequest.current?.abort(); setExplain(null);
+    exportRequest.current?.abort(); setSpreadsheetBusy(false); setExportError("");
+    setBeautifyOpen(false); setRuleSuggestion(null); setRuleError(""); setNoiseSuggestion(null); setDegenerateSuggestion(null); setBreakdownScopeNote(undefined);
+    return () => { reviewRequest.current?.abort(); tipsRequest.current?.abort(); explainRequest.current?.abort(); exportRequest.current?.abort(); };
+  }, [queryKey, spec.chart, model]);
 
   useEffect(() => {
     if (kindOf !== "metric") return;
@@ -114,16 +157,55 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       .then(async (r) => ({ ok: r.ok, body: await r.json() }))
       .then(({ ok, body }) => {
         if (ac.signal.aborted) return;
-        setState(ok ? { status: "ok", ...body }
-          : { status: "error", message: body.issues
+        setState(ok ? { status: "ok", ...body, key: queryKey, receivedAt: new Date().toISOString() }
+          : { status: "error", key: queryKey, message: body.issues
               ? body.issues.map((i: any) => i.problem).join("; ") : body.error });
       })
       .catch((e) => {
         // An aborted request is a superseded one, not a failure to report.
-        if (e?.name !== "AbortError") setState({ status: "error", message: String(e) });
+        if (e?.name !== "AbortError") setState({ status: "error", key: queryKey, message: String(e) });
       });
     return () => ac.abort();
   }, [queryKey, kindOf]);
+
+  const dataFindings = useMemo(() => {
+    if (state.key !== queryKey || state.status !== "ok") return [];
+    const columns: string[] = state.columns ?? [], rows: unknown[][] = state.rows ?? [];
+    const findings = checkResultQuality(spec.metrics, dimensions, { ...state, columns, rows });
+    if (resolvedChartKind(model, { ...spec, dimensions }) === "map" && dimensions.length === 1 && spec.metrics.length === 1) {
+      const place = columns.indexOf(dimAlias(dimensions[0])), value = columns.indexOf(spec.metrics[0]);
+      findings.push(...prepareMap(rows.map(row => ({ place: row[place], value: row[value] }))).findings);
+    }
+    return findings;
+  }, [state, queryKey, spec.chart, model]);
+  const reviewFindingCount = dataFindings.filter(f => !isScopeNote(f)).length;
+  const evidenceSummary = useMemo(() => onReadiness && state.key === queryKey && state.status === "ok"
+    ? queryObservations(model, { ...spec, ...query }, { columns: state.columns ?? [], rows: state.rows ?? [], truncated: state.truncated, partial: state.partial })
+    : undefined, [onReadiness, model, state, queryKey, spec.compareShow, spec.spark?.compare]);
+  const evidenceDigest = useEvidenceDigest(onReadiness && state.key === queryKey && state.status === "ok" ? chartEvidence(query, state) : undefined);
+  const renderKey = JSON.stringify([queryKey, spec.chart, spec.format, spec.compareShow, state.columns, state.rows]);
+  useEffect(() => {
+    if (kindOf !== "metric") return;
+    let result: Readiness = { status: "checking" };
+    if (state.key === queryKey && state.status === "error") result = { status: "error", message: state.message };
+    if (state.key === queryKey && state.status === "ok") {
+      const kind = resolvedChartKind(model, { ...spec, dimensions });
+      let issue = resultIssue(spec.metrics, state.columns ?? [], state.rows ?? [])
+        ?? chartShapeIssue(kind, tileChartShape(model, { ...spec, dimensions })) ?? chartUnits({ ...spec, chart: kind }, model).issue;
+      if (!issue && !["kpi", "stat", "table"].includes(kind)) {
+        try { const plotted = chartResult(spec, state, dimensions, model); issue = resultIssue(spec.metrics, plotted.columns, plotted.rows); }
+        catch (e: any) { issue = e.message; }
+      }
+      result = issue ? { status: "error", message: issue }
+        : ["kpi", "stat", "table"].includes(kind) ? { status: "ready" }
+        : rendered?.key === renderKey ? rendered.error ? { status: "error", message: rendered.error } : { status: "ready" }
+        : { status: "checking" };
+    }
+    if (state.key === queryKey && state.status === "ok") { result.dataFindings = dataFindings; result.window = state.window; result.rowRules = state.rlsApplied; result.observations = evidenceSummary?.observations; result.observationNote = evidenceSummary?.note; }
+    result.evidenceFingerprint = evidenceDigest.digest;
+    result.evidencePending = evidenceDigest.pending;
+    readiness.current?.(spec.id, result);
+  }, [state, queryKey, kindOf, renderKey, rendered, spec.id, dataFindings, evidenceSummary, evidenceDigest.digest, evidenceDigest.pending]);
 
   // Non-data tiles: no query, no chart inference, editable in place.
   if (kindOf !== "metric") {
@@ -176,15 +258,19 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
              contentEditable={!locked} suppressContentEditableWarning
              data-placeholder={kindOf === "heading" ? "Heading" : "Note"}
              onBlur={(e) => commit(e.currentTarget.textContent ?? "")}>
-          {spec.text}
+          {spec.text ?? (kindOf === "heading" ? spec.title : undefined)}
         </div>
         {!locked && <TileActions onRemove={() => onRemove(spec.id)} />}
       </div>
     );
   }
 
-  const kind = spec.chart ?? inferChart(model, spec);
+  const shape = tileChartShape(model, { ...spec, dimensions });
+  const kpiTimeDimIndex = shape.dimensions.findIndex(d => d.temporal);
+  const kind = resolvedChartKind(model, { ...spec, dimensions });
   const fmt = resolveFormat(model, spec);
+  const showingPercentChange = spec.compare && spec.compare !== "none" && spec.compareShow === "percent";
+  const chartFmt = showingPercentChange ? { ...fmt, number: "percent" as const } : fmt;
   // Combo and dual-axis line charts can contain metrics with different units.
   // A combo tile's bar and line are two DIFFERENT metrics by fixed position
   // (see Chart.tsx), and each can need its own number style -- spend as
@@ -194,25 +280,66 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   // model to infer a style from) and handed down for the secondary axis.
   const secondaryFmt = (kind === "combo" || kind === "line") && spec.metrics.length > 1
     ? resolveFormat(model, { ...spec, metrics: [spec.metrics[1]] }) : undefined;
+  const currentResult = state.key === queryKey;
+  let plotted: ReturnType<typeof chartResult> | undefined;
+  const units = chartUnits({ ...spec, chart: kind }, model);
+  let plotIssue: string | undefined = chartShapeIssue(kind, shape) ?? units.issue;
+  if (currentResult && state.status === "ok" && !["kpi", "stat", "table"].includes(kind)) {
+    try { plotted = chartResult(spec, state, dimensions, model); }
+    catch (e: any) { plotIssue = e.message; }
+  }
   const title = spec.title ?? spec.metrics.map((m) => metricOf(model, m)?.label ?? m).join(", ");
 
+  const investigate = onInvestigate && state.status === "ok" && state.key === queryKey ? () => onInvestigate({ columns: state.columns, rows: state.rows }) : undefined;
+
   const runExplain = () => {
+    explainRequest.current?.abort();
+    const ac = new AbortController(); explainRequest.current = ac;
     setExplain({ status: "loading", text: "" });
     fetch("/api/agent/explain", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", signal: ac.signal, headers: { "content-type": "application/json" },
       body: JSON.stringify({
         title, metrics: spec.metrics, dimensions, where, compare: query.compare,
         columns: state.columns, rows: state.rows,
+        scopeNotes: dataFindings.map(f => `${f.title}: ${f.evidence}`),
       }),
-    }).then((r) => r.json()).then((d) => {
-      setExplain(d.error ? { status: "error", text: d.error } : { status: "ok", text: d.text || "(no explanation)" });
-    }).catch((e) => setExplain({ status: "error", text: String(e?.message ?? e) }));
+    }).then(readResponse).then((d) => {
+      if (ac.signal.aborted) return;
+      setExplain(d.error ? { status: "error", text: aiError(d.error) } : { status: "ok", text: d.text || "(no explanation)" });
+    }).catch((e) => { if (!ac.signal.aborted) setExplain({ status: "error", text: aiError(e) }); });
   };
 
   const exportCsv = () => {
-    if (state.status !== "ok") return;
+    if (state.status !== "ok" || state.key !== queryKey) return;
     downloadCsv(`${slugForFilename(title)}${state.truncated ? "-limited-window" : ""}.csv`, state.columns, state.rows);
     setExportOpen(false);
+  };
+  const exportSpreadsheet = async () => {
+    if (state.status !== "ok" || state.key !== queryKey || spreadsheetBusy) return;
+    exportRequest.current?.abort();
+    const controller = new AbortController(); exportRequest.current = controller;
+    setSpreadsheetBusy(true); setExportError("");
+    try {
+      await downloadSpreadsheet(`${slugForFilename(title)}${state.truncated ? "-limited-window" : ""}.xlsx`, state.columns, state.rows, [
+        ["Chart", title], ["Semantic model", model.name], ["Adapter", model.source],
+        ["Connection", state.source?.label ?? "Not reported by this query"],
+        ["Connection ID", state.source?.id ?? "Not reported by this query"],
+        ["Query principal", state.principal ?? "None reported by this query"],
+        ["Exported at (UTC)", new Date().toISOString()], ["Response received at (UTC)", state.receivedAt],
+        ["Cached response", !!state.cached], ["Query", JSON.stringify(query)],
+        ["Returned rows", state.rows.length], ["Query limit", state.limit ?? query.limit ?? "Not reported"],
+        ["Truncated", !!state.truncated], ["Returned window", state.window ? JSON.stringify(state.window) : "Not reported"],
+        ["Reporting calendar", JSON.stringify(calendarOf(model))],
+        ["Row rules applied", state.rlsApplied?.join(", ") || "None reported by this query"],
+        ["Policy", scopedBy(state.rlsApplied, session?.policy)?.full ?? "Not reported"],
+        ["Source snapshot", connected ? dataAsOf(connected) : "No snapshot timestamp reported"],
+        ["Scope warnings", scopeWarnings?.length ? `Not filtered by ${scopeWarnings.join(", ")}` : "None reported"],
+        ["Query warnings", (state.warnings ?? []).join("\n") || "None reported"],
+        ["Returned-row checks", dataFindings.length ? JSON.stringify(dataFindings) : "No issues found by returned-row checks; not a source-data certification."],
+      ], controller.signal);
+    } catch (error) {
+      if (!controller.signal.aborted) setExportError(error instanceof Error ? error.message : "The spreadsheet could not be created. Try again or download raw CSV.");
+    } finally { if (!controller.signal.aborted) setSpreadsheetBusy(false); }
   };
   const exportPng = async () => {
     // Close the popover FIRST -- flushSync forces React to actually commit
@@ -232,23 +359,30 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   // rather than any bespoke "does this look right" heuristic -- pointed
   // back at a chart that already exists instead of one still being built.
   const runBeautify = async () => {
+    if (state.status !== "ok" || state.key !== queryKey) return;
+    tipsRequest.current?.abort();
+    reviewRequest.current?.abort(); const ac = new AbortController(); reviewRequest.current = ac;
+    const current = () => !ac.signal.aborted && reviewRequest.current === ac && reviewContext.current.key === queryKey && reviewContext.current.chart === spec.chart && reviewContext.current.model === model;
     setBeautifyOpen(true);
     setAgentTips(null);
-    setRuleSuggestion("checking");
-    // The noise check is local (already-fetched rows, no fetch of its own)
-    // and orthogonal to the chart-KIND check above -- a chart can be the
-    // structurally right kind and still be an unreadable zigzag at its
-    // current grain. Skipped mid-drill: the grain a drilled-in tile is
-    // showing isn't the tile's own configured grain, so "coarsen it" would
-    // mean something different from what the button would actually change.
-    setNoiseSuggestion(() => {
-      if (activeDrill || timeDimIndex === -1) return null;
-      const grain = spec.dimensions[timeDimIndex].split(":")[0];
-      const next = coarserGrain(grain);
-      if (!next || validateTile(model, { ...spec, dimensions: spec.dimensions.map(d => d.includes(":") ? `${next}:${d.split(":")[1]}` : d) }).length) return null;
-      const found = detectNoisy(state.rows ?? [], state.columns ?? [], spec.metrics);
-      return found.length ? { measure: found[0].measure, grain, next } : null;
-    });
+    setRuleSuggestion("checking"); setRuleError("");
+    setDegenerateSuggestion(null); setBreakdownScopeNote(undefined);
+    // Only propose a coarser grain when its actual result is materially clearer.
+    // Keep the same filters and skip drill contexts whose visible grain differs.
+    setNoiseSuggestion(null);
+    if (!activeDrill && timeDimIndex !== -1 && !reviewedGrains.current.has(grainReviewKey(query, queryContext))) {
+      const grain = spec.dimensions[timeDimIndex].split(":")[0], next = coarserGrain(grain);
+      const noise = detectNoisy(state.rows ?? [], state.columns ?? [], spec.metrics);
+      const coarser = next ? { ...query, dimensions: query.dimensions.map((d, i) => i === timeDimIndex ? `${next}:${d.split(":")[1]}` : d) } : null;
+      if (next && coarser && noise.length && noiseSeriesReady(query, { ...state, rows: state.rows ?? [], columns: state.columns ?? [] }) && !validateTile(model, { ...spec, ...coarser }).length) {
+        try {
+          const candidate = await fetch("/api/query", { method: "POST", signal: ac.signal, headers: { "content-type": "application/json", "x-sc-refresh": queryContext ?? "" }, body: JSON.stringify(coarser) }).then(readResponse);
+          if (!current()) return;
+          if (noiseSeriesReady(coarser, { ...candidate, rows: candidate.rows ?? [], columns: candidate.columns ?? [] }) && worthwhileCoarsening(noise, noiseScores(candidate.rows ?? [], candidate.columns ?? [], spec.metrics), candidate.rows?.length ?? 0))
+            setNoiseSuggestion({ measure: noise[0].measure, grain, next });
+        } catch { /* An unverified improvement is not a recommendation. */ }
+      }
+    }
     // A THIRD rules check, also local: a single-dimension, single-measure
     // breakdown where only one category actually carries a value -- the
     // classic cause being a metric already filtered to one value of the
@@ -257,28 +391,26 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     // this shape and a non-temporal dimension, same reasoning as the noise
     // check above: a time series legitimately having one active period
     // among empty ones is a real finding, not a pointless chart.
-    setDegenerateSuggestion(() => {
-      if (spec.dimensions.length !== 1 || spec.metrics.length !== 1 || spec.dimensions[0].includes(":")) return null;
-      const finding = detectDegenerate(state.rows ?? [], state.columns ?? [], dimAlias(spec.dimensions[0]), spec.metrics[0]);
-      // A dead breakdown is better rescued as a trend over the base table's
-      // own date column, when it has one, than collapsed to a bare number --
-      // "removed" throws away an axis this data actually has something to
-      // say on.
-      return finding ? { ...finding, timeDimension: timeColumnOf(model, base) } : null;
-    });
+    if (!current()) return;
+    const checked = await reviewBreakdown(spec, query, { ...state, rows: state.rows ?? [], columns: state.columns ?? [] }, own =>
+      fetch("/api/query", { method: "POST", signal: ac.signal, headers: { "content-type": "application/json", "x-sc-refresh": queryContext ?? "" }, body: JSON.stringify(own) }).then(readResponse));
+    if (!current()) return;
+    setDegenerateSuggestion(checked.finding ? { ...checked.finding, timeDimension: timeColumnOf(model, base) } : null);
+    setBreakdownScopeNote(checked.scopeNote);
     try {
       const bare = dimensions.map((d) => (d.includes(":") ? d.split(":")[1] : d));
       let profiles: FieldProfile[] = [];
       if (base && bare.length) {
-        const r = await fetch(`/api/profile?base=${base}&fields=${encodeURIComponent(bare.join(","))}`)
-          .then((x) => x.json());
-        profiles = (r.fields ?? []).map((p: FieldProfile, i: number) =>
-          dimensions[i]?.includes(":") ? { ...p, role: "temporal" } : p);
+        const r = await fetch(`/api/profile?base=${encodeURIComponent(base)}&fields=${encodeURIComponent(bare.join(","))}`, { signal: ac.signal }).then(readResponse);
+        if (!current()) return;
+        profiles = dimensionProfiles(r, dimensions);
+        if (profiles.some(p => p.warning)) throw new Error([...new Set(profiles.flatMap(p => p.warning ? [p.warning] : []))].join(" "));
       }
       const options = recommend(spec.metrics, profiles, semanticHints(model, spec.metrics));
       setRuleSuggestion(betterKind(kind, options));
     } catch (e: any) {
-      console.error("beautify rules check failed:", e);
+      if (!current()) return;
+      setRuleError(e instanceof Error ? e.message : "Field evidence is unavailable. Try again.");
       setRuleSuggestion(null);
     }
   };
@@ -288,8 +420,10 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   };
   const applyCoarsen = () => {
     if (!noiseSuggestion) return;
-    onUpdate?.({ ...spec, dimensions: spec.dimensions.map((d, i) =>
-      i === timeDimIndex ? `${noiseSuggestion.next}:${d.split(":")[1]}` : d) });
+    const next = { ...spec, dimensions: spec.dimensions.map((d, i) =>
+      i === timeDimIndex ? `${noiseSuggestion.next}:${d.split(":")[1]}` : d) };
+    reviewedGrains.current.add(grainReviewKey(visibleQuery(model, next, crossFilters, drill), queryContext));
+    onUpdate?.({ ...next, title: readableChartTitle(model, spec, next) });
     setNoiseSuggestion(null);
   };
   const applyRemoveBreakdown = () => {
@@ -299,6 +433,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     // gap below a single line of text. Only ever caps down, never grows a
     // tile that was already this short or shorter.
     onUpdate?.({ ...spec, dimensions: [], chart: undefined,
+      title: readableChartTitle(model, spec, { ...spec, dimensions: [], chart: undefined }),
       layout: { ...spec.layout, h: Math.min(spec.layout.h, KPI_HEIGHT) } });
     setDegenerateSuggestion(null);
   };
@@ -307,57 +442,73 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     // The reverse case: a tile that's currently KPI-height doesn't have
     // room for a real chart's axis labels once it becomes one.
     onUpdate?.({ ...spec, dimensions: [`month:${degenerateSuggestion.timeDimension}`], chart: undefined,
+      title: readableChartTitle(model, spec, { ...spec, dimensions: [`month:${degenerateSuggestion.timeDimension}`], chart: undefined }),
       layout: { ...spec.layout, h: Math.max(spec.layout.h, CHART_MIN_HEIGHT) } });
     setDegenerateSuggestion(null);
   };
   const runAgentTips = () => {
+    if (state.status !== "ok" || state.key !== queryKey) return;
+    tipsRequest.current?.abort();
+    const ac = new AbortController(); tipsRequest.current = ac;
     setAgentTips({ status: "loading", text: "" });
     fetch("/api/agent/beautify", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", signal: ac.signal, headers: { "content-type": "application/json" },
       body: JSON.stringify({
         title, metrics: spec.metrics, dimensions, where, compare: query.compare,
         columns: state.columns, rows: state.rows,
+        scopeNotes: dataFindings.map(f => `${f.title}: ${f.evidence}`),
       }),
-    }).then((r) => r.json()).then((d) => {
-      setAgentTips(d.error ? { status: "error", text: d.error } : { status: "ok", text: d.text || "(no suggestions)" });
-    }).catch((e) => setAgentTips({ status: "error", text: String(e?.message ?? e) }));
+    }).then(readResponse).then((d) => {
+      if (ac.signal.aborted) return;
+      setAgentTips(d.error ? { status: "error", text: aiError(d.error) } : { status: "ok", text: d.text || "(no suggestions)" });
+    }).catch((e) => { if (!ac.signal.aborted) setAgentTips({ status: "error", text: aiError(e) }); });
   };
 
   return (
-    <div className="tile" ref={tileRef} style={{ background: tileFill(fmt),
+    <div className={"tile" + (kind === "stat" ? " tile-stat" : "")} ref={tileRef} style={{ background: tileFill(fmt),
                                    borderColor: fmt.border ? undefined : "transparent" }}>
+      {spec.evidence && <div className="evidence-origin" title={`${spec.evidence.period}. Scope captured ${spec.evidence.capturedAt}. Live values; further filtering may narrow this scope.`}>Evidence from {spec.evidence.sourceTitle} · captured scope</div>}
+      {!!scopeWarnings?.length && <EvidenceWarning message={`Not filtered by ${scopeWarnings.join(", ")}`} label="Inspect filter scope" onInspect={() => setEvidenceOpen(true)} />}
+      {kind !== "kpi" && kind !== "table" && spec.compare && spec.compare !== "none" && spec.compareShow && spec.compareShow !== "value" && <div className="result-warning">{showingPercentChange ? "Percentage change" : "Change"} vs. {spec.compare === "yoy" ? "same period last year" : "prior period"}</div>}
       {kind !== "kpi" && (
         <header>
           <h4 title={title}>{title}</h4>
-          {state.status === "ok" &&
-            <span className="ms mono">{state.ms}ms</span>}
-          {connected && <span className="ms mono data-as-of" title={`${connected.provenance.source}, loaded by ${connected.provenance.loadedBy}${connected.status === "unreviewed" ? ". Ingested, unreviewed." : ""}`}>{dataAsOf(connected)}</span>}
-          {state.status === "ok" && state.coverage === "unknown" && <span className="ms mono" title="The source has not declared period completeness. These dates describe returned rows, not a verified complete reporting period.">Coverage unverified</span>}
-          {state.status === "ok" && scopedBy(state.rlsApplied, session?.policy) && <span className="ms gateway-scope" title={"The gateway signed this policy onto the request; every row here obeys it.\n" + scopedBy(state.rlsApplied, session?.policy)!.full}>Scoped by gateway: {scopedBy(state.rlsApplied, session?.policy)!.short}</span>}
-          {state.status === "ok" && (state.partial?.start || state.partial?.end) && (
-            <span className="ms mono partial-note"
-                  title={`The data does not cover the whole first or last ${grain ?? "period"}, so that ${grain ?? "period"} is left out ` +
-                         `rather than drawn as a full one, which would read as a collapse. Add a date filter to choose the exact window instead.`}>
-              partial {state.partial.start && state.partial.end ? "first & last" : state.partial.start ? "first" : "last"} {grain ?? "period"} left out
-            </span>
-          )}
-          <span className="spacer" />
+          <div className="tile-header-actions">
+          {state.status === "ok" && <button className="chart-note-button" aria-label="Chart notes and query details" title={[
+            `Query ran in ${state.ms}ms`,
+            connected ? `${dataAsOf(connected)} · ${connected.provenance.source}` : null,
+            state.coverage === "unknown" ? "Period completeness is not declared by the source." : null,
+            scopedBy(state.rlsApplied, session?.policy)?.full,
+            state.partial?.start || state.partial?.end ? `Partial ${state.partial.start && state.partial.end ? "first and last" : state.partial.start ? "first" : "last"} ${grain ?? "period"} left out.` : null,
+          ].filter(Boolean).join("\n")} onPointerDown={e => e.stopPropagation()} onClick={() => setEvidenceOpen(true)}>ⓘ</button>}
+          {investigate && <button className={"investigate-trigger" + (kind === "stat" ? " compact" : "")} aria-label="Investigate this" title="Investigate this" onPointerDown={e => e.stopPropagation()} onClick={investigate}>{kind === "stat" ? <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg> : "Investigate this"}</button>}
           <ChartActivityButtons tileId={spec.id} />
-          <TileActions sql={!locked ? state.sql : undefined}
+          <TileActions onInspect={() => setEvidenceOpen(true)} sql={!locked ? state.sql : undefined}
                        onRemove={!locked ? () => onRemove(spec.id) : undefined}
                        onExplain={aiAvailable && state.status === "ok" ? runExplain : undefined}
                        onBeautify={!locked && state.status === "ok" ? runBeautify : undefined}
                        onExport={state.status === "ok" ? () => setExportOpen((v) => !v) : undefined} />
+          </div>
         </header>
       )}
       {kind === "kpi" && timeDimIndex < 0 && <div className="kpi-activity"><ChartActivityButtons tileId={spec.id} /></div>}
       {kind === "kpi" && connected && <span className="ms mono data-as-of kpi-as-of" title={`${connected.provenance.source}, loaded by ${connected.provenance.loadedBy}`}>{dataAsOf(connected)}</span>}
-      {state.status === "ok" && state.truncated && <div className="result-warning" role="status" title={state.warnings?.join(" ")}>{state.window ? "Latest window" : "Limited results"} · {state.limit} rows · export is limited</div>}
+      {currentResult && state.status === "ok" && state.truncated && <EvidenceWarning message={`${state.window ? "Latest window" : "Limited results"} · ${state.limit} rows · export is limited`} title={state.warnings?.join(" ")} label="Inspect result limit" onInspect={() => setEvidenceOpen(true)} />}
+      {currentResult && state.status === "ok" && (state.partial?.selected?.start || state.partial?.selected?.end) && <EvidenceWarning message="Selected window includes partial observed periods · comparisons involving those periods are unavailable" label="Inspect selected period" onInspect={() => setEvidenceOpen(true)} />}
+      {currentResult && state.status === "ok" && !!state.partial?.ratio?.length && <EvidenceWarning message="Ratio input periods need review · inspect both input windows before interpreting" label="Inspect input periods" onInspect={() => setEvidenceOpen(true)} />}
+      {!presentation && reviewFindingCount > 0 && <div className="data-check-notice"><button onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setEvidenceOpen(true); }}>{reviewFindingCount} data check{reviewFindingCount === 1 ? "" : "s"} to review</button></div>}
+      {evidenceOpen && <MetricEvidence title={title} metrics={spec.metrics} dimensions={dimensions} where={where} model={model}
+        findings={dataFindings} state={state.key === queryKey ? state : { status: "loading" }} scopeWarnings={scopeWarnings}
+        policy={scopedBy(state.rlsApplied, session?.policy)?.full} provenance={connected ? dataAsOf(connected) : undefined}
+        onExportCsv={currentResult && state.status === "ok" ? exportCsv : undefined}
+        onExportSpreadsheet={currentResult && state.status === "ok" ? exportSpreadsheet : undefined}
+        exporting={spreadsheetBusy} exportError={exportError}
+        sql={!locked && state.key === queryKey && state.status === "ok" ? state.sql : undefined} onClose={() => setEvidenceOpen(false)} />}
       {beautifyOpen && (
-        <div className="explain-pop beautify-pop">
+        <FloatingPanel anchor={tileRef} anchorTop className="explain-pop beautify-pop" role="dialog" aria-label="Chart design review" focusOnOpen onDismiss={closeReview}>
           <div className="explain-head">
-            <span>Beautify</span>
-            <button className="icon" onClick={() => setBeautifyOpen(false)} aria-label="Close">✕</button>
+            <span>Design review</span>
+            <button className="icon" onClick={closeReview} aria-label="Close">✕</button>
           </div>
           <div className="beautify-body">
             {ruleSuggestion === "checking" && <p className="explain-body loading">Checking the chart type…</p>}
@@ -385,8 +536,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
             {ruleSuggestion !== "checking" && degenerateSuggestion && (
               <div className="beautify-suggestion">
                 <p className="explain-body">
-                  Every {degenerateSuggestion.dimension.split(".").pop()} except <b>{degenerateSuggestion.dominantValue}</b> reads
-                  zero here — this breakdown doesn't actually vary for this measure.
+                  {breakdownStatement(degenerateSuggestion)}
                   {degenerateSuggestion.timeDimension && " Try it as a trend over time instead."}
                 </p>
                 <div className="story-actions">
@@ -396,8 +546,13 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                 </div>
               </div>
             )}
-            {ruleSuggestion === null && !noiseSuggestion && !degenerateSuggestion &&
-              <p className="explain-body">This already reads well.</p>}
+            {breakdownScopeNote && <p className="explain-body">{breakdownScopeNote}</p>}
+            {ruleError && <div className="beautify-suggestion">
+              <p className="explain-body error" role="alert">Chart-type review incomplete. {ruleError}</p>
+              <button className="small" onClick={runBeautify}>Retry chart review</button>
+            </div>}
+            {ruleSuggestion === null && !ruleError && !noiseSuggestion && !degenerateSuggestion && !breakdownScopeNote &&
+              <p className="explain-body">No chart changes suggested by these checks.</p>}
             {aiAvailable && (
               <>
                 <button className="link-btn" disabled={agentTips?.status === "loading"} onClick={runAgentTips}>
@@ -409,30 +564,31 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
               </>
             )}
           </div>
-        </div>
+        </FloatingPanel>
       )}
       {exportOpen && (
-        <div className="explain-pop export-pop">
+        <FloatingPanel anchor={tileRef} anchorTop className="explain-pop export-pop" role="dialog" aria-label="Chart export" focusOnOpen onDismiss={() => setExportOpen(false)}>
           <div className="explain-head">
             <span>Export</span>
             <button className="icon" onClick={() => setExportOpen(false)} aria-label="Close">✕</button>
           </div>
           <div className="export-opts">
-            <button onClick={exportCsv}>Download CSV</button>
+            {currentResult && state.status === "ok" ? <DataExportActions onSpreadsheet={exportSpreadsheet} onCsv={exportCsv} busy={spreadsheetBusy} error={exportError} />
+              : <p role="status">Refresh the chart successfully before exporting its data.</p>}
             <button onClick={exportPng}>Download PNG</button>
           </div>
-        </div>
+        </FloatingPanel>
       )}
       {explain && (
-        <div className="explain-pop">
+        <FloatingPanel anchor={tileRef} anchorTop className="explain-pop" role="dialog" aria-label="Chart explanation" focusOnOpen style={{ width: 360 }} onDismiss={closeExplain}>
           <div className="explain-head">
             <span>Explain</span>
-            <button className="icon" onClick={() => setExplain(null)} aria-label="Close">✕</button>
+            <button className="icon" onClick={closeExplain} aria-label="Close">✕</button>
           </div>
           {explain.status === "loading" && <p className="explain-body loading">Thinking…</p>}
           {explain.status === "error" && <p className="explain-body error">{explain.text}</p>}
           {explain.status === "ok" && <div className="explain-body">{renderMarkdown(explain.text)}</div>}
-        </div>
+        </FloatingPanel>
       )}
       {drill && drill.length > 0 && (
         <div className="drill-crumbs">
@@ -446,11 +602,11 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
           ))}
         </div>
       )}
-      <div className={"body" + (kind === "kpi" ? " kpi-body" : "")}
+      <div className={"body" + (kind === "kpi" ? " kpi-body" : kind === "table" ? " table-body" : "")}
            style={{ padding: fmt.padding }}>
-        {state.status === "loading" && <span style={{ color: "var(--ink-3)" }}>Running…</span>}
-        {state.status === "error" && <div className="err">{state.message}</div>}
-        {state.status === "ok" && (state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end) && (
+        {(!currentResult || state.status === "loading") && <span style={{ color: "var(--ink-3)" }}>Running…</span>}
+        {currentResult && state.status === "error" && <div className="err">{state.message}</div>}
+        {currentResult && state.status === "ok" && (state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end) && (
           // Distinct from a plain "no data" empty tile: there IS data here,
           // it just doesn't span one full period at this grain yet -- e.g.
           // a source only a few days old, viewed at month grain. Naming
@@ -458,21 +614,28 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
           // than "too early".
           <span style={{ color: "var(--ink-3)" }}>Not enough data yet for a full {grain}.</span>
         )}
-        {state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
-          kind === "kpi" && timeDimIndex >= 0
-            ? <Kpi label={title} actions={<ChartActivityButtons tileId={spec.id} />} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
-                   previous={query.compare && query.compare !== "none" ? state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)] ?? null : undefined}
-                   comparisonLabel={spec.compare === "yoy" ? "same period last year" : "prior period"}
-                   series={(state.rows ?? []).filter((r: any[]) => r[state.columns.indexOf(dimAlias(dimensions[timeDimIndex]))] != null).map((r: any[]) =>
-                     ({ x: r[state.columns.indexOf(dimAlias(dimensions[timeDimIndex]))], y: r[state.columns.indexOf(spec.metrics[0])] == null ? NaN : Number(r[state.columns.indexOf(spec.metrics[0])]) }))}
-                   options={spec.spark} format={makeFormatter(fmt)}
+        {currentResult && state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
+          plotIssue ? <div className="chart-err">{plotIssue}</div> : kind === "kpi" && kpiTimeDimIndex >= 0
+            ? <Kpi label={title} actions={<>{investigate && <button className="investigate-trigger compact" aria-label="Investigate this" title="Investigate this" onPointerDown={e => e.stopPropagation()} onClick={investigate}><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg></button>}<button className="link" aria-label="Metric definition and scope" onClick={() => setEvidenceOpen(true)}>ⓘ</button><ChartActivityButtons tileId={spec.id} /></>} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
+                   previous={query.compare && query.compare !== "none" ? numericValue(state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)]) : undefined}
+                   comparison={cardComparison({ ...spec, dimensions })}
+                   onComparison={onUpdate && !locked ? mode => onUpdate(withCardComparison(spec, mode)) : undefined}
+                   precisionLimited={dataFindings.some(f => f.id === `precision:${spec.metrics[0]}`)}
+                   partialWindow={state.partial?.selected}
+                   unverifiedPeriods={state.partial?.ratio?.map((r: { period: string | null }) => r.period).filter((p: string | null) => p != null)}
+                   series={(state.rows ?? []).filter((r: any[]) => r[state.columns.indexOf(dimAlias(dimensions[kpiTimeDimIndex]))] != null).map((r: any[]) =>
+                     ({ x: r[state.columns.indexOf(dimAlias(dimensions[kpiTimeDimIndex]))], y: numericValue(r[state.columns.indexOf(spec.metrics[0])]) ?? NaN }))
+                     .sort((a: { x: unknown }, b: { x: unknown }) => +new Date(String(a.x)) - +new Date(String(b.x)))}
+                   options={spec.spark} format={makeFormatter(fmt)} percent={fmt.number === "percent"}
                    onOptions={onUpdate && !locked ? (spark) => onUpdate({ ...spec, spark }) : undefined} />
           : kind === "stat" || kind === "kpi"
-            ? <Stat label={title} value={state.rows?.[0]?.[state.columns.length - 1]} />
+            ? <Stat value={state.rows?.[0]?.[state.columns.indexOf(spec.metrics[0])]} format={makeFormatter(fmt)} />
             : kind === "table"
-              ? <DataTable columns={state.columns} rows={state.rows} />
-              : <Chart kind={kind} labels={Object.fromEntries(Object.values(model.metrics).map(m => [m.name, m.label]))} {...projectCompare(spec, state)} format={fmt} secondaryFormat={secondaryFmt}
-                       onPick={(onCrossFilter || onDrill) && dimensions?.length
+              ? <DataTable display={tableDisplay(model, spec)} presentation={presentation} columns={state.columns} rows={state.rows} defaultSortColumn={timeDimIndex === -1 && spec.metrics.length === 1 ? spec.metrics[0] : undefined} />
+              : <Chart kind={kind} separateAxes={units.separateAxes} onStatus={error => setRendered(previous => previous?.key === renderKey && previous.error === error ? previous : { key: renderKey, error })} labels={Object.fromEntries(Object.values(model.metrics).map(m => [m.name, m.label]))} {...plotted!} format={chartFmt} secondaryFormat={showingPercentChange ? chartFmt : secondaryFmt} metricFormats={["heatmap", "scatter"].includes(kind) ? Object.fromEntries(spec.metrics.map(m => [m, showingPercentChange ? chartFmt : resolveFormat(model, { ...spec, metrics: [m] })])) : undefined}
+                       explorationFocus={explorationFocus}
+                       pickableColumns={dimensions?.filter(d => d.includes(":") ? !!onDrill && !!NEXT_GRAIN[d.split(":")[0] as DrillGrain] : !!onCrossFilter).map(dimAlias)}
+                       onPick={(kind === "smallMultiples" ? onCrossFilter : onCrossFilter || onDrill) && dimensions?.length
                          ? (col, value) => {
                              const dim = dimensions.find((d) => dimAlias(d) === col);
                              if (!dim) return;
@@ -482,7 +645,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                                const column = dim.split(":")[1];
                                const date = value instanceof Date ? value : new Date(String(value));
                                if (Number.isNaN(+date)) return;
-                               const entry = drillInto(grain, column, date);
+                               const entry = drillInto(grain, column, date, calendarOf(model));
                                if (entry) onDrill(entry);
                                return;
                              }
@@ -497,35 +660,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   );
 }
 
-/**
- * A drag emits a new tiles array on every pointermove. Without this, all twelve
- * tiles re-render hundreds of times per gesture; with it only the dragged one
- * does, and even that skips the chart because its geometry-independent props
- * are unchanged.
- */
-export const Tile = memo(TileInner, (a, b) =>
-  a.locked === b.locked &&
-  a.model === b.model &&
-  a.spec === b.spec &&
-  a.crossFilters === b.crossFilters &&
-  a.drill === b.drill &&
-  a.aiAvailable === b.aiAvailable);
-
-/**
- * When a comparison is active and the user wants to see change rather than
- * level, plot the derived columns instead of the raw measure -- otherwise the
- * chart shows six series where the user asked for two.
- */
-function projectCompare(spec: TileSpec, state: any): { columns: string[]; rows: unknown[][] } {
-  const cols: string[] = state.columns ?? [];
-  const rows: unknown[][] = state.rows ?? [];
-  const show = spec.compareShow ?? "value";
-  if (!spec.compare || spec.compare === "none") return { columns: cols, rows };
-
-  const suffix = show === "delta" ? "__delta" : show === "percent" ? "__pct" : null;
-  const keep = cols.filter((c) =>
-    suffix ? !c.includes("__") || c.endsWith(suffix)
-           : !c.includes("__"));
-  const idx = keep.map((c) => cols.indexOf(c));
-  return { columns: keep, rows: rows.map((r) => idx.map((i) => r[i])) };
-}
+// React's default comparison includes query context and callbacks. A custom
+// subset can retain stale refresh/auth context or an old readiness callback.
+// Query effects still depend only on query inputs, not presentation changes.
+export const Tile = memo(TileInner);

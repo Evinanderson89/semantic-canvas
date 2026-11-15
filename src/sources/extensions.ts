@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
 import type { Join, Metric, Model, Origin, Table } from "../semantic/model.ts";
+import { defaultDateIssue } from "../semantic/model.ts";
 
 /**
  * A model extension: what the Modeler added to a source whose base model
@@ -74,8 +75,11 @@ export function mergeExtension(model: Model, ext: Extension | null, sourceId: st
     tables[name] = {
       name, description: (t.description ?? "").trim(), grain: t.grain, synonyms: t.synonyms ?? [], partitionKeys: [], primaryKey: t.primary_key ?? null,
       reportingLagDays: t.reporting_lag, relation: { table: name }, columns: t.columns.map((c) => ({ name: c.name, type: c.type, description: c.description })),
+      defaultDateColumn: t.default_date_column,
       ...(t.origin ? { origin: fromOrigin(t.origin) } : {}),
     };
+    const issue = defaultDateIssue(tables[name]);
+    if (issue) throw new Error(issue);
   }
   for (const [name, patch] of Object.entries(ext.patches)) {
     if (!tables[name]) { warn("extension.patch_orphaned", { table: name }); continue; }

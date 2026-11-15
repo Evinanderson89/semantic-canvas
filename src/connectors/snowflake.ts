@@ -1,6 +1,7 @@
-import { leasePool } from "./leases.ts";
+import { connectionPoolSize, leasePool } from "./leases.ts";
 import snowflake from "snowflake-sdk";
-import type { Connector, QueryResult } from "./types.ts";
+import type { Connector, QueryResult, ExecutionOptions } from "./types.ts";
+import { executionBudget } from "./execution.ts";
 
 /**
  * Snowflake connector.
@@ -44,7 +45,7 @@ export function snowflakeConfigFromEnv(): SnowflakeConfig | null {
 export async function snowflakeConnector(
   cfg: SnowflakeConfig,
 ): Promise<Connector & { schema(): Promise<SchemaTable[]>; stats(): object }> {
-  const size = cfg.poolSize ?? 6;
+  const size = connectionPoolSize(cfg.poolSize ?? 6);
 
   const makeConn = () => snowflake.createConnection({
     account: cfg.account,
@@ -57,20 +58,59 @@ export async function snowflakeConnector(
     warehouse: cfg.warehouse,
     database: cfg.database,
     schema: cfg.schema,
+    // fetchAsString otherwise represents SQL NULL as the text "NULL".
+    representNullAsStringNull: false,
     clientSessionKeepAlive: true,
   } as any);
 
   const connect = (c: any) => new Promise<any>((res, rej) =>
     c.connect((err: any) => (err ? rej(err) : res(c))));
-
-  const pool: any[] = await Promise.all(
-    Array.from({ length: size }, () => connect(makeConn())));
-  const leases = leasePool(pool, c => new Promise<void>((resolve, reject) => c.destroy((error: Error | null) => error ? reject(error) : resolve())));
+  const destroy = (c: any) => new Promise<void>((resolve, reject) =>
+    c.destroy((error: Error | null) => error ? reject(error) : resolve()));
+  // A failed attempt must not orphan sessions that connect later. Track every
+  // allocated handle, including one whose connect callback fails or throws.
+  const allocated: any[] = [];
+  const attempts = await Promise.allSettled(Array.from({ length: size }, async () => {
+    const conn = makeConn();
+    allocated.push(conn);
+    return connect(conn);
+  }));
+  const failure = attempts.find(attempt => attempt.status === "rejected");
+  if (failure?.status === "rejected") {
+    await Promise.allSettled(allocated.map(conn => Promise.resolve().then(() => destroy(conn))));
+    throw failure.reason;
+  }
+  const pool = attempts.flatMap(attempt => attempt.status === "fulfilled" ? [attempt.value] : []);
+  const leases = leasePool(pool, destroy);
   const { acquire, release } = leases;
 
-  const exec = (c: any, sqlText: string) => new Promise<any[]>((res, rej) =>
-    c.execute({ sqlText, complete: (err: any, _s: any, rows: any[]) =>
-      err ? rej(err) : res(rows ?? []) }));
+  const exec = (c: any, sqlText: string, signal?: AbortSignal, timeoutMs?: number) => new Promise<any[]>((res, rej) => {
+    signal?.throwIfAborted();
+    let statement: any, settled = false;
+    const cancel = () => {
+      // Cancellation is best effort. Do not release the lease until complete;
+      // the per-statement warehouse timeout also bounds work if cancel fails.
+      if (!settled) { try { statement?.cancel(() => {}); } catch { /* await completion */ } }
+    };
+    // Ask before SDK decoding: rounding an identifier cannot be undone later.
+    statement = c.execute({ sqlText, fetchAsString: ["Number"],
+      ...(timeoutMs === undefined ? {} : { parameters: {
+        STATEMENT_TIMEOUT_IN_SECONDS: Math.max(1, Math.ceil(timeoutMs / 1000)),
+        STATEMENT_QUEUED_TIMEOUT_IN_SECONDS: Math.max(1, Math.ceil(timeoutMs / 1000)),
+      } }),
+      complete: (err: any, _s: any, rows: any[]) => {
+        settled = true;
+        signal?.removeEventListener("abort", cancel);
+        if (signal?.aborted) rej(signal.reason);
+        else if (err) rej(err);
+        else res(rows ?? []);
+      },
+    });
+    if (!settled) {
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
+    }
+  });
 
   const quote = (i: string) => `"${i.replace(/"/g, '""')}"`;
   const qualify = (t: string) =>
@@ -85,18 +125,21 @@ export async function snowflakeConnector(
     toTimezone: (expr, timezone) => `CONVERT_TIMEZONE('UTC', '${timezone.replace(/'/g, "''")}', ${expr})`,
     relation: (table, physical) => physical ? [physical.database ?? cfg.database, physical.schema ?? cfg.schema, physical.table].filter(Boolean).map(quote).join(".") : qualify(table),
 
-    async execute(sql: string, limit = 5000): Promise<QueryResult> {
-      const conn = await acquire();
+    async execute(sql: string, limit = 5000, _cacheKey?: string, options?: ExecutionOptions): Promise<QueryResult> {
+      const budget = executionBudget(options);
       try {
-        const t0 = performance.now();
-        const rows = await exec(conn, sql);
-        const columns = rows.length ? Object.keys(rows[0]) : [];
-        return {
-          columns,
-          rows: rows.slice(0, limit).map((r) => columns.map((c) => normalize(r[c]))),
-          sql, ms: Math.round(performance.now() - t0),
-        };
-      } finally { release(conn); }
+        const conn = await acquire(budget.signal);
+        try {
+          const t0 = performance.now();
+          const rows = await exec(conn, sql, budget.signal, options?.timeoutMs);
+          const columns = rows.length ? Object.keys(rows[0]) : [];
+          return {
+            columns,
+            rows: rows.slice(0, limit).map((r) => columns.map((c) => normalize(r[c]))),
+            sql, ms: Math.round(performance.now() - t0),
+          };
+        } finally { release(conn); }
+      } finally { budget.dispose(); }
     },
 
     /** The Modeler's view of the schema: the same listing, in the connector's shared shape. */
@@ -108,7 +151,7 @@ export async function snowflakeConnector(
       try {
         const rows = await exec(conn,
           `SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION
-             FROM ${`"${cfg.database}"`}.INFORMATION_SCHEMA.COLUMNS
+             FROM ${cfg.database ? `${quote(cfg.database)}.` : ""}INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = '${cfg.schema.replace(/'/g, "''")}'
             ORDER BY TABLE_NAME, ORDINAL_POSITION`);
         const byTable = new Map<string, SchemaTable>();
@@ -133,7 +176,15 @@ export interface SchemaTable { name: string; columns: { name: string; type: stri
 
 function normalize(v: any): unknown {
   if (v === null || v === undefined) return null;
-  if (typeof v === "bigint") return Number(v);
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (typeof v === "bigint") return Number.isSafeInteger(Number(v)) ? Number(v) : v.toString();
+  if (v instanceof Date) {
+    const iso = v.toISOString();
+    // The SDK returns timestamps as Date objects with an optional nanosecond
+    // accessor. Preserve the instant and supplied precision before JSON/export;
+    // its custom toJSON uses session-specific display formatting instead.
+    const nanos = typeof (v as any).getNanoSeconds === "function" ? (v as any).getNanoSeconds() : undefined;
+    return Number.isInteger(nanos) && nanos >= 0 && nanos < 1e9 && nanos % 1e6 !== 0
+      ? iso.replace(/\.\d{3}Z$/, `.${String(nanos).padStart(9, "0")}Z`) : iso;
+  }
   return v;
 }

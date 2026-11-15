@@ -14,6 +14,8 @@ export interface SparkOptions {
   shape: "line" | "area" | "bar";
   /** "fit" reveals variation in a tight series; "zero" keeps magnitude honest. */
   scale: "fit" | "zero";
+  /** Legacy first-shown card baseline. It takes precedence over tile.compare;
+   * UI comparison edits update both fields together to remove ambiguity. */
   compare: "prior" | "first";
   color: "auto" | "accent" | "neutral";
   showRange: boolean;
@@ -39,8 +41,9 @@ export interface TileSpec {
   /** Omitted tiles belong to the first tab for backwards compatibility. */
   tabId?: string;
   filterId?: string;
-  /** Heading tile that owns this content. */
-  section?: string;
+  /** Heading tile that owns this content. Null explicitly keeps a tile outside
+   * sections; undefined retains legacy inference from its position. */
+  section?: string | null;
   /** Automatic composition preserves this tile and its section. */
   pinned?: boolean;
   kind?: TileKind;
@@ -51,6 +54,8 @@ export interface TileSpec {
    *  so the tile spec carries the image the same way it carries everything
    *  else: as a plain, self-contained JSON field that saves with the dashboard. */
   imageData?: string;
+  /** A kept investigation is live data queried at a captured reporting scope. */
+  evidence?: { sourceTileId: string; sourceTitle: string; question: string; period: string; capturedAt: string };
   metrics: string[];
   /** "month:event_date" for a time grain, "dim_users.country" for a join. */
   dimensions: string[];
@@ -71,7 +76,8 @@ export interface TileSpec {
    * Revenue by Region" actually means.
    */
   compare?: "none" | "prior" | "yoy";
-  /** What the chart plots when a comparison is active. */
+  /** What a plotted chart shows when a comparison is active. KPI cards always
+   * show the latest metric value with a separately labeled baseline change. */
   compareShow?: "value" | "delta" | "percent";
   spark?: Partial<SparkOptions>;
   /** Presentation only — never affects the query. */
@@ -86,11 +92,22 @@ export type ChartKind =
   | "scatter" | "heatmap" | "map" | "donut" | "waterfall" | "funnel" | "smallMultiples" | "combo"
   | "stat" | "kpi" | "table";
 
+/** Authored interpretation and evidence selection, saved per dashboard tab.
+ * References select visuals only; they never change a chart's query. */
+export interface PresentationBrief {
+  question: string;
+  takeaway: string;
+  nextStep: string;
+  evidenceIds?: string[];
+  /** Author acknowledgement; fingerprints detect changes, not truth or authority. */
+  review?: { version: 1; reviewedAt: string; fingerprint: string };
+}
+
 export interface DashboardSpec {
   title: string;
   description?: string;
   tiles: TileSpec[];
-  tabs?: { id: string; title: string }[];
+  tabs?: { id: string; title: string; brief?: PresentationBrief }[];
   filters?: DashboardFilter[];
   /**
    * Dashboard-wide filters, set by clicking a mark in any chart. Applied to

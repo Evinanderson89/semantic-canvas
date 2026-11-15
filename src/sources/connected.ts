@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
-import { LINEAGE_COLUMNS, type Column, type Metric, type Model, type Table, type TimeGrain } from "../semantic/model.ts";
+import { defaultDateIssue, LINEAGE_COLUMNS, type Column, type Metric, type Model, type Table, type TimeGrain } from "../semantic/model.ts";
 import { timeDimensionIssue } from "../semantic/duckglue.ts";
 
 /**
@@ -34,8 +34,12 @@ export const registerSchema = z.object({
   metrics: z.record(z.string().regex(DATASET), draftMetricSchema).default({}), provenance: provenanceSchema,
 }).strict();
 export const publishSchema = z.object({
-  metrics: z.record(z.string(), z.object({ reviewed: z.literal(true), label: z.string().min(1).max(200).optional(), description: z.string().max(2000).optional(), ...reviewFields }).strict()).default({}),
-  table: z.object({ grain: z.string().max(400).optional(), description: z.string().max(4000).optional(), default_date_column: z.string().max(128).optional() }).strict().optional(),
+  expectedRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  metrics: z.record(z.string(), z.object({ reviewed: z.boolean(), label: z.string().min(1).max(200).optional(), description: z.string().max(2000).optional(),
+    time_grains: grains.nullable().optional(), time_dimension: z.string().max(200).nullable().optional(),
+    direction: z.enum(["higher", "lower", "neutral"]).nullable().optional(), importance: z.number().min(0).max(100).nullable().optional(),
+  }).strict()).default({}),
+  table: z.object({ grain: z.string().max(400).nullable().optional(), description: z.string().max(4000).optional(), default_date_column: z.string().max(128).nullable().optional() }).strict().optional(),
 }).strict();
 const entrySchema = z.object({
   status: z.enum(["unreviewed", "published"]), dataset: z.string().regex(DATASET), importId: z.string(), provenance: provenanceSchema,
@@ -44,6 +48,25 @@ const entrySchema = z.object({
 const overlaySchema = z.object({ tables: z.record(z.string(), entrySchema).default({}) }).strict();
 export type ConnectedEntry = z.infer<typeof entrySchema>;
 export type Overlay = z.infer<typeof overlaySchema>;
+
+export const publicationRevision = (entry: ConnectedEntry) => createHash("sha256").update(JSON.stringify(entry)).digest("hex");
+
+/** Omission preserves metadata; explicit null clears optional metadata. Stored entries never contain patch-only nulls. */
+export function publicationEntry(existing: ConnectedEntry, patch: z.infer<typeof publishSchema>): ConnectedEntry {
+  if (patch.expectedRevision !== undefined && patch.expectedRevision !== publicationRevision(existing)) throw Object.assign(new Error("This dataset changed while you were reviewing it. Reopen the review to load the latest definitions and publication choices."), { status: 409 });
+  const merge = (base: object, changes: object = {}) => {
+    const result: Record<string, unknown> = { ...base };
+    for (const [key, value] of Object.entries(changes)) {
+      if (value === null) delete result[key];
+      else if (value !== undefined) result[key] = value;
+    }
+    return result;
+  };
+  const unknown = Object.keys(patch.metrics).find(name => !existing.metrics[name]);
+  if (unknown) throw Object.assign(new Error(`"${unknown}" is not a metric of ${existing.dataset}`), { status: 400 });
+  return entrySchema.parse({ ...existing, status: "published", table: merge(existing.table, patch.table),
+    metrics: Object.fromEntries(Object.entries(existing.metrics).map(([name, metric]) => [name, merge(metric, patch.metrics[name])])) });
+}
 
 export const connectedDir = () => resolve(process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas"), "models", "connected");
 function overlayPath(sourceId: string) {
@@ -65,6 +88,30 @@ export async function writeOverlay(sourceId: string, overlay: Overlay) {
   try { await rename(temporary, path); } catch (e) { await unlink(temporary).catch(() => {}); throw e; }
 }
 
+/** Refresh provenance without letting an ingestion refresh rewrite an approval.
+ * Published definitions remain active on rejected editor changes. An admin can
+ * stage replacement logic, but that logic returns to review before viewers use it. */
+export function registrationEntry(body: z.infer<typeof registerSchema>, actor: string, existing?: ConnectedEntry, admin = false): ConnectedEntry {
+  const published = existing?.status === "published";
+  const shape = (table: ConnectedEntry["table"]) => JSON.stringify({
+    columns: table.columns.map(c => [c.name, c.type]).sort((a, b) => a[0].localeCompare(b[0])),
+    primaryKey: table.primary_key ?? null, dateColumn: table.default_date_column ?? null,
+  });
+  const schemaChanged = !!published && shape(existing.table) !== shape(body.table);
+  const approvedChanged = !!published && Object.entries(existing.metrics).some(([name, m]) => m.reviewed && (!body.metrics[name] || body.metrics[name].expression !== m.expression));
+  if (!admin && (schemaChanged || approvedChanged)) throw Object.assign(new Error("This refresh changes a published schema or metric definition. Ask an administrator to stage the replacement and review it before publication. The approved definition has been kept."), { status: 403 });
+  const metrics: ConnectedEntry["metrics"] = {};
+  for (const [name, m] of Object.entries(body.metrics)) {
+    const kept = existing?.metrics[name];
+    // Review metadata (including labels, meaning and native grains) belongs to
+    // the published contract, not to a later ingestion payload.
+    metrics[name] = kept?.reviewed && !schemaChanged && kept.expression === m.expression ? { ...kept } : { ...m, reviewed: false };
+  }
+  return { status: schemaChanged ? "unreviewed" : existing?.status ?? "unreviewed", dataset: body.dataset, importId: body.importId, provenance: body.provenance,
+    registeredBy: existing?.registeredBy ?? actor,
+    table: published && !schemaChanged ? structuredClone(existing.table) : body.table, metrics };
+}
+
 /** Only the table's own date columns can carry a restricted grain; same rule as duckglue.ts. */
 export function metricIssues(entry: Pick<ConnectedEntry, "dataset" | "table" | "metrics">): string | null {
   const table = entryTable(entry);
@@ -72,9 +119,7 @@ export function metricIssues(entry: Pick<ConnectedEntry, "dataset" | "table" | "
     const issue = timeDimensionIssue(name, entry.dataset, table, m.time_grains, m.time_dimension);
     if (issue) return issue;
   }
-  if (entry.table.default_date_column && !table.columns.some((c) => c.name === entry.table.default_date_column && /date|timestamp/i.test(c.type)))
-    return `default_date_column must name a date column of ${entry.dataset}`;
-  return null;
+  return defaultDateIssue(table);
 }
 
 function entryTable(entry: Pick<ConnectedEntry, "dataset" | "table"> & Partial<Pick<ConnectedEntry, "status" | "provenance">>): Table {
@@ -82,6 +127,7 @@ function entryTable(entry: Pick<ConnectedEntry, "dataset" | "table"> & Partial<P
   return {
     name: entry.dataset, description: (entry.table.description ?? "").trim(), grain: entry.table.grain ?? "", synonyms: entry.table.synonyms ?? [],
     partitionKeys: [], primaryKey: entry.table.primary_key ?? null, relation: { table: entry.dataset },
+    defaultDateColumn: entry.table.default_date_column,
     columns: [...declared, ...LINEAGE_COLUMNS.filter((l) => !declared.some((c) => c.name === l.name))],
     ...(entry.status && entry.provenance ? { connected: { status: entry.status, provenance: entry.provenance, loadedAt: entry.provenance.loadedAt } } : {}),
   };
@@ -98,6 +144,8 @@ export function mergeOverlay(model: Model, overlay: Overlay, sourceId: string): 
       continue;
     }
     tables[entry.dataset] = entryTable(entry);
+    const issue = defaultDateIssue(tables[entry.dataset]);
+    if (issue) throw new Error(issue);
     for (const [name, m] of Object.entries(entry.metrics)) {
       if (metrics[name]) { console.error(JSON.stringify({ event: "connected.metric_shadowed", level: "warn", source: sourceId, dataset: entry.dataset, metric: name })); continue; }
       metrics[name] = {

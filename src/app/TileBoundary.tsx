@@ -10,7 +10,7 @@ import React from "react";
  * chart is broken".
  */
 export class TileBoundary extends React.Component<
-  { children: React.ReactNode; label?: string },
+  { children: React.ReactNode; label?: string; onError?: (message: string) => void },
   { error: Error | null }
 > {
   state = { error: null as Error | null };
@@ -20,6 +20,7 @@ export class TileBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
+    this.props.onError?.(error.message);
     console.error("[tile] render failed", this.props.label, error, info.componentStack);
   }
 

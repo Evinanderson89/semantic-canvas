@@ -56,7 +56,12 @@ it("does not duplicate headings or replace pinned or existing editorial structur
   const first = suggestStoryStructure(draft(), model, 1200)!;
   expect(suggestStoryStructure(first.spec, model, 1200)).toBeNull();
   const pinned = draft(); pinned.tiles[0].pinned = true;
-  expect(suggestStoryStructure(pinned, model, 1200)).toBeNull();
+  const refined = suggestStoryStructure(pinned, model, 1200)!;
+  expect(refined.refinement).toBe(true);
+  expect(refined.spec.tiles[0]).toEqual(pinned.tiles[0]);
+  expect(refined.spec.tiles.some(t => t.kind === "heading")).toBe(false);
+  expect(refined.spec.tiles.find(t => t.id === "trend")!.layout).not.toEqual(pinned.tiles.find(t => t.id === "trend")!.layout);
+  expect(refined.spec.tiles.find(t => t.id === "story-1")!.text).toBe("Keep my analysis exactly as written.");
 });
 
 it("does not offer a composition for invalid governed queries or exceed the document limit", () => {

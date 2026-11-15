@@ -41,6 +41,7 @@ it("detects mixed periods and rejects malformed recovery records", () => {
   expect(documentGrain({ title: "Mixed", tiles: [tile({ dimensions: ["day:sold_on"] }), tile({ id: "b", dimensions: ["month:sold_on"] })] })).toBe("mixed");
   expect(() => parseDrafts('{}')).toThrow(/unreadable/);
   expect(() => parseDrafts('[{"spec":{}}]')).toThrow(/unreadable/);
+  expect(() => parseDrafts('[{"spec":')).toThrow(/Recovery storage contains an unreadable draft/);
 });
 it("keeps section headings above readable KPI rows at compact widths", () => {
   const heading = tile({ id: "section", kind: "heading", metrics: [], text: "Revenue", layout: { x: 24, y: 24, w: 500, h: 48 } });
@@ -52,7 +53,7 @@ it("keeps section headings above readable KPI rows at compact widths", () => {
 });
 it("preserves a pinned section when arranging other content", () => {
   const pinned = tile({ id: "p", pinned: true, layout: { x: 24, y: 24, w: 500, h: 300 } });
-  expect(applyBestLayout([pinned, tile({ id: "next", kind: "heading", metrics: [], text: "Next", layout: { x: 24, y: 400, w: 500, h: 48 } })], 640).tiles[0]).toEqual(pinned);
+  expect(applyBestLayout([pinned, tile({ id: "next", kind: "heading", metrics: [], text: "Next", layout: { x: 24, y: 400, w: 500, h: 48 } })], 640).tiles[0]).toEqual({ ...pinned, section: null });
 });
 it("validates a whole proposal before applying it and rejects invented metrics", () => {
   const spec = { title: "Before", tiles: [tile()] };
