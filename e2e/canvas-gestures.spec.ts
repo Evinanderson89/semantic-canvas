@@ -62,7 +62,9 @@ test("capture released before pointerup cancels even without another movement", 
   await expect.poll(() => layouts(page)).not.toEqual(before);
   await page.locator(".node").first().evaluate((node, id) => node.releasePointerCapture(id), start.pointerId);
   await page.mouse.up();
-  expect(await layouts(page)).toEqual(before);
+  // Native pointer events schedule React state updates. Wait for the restore
+  // to render before checking its final geometry, as in the other cancel cases.
+  await expect.poll(() => layouts(page)).toEqual(before);
   expect((await state(page)).history).toBe(0);
   await expect(page.locator(".canvas-surface")).not.toHaveClass(/dragging/);
 });
