@@ -28,19 +28,19 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
 }) {
   const notesId = useId();
   const isMetric = (t: TileSpec) => (t.kind ?? "metric") === "metric";
+  const notes = reportFindings(spec.tiles.filter(t => isMetric(t) && checks[t.id]?.dataFindings?.length && checks[t.id].status !== "checking").map(t => {
+    const query = visibleQuery(model, t, [...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])], drills[t.id]);
+    return { id: t.id, title: t.title || t.metrics.join(", "), findings: checks[t.id].dataFindings ?? [],
+      scope: { ...query, id: undefined, window: checks[t.id].window,
+        rowRules: checks[t.id].rowRules, exceptions: scopeWarnings[t.id] ?? [] } };
+  }));
+  const noteId = (number: number) => `${notesId}-${number}`;
   return <div className={`report-presentation ${mode}`}>
     {sectionsOf(spec.tiles).filter(group => group.some(t => t.kind !== "heading")).map((group, index) => {
       const heading = group[0].kind === "heading" ? group[0] : null;
       const content = heading ? group.slice(1) : group;
       const headlineCount = content.filter(t => isMetric(t) && ["kpi", "stat"].includes(inferChart(model, t))).length;
       const lead = content.find(t => isMetric(t) && !["kpi", "stat"].includes(inferChart(model, t)));
-      const notes = reportFindings(content.filter(t => isMetric(t) && checks[t.id]?.dataFindings?.length && checks[t.id].status !== "checking").map(t => {
-        const query = visibleQuery(model, t, [...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])], drills[t.id]);
-        return { id: t.id, title: t.title || t.metrics.join(", "), findings: checks[t.id].dataFindings ?? [],
-          scope: { ...query, id: undefined, window: checks[t.id].window,
-            rowRules: checks[t.id].rowRules, exceptions: scopeWarnings[t.id] ?? [] } };
-      }));
-      const noteId = (number: number) => `${notesId}-${index}-${number}`;
       const isSupport = (t: TileSpec) => isMetric(t) && t.id !== lead?.id && !["kpi", "stat"].includes(inferChart(model, t));
       const fullWidthSupport = new Set<string>();
       // Pair adjacent supporting charts. A lone chart (including the last
@@ -77,21 +77,20 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
                   <a href={`#${noteId(note.number)}`} onClick={event => { event.preventDefault(); document.getElementById(noteId(note.number))?.focus(); }}>
                     Data note {note.number}: {findingTitle(note.finding, model)}
                   </a>
-                  <p>{note.finding.evidence}</p>
                 </li>)}
               </ul>}
             </div>}
           </article>;
         })}</div>
-        {!!notes.length && <aside className="report-section-notes" aria-label={`Data notes for ${heading?.text || heading?.title || `section ${index + 1}`}`}>
-          <h3>Data notes</h3>
-          {notes.map(note => <section id={noteId(note.number)} key={note.number} tabIndex={-1} aria-label={`Data note ${note.number}: ${findingTitle(note.finding, model)}`}>
-            <p className="report-note-charts"><strong>{note.number}.</strong> {note.charts.map(chart => chart.title).join(" · ")}</p>
-            <DataFindings findings={[note.finding]} model={model} />
-          </section>)}
-        </aside>}
       </section>;
     })}
+    {!!notes.length && <aside className="report-section-notes" aria-label="Presentation data notes">
+      <h3>Data notes</h3>
+      {notes.map(note => <section id={noteId(note.number)} key={note.number} tabIndex={-1} aria-label={`Data note ${note.number}: ${findingTitle(note.finding, model)}`}>
+        <p className="report-note-charts"><strong>{note.number}.</strong> {note.charts.map(chart => chart.title).join(" · ")}</p>
+        <DataFindings findings={[note.finding]} model={model} />
+      </section>)}
+    </aside>}
     {!spec.tiles.length && <p>Add charts or commentary to create a presentation.</p>}
   </div>;
 }

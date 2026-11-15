@@ -13,7 +13,7 @@ async function open(page: Page, spec: DashboardSpec) {
   return id;
 }
 
-test("presentation keeps evidence beside each chart and groups identical full notes below the section", async ({ page }, info) => {
+test("presentation keeps chart references and consolidates evidence across sections", async ({ page }, info) => {
   await page.route("**/api/query", route => {
     const q = route.request().postDataJSON();
     return route.fulfill({ json: { columns: ["month_month", ...q.metrics], rows: Array.from({ length: 24 }, (_, i) =>
@@ -21,7 +21,8 @@ test("presentation keeps evidence beside each chart and groups identical full no
   });
   await open(page, { title: `Executive evidence ${crypto.randomUUID()}`, tiles: [
     { id: "heading", kind: "heading", text: "Growth and retention", metrics: [], dimensions: [], layout: { x: 24, y: 24, w: 1000, h: 64 } },
-    ...["retention", "retention-copy", "acquisition"].map((id, i) => ({ id, title: id === "retention" ? "Retention headline" : id === "retention-copy" ? "Retention comparison" : "Acquisition cost", metrics: [i < 2 ? "nrr" : "cac"], dimensions: ["month:fct_saas_monthly.month"], chart: "kpi" as const, section: "heading", layout: { x: 24 + i * 350, y: 100, w: 330, h: 210 } })),
+    { id: "second-heading", kind: "heading", text: "Supporting evidence", metrics: [], dimensions: [], layout: { x: 24, y: 350, w: 1000, h: 64 } },
+    ...["retention", "retention-copy", "acquisition"].map((id, i) => ({ id, title: id === "retention" ? "Retention headline" : id === "retention-copy" ? "Retention comparison" : "Acquisition cost", metrics: [i < 2 ? "nrr" : "cac"], dimensions: ["month:fct_saas_monthly.month"], chart: "kpi" as const, section: i === 1 ? "second-heading" : "heading", layout: { x: 24 + i * 350, y: i === 1 ? 430 : 100, w: 330, h: 210 } })),
   ] });
   await page.getByRole("button", { name: "Review and share", exact: true }).click();
   const review = page.getByRole("dialog", { name: "Review and share" });
@@ -31,11 +32,14 @@ test("presentation keeps evidence beside each chart and groups identical full no
     for (const id of ["retention", "retention-copy"]) {
       const chart = review.locator(`[data-report-tile="${id}"]`);
       await expect(chart.getByRole("link", { name: "Data note 1: Missing values: Net revenue retention" })).toBeVisible();
-      await expect(chart).toContainText("1 of 24 returned rows");
+      await expect(chart.locator(".report-chart-context")).not.toContainText("1 of 24 returned rows");
       await expect(chart).not.toContainText("What to check");
     }
-    const notes = review.getByRole("complementary", { name: "Data notes for Growth and retention" });
+    const notes = review.getByRole("complementary", { name: "Presentation data notes" });
     await expect(notes.locator(".quality-finding")).toHaveCount(1);
+    await expect(review.locator(".report-section-notes")).toHaveCount(1);
+    await expect(notes).toContainText("1 of 24 returned rows");
+    expect(await notes.locator(":scope > section").first().evaluate(el => getComputedStyle(el).paddingTop)).toBe("0px");
     await expect(notes).toContainText("Retention headline · Retention comparison");
     await expect(notes).toContainText("Why it matters:");
     await expect(notes).toContainText("What to check:");
@@ -43,7 +47,7 @@ test("presentation keeps evidence beside each chart and groups identical full no
     await reference.click();
     await expect(notes.getByRole("region", { name: "Data note 1: Missing values: Net revenue retention" })).toBeFocused();
     const widths = await review.locator(".report-grid,.report-section-notes").evaluateAll(nodes => nodes.map(n => n.getBoundingClientRect().width));
-    expect(widths[1]).toBeCloseTo(widths[0], 0);
+    expect(widths.at(-1)).toBeCloseTo(widths[0], 0);
   }
   await review.getByRole("button", { name: "Expand presentation", exact: true }).click();
   await review.getByRole("article", { name: "Infographic presentation" }).screenshot({ path: info.outputPath("executive-data-notes.png") });
