@@ -27,6 +27,8 @@ Check relationships between metrics as well as their individual values. Shared t
 
 Inspect the rendered before/after at desktop and narrow widths, then Story and Infographic. The preview lists metrics that are no longer shown, including when an existing tile was repurposed instead of removed. A metric retained on another chart is not listed as removed; detailed per-tile changes still identify its replacement on the original chart. Assess reading order, usable chart sizes, preserved authored content, and whether the result answers the stated business question. Keep human decisions with supporting evidence in a separate review artifact; do not modify the captured provider response.
 
+Also render the proposed document as a read fixture in the normal interactive dashboard, without applying or saving it. Exploration controls, wrapped titles and data-check notices use space that the read-only proposal preview does not. Check both query errors (`.err`) and rendering errors (`.chart-err`), confirm actual chart marks, and inspect usable plot height. A ready preview or successful report export does not prove that the interactive layout fits.
+
 ## Fresh live evaluation
 
 Use an isolated sample-only server and a new data directory. The agent can read dashboard storage, so using the ordinary working server could expose unrelated saved dashboards. The prepared `sources.yaml` restricts the catalog to the checked-in sample, but isolation also requires a fresh `SC_DATA_DIR`.

@@ -2,8 +2,30 @@ import { expect, test, type Page } from "@playwright/test";
 import { openStarter } from "./library-helpers.ts";
 import { DEFAULT_CANVAS } from "../src/canvas/presets.ts";
 import type { TileSpec } from "../src/compiler/spec.ts";
+import { applyLayout } from "../src/canvas/layouts.ts";
 
 const kpi = (id: string, x: number, y: number, pinned = false): TileSpec => ({ id, title: id, chart: "kpi", metrics: ["new_mrr"], dimensions: [], pinned, layout: { x, y, w: 280, h: 156 } });
+
+test("arranged multi-series charts fit interactive controls and real result-limit warnings", async ({ page }, info) => {
+  const tiles: TileSpec[] = [
+    { id: "additions", title: "Gross MRR additions by month: new, expansion, reactivation", metrics: ["new_mrr", "expansion_mrr", "reactivation_mrr"], dimensions: ["month:movement_date"], chart: "barStacked", limit: 12, layout: { x: 0, y: 0, w: 468, h: 280 } },
+    { id: "losses", title: "MRR losses by month: churn and contraction (positive magnitudes)", metrics: ["churned_mrr", "contraction_mrr"], dimensions: ["month:movement_date"], chart: "barStacked", limit: 12, layout: { x: 500, y: 0, w: 468, h: 280 } },
+  ];
+  const arranged = applyLayout("exec-summary", tiles, 1000);
+  await openDraft(page, arranged);
+  // Include exploration controls and warning chrome. The read-only AI preview
+  // and report layouts do not exercise this smaller interactive plot budget.
+  for (const tile of arranged) {
+    const node = page.locator(".node").filter({ has: page.getByText(tile.title!, { exact: true }) });
+    await expect(node.getByText(/Latest window · 12 rows/)).toBeVisible();
+    await expect(node.getByRole("button", { name: "1 data check to review", exact: true })).toBeVisible();
+    await expect(node.locator('g[aria-label="bar"] rect').first()).toBeVisible();
+    await expect(node.locator(".err, .chart-err")).toHaveCount(0);
+    const plot = await node.locator(".chart-host > figure > svg").boundingBox();
+    expect(plot?.height).toBeGreaterThan(180);
+  }
+  await page.locator(".canvas-surface").screenshot({ path: info.outputPath("arranged-movement-charts.png") });
+});
 async function openDraft(page: Page, tiles: TileSpec[]) {
   const spec = { title: `Pinned arrangement ${crypto.randomUUID()}`, tiles };
   const response = await page.request.post("/api/dashboards", { data: { id: crypto.randomUUID(), spec, canvas: { ...DEFAULT_CANVAS, width: 1200, height: 3000 }, revision: 0 } });

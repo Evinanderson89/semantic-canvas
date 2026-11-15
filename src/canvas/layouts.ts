@@ -48,6 +48,12 @@ const isKpiTile = (t: TileSpec) =>
    (!t.chart && (t.dimensions ?? []).length === 0 && t.metrics.length === 1));
 const isDataTile = (t: TileSpec) => (t.kind ?? "metric") === "metric";
 
+// Multiple measures or a categorical series need legend space in addition to
+// the title, result notices and interactive exploration row. The read-only
+// preview omits some of that chrome; its smaller plot budget is not enough for
+// the actual dashboard. Pinned content bypasses automatic sizing as before.
+const chartHeightFloor = (t: TileSpec) => t.chart !== "table" && (t.metrics.length > 1 || t.dimensions.length > 1) ? 420 : 280;
+
 /** A side caption becomes a short reading block when a report layout gives
  * it a whole row. Estimate conservatively, preserving paragraphs and room
  * for long words. Grid and pinned content keep their authored dimensions. */
@@ -218,7 +224,8 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
         row = arrange(run.map(t => {
           const w = purposeful ? (text || name === "story" || t.id === lead || avail < 736 ? avail : Math.floor((avail - GAP) / 2))
             : text ? Math.min(t.layout.w, avail) : Math.min(avail, Math.max(360, t.layout.w));
-          const h = text ? t.layout.h : name === "story" ? 360 : name === "executive" ? (t.id === lead ? 320 : 280) : Math.max(280, t.layout.h);
+          const h = text ? t.layout.h : Math.max(chartHeightFloor(t),
+            name === "story" ? 360 : name === "executive" ? (t.id === lead ? 320 : 280) : t.layout.h);
           return { ...t, layout: { ...t.layout, w, h } };
         }), width, { stretch, fillRows: name !== "grid" });
         row = row.map(t => ({ ...t, layout: { ...t.layout, y: t.layout.y - PAD } }));
