@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { chat } from "../src/agent/loop.ts";
 import { model, tile } from "./fixtures.ts";
 import { DEFAULT_CANVAS } from "../src/canvas/presets.ts";
+import { proposalSchema } from "../src/canvas/proposals.ts";
 
 const active = { spec: { title: "Synthetic revenue", tiles: [tile({ id: "revenue", chart: "bar", dimensions: ["dim_users.country"] })] }, canvas: DEFAULT_CANVAS, selected: [], model };
 const valid = { title: "Revenue over time", reason: "Compare reporting months.", actions: [
@@ -30,6 +31,28 @@ function provider(responses: unknown[]) {
 }
 const run = () => chat({ provider: "anthropic", model: "synthetic-model", apiKey: "synthetic-test-key" }, [], "Improve this synthetic dashboard", {}, active, undefined, "redesign");
 afterEach(() => vi.restoreAllMocks());
+
+it("keeps a detailed design rationale intact without retrying or mutating the dashboard", async () => {
+  const reason = "Explain chart choices, reporting scope and preserved context. ".repeat(30) + "End of rationale.";
+  const detailed = { ...valid, reason };
+  const before = structuredClone(active);
+  const requests = provider([detailed, { endText: "Ready for review." }]);
+  expect((await run()).proposal).toEqual(detailed);
+  expect(active).toEqual(before);
+  expect(requests).toHaveLength(2);
+  expect(proposalSchema.safeParse({ ...valid, reason: "x".repeat(4000) }).success).toBe(true);
+  expect(proposalSchema.safeParse({ ...valid, reason: "" }).success).toBe(false);
+  expect(proposalSchema.safeParse({ ...valid, title: "x".repeat(1001) }).success).toBe(false);
+});
+
+it("still bounds the rationale and lets the provider correct it without truncating edits", async () => {
+  const requests = provider([{ ...valid, reason: "x".repeat(4001) }, { endText: "Ready." }, valid]);
+  expect((await run()).proposal).toEqual(valid);
+  expect(requests).toHaveLength(3);
+  expect(JSON.stringify(requests[2].messages)).toContain("4000");
+  const schema = requests[0].tools.find((t: any) => t.name === "propose_canvas_changes").input_schema;
+  expect(schema.properties.reason.description).toContain("maxLength: 4000");
+});
 
 it("names the invalid blank-canvas KPI and teaches a bounded correction without silently selecting a period", async () => {
   const empty = { ...active, spec: { title: "Empty", tiles: [] } };

@@ -15,7 +15,8 @@ import { chartUnits } from "../app/chartResult.ts";
 
 const text = z.string().min(1).max(1000);
 export const proposalSchema = z.object({
-  title: text, reason: text,
+  title: text,
+  reason: z.string().min(1).max(4000).describe("Concise design rationale covering key choices, removals and scope caveats. Aim for a few sentences; preserve necessary disclosures. Maximum 4000 characters."),
   actions: z.array(z.discriminatedUnion("type", [
     z.object({ type: z.literal("rename"), title: text }).strict(),
     z.object({ type: z.literal("describe"), description: dashboardSchema.shape.description.unwrap() }).strict().describe("Replace the dashboard-wide description explicitly; an empty string clears it. Keep references to other tabs intact. This does not edit any tile's authored commentary."),

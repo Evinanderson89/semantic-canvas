@@ -5,6 +5,7 @@ test("AI redesign previews real charts, applies once, and restores with undo", a
   let attempts = 0;
   let original: any;
   const description = "Recurring revenue headlines, monthly new-business trends, web sessions and country signups.";
+  const reason = "A trend supports comparison across reporting periods. ".repeat(24) + "Full rationale retained.";
   await page.route("**/api/agent/status", route => route.fulfill({ json: { configured: true } }));
   await page.route("**/api/agent/chat", route => {
     const input = route.request().postDataJSON();
@@ -13,7 +14,7 @@ test("AI redesign previews real charts, applies once, and restores with undo", a
     original = input.document.spec;
     const target = input.document.spec.tiles.find((t: any) => t.metrics.includes("new_mrr"));
     return route.fulfill({ json: { text: "Lead with recurring revenue, then inspect the monthly trend.", proposal: {
-      title: "A clearer revenue story", reason: "A trend is more useful than the isolated category.",
+      title: "A clearer revenue story", reason,
       actions: [{ type: "describe", description }, { type: "query", id: target.id, dimensions: ["month:movement_date"] }, { type: "chart", id: target.id, chart: "line" }, { type: "arrange", layout: "executive" }],
     } } });
   });
@@ -50,6 +51,11 @@ test("AI redesign previews real charts, applies once, and restores with undo", a
   await dialog.getByRole("button", { name: "Before", exact: true }).click();
   await expect(dialog.locator(".ai-redesign-preview-caption")).toContainText("Your current dashboard");
   await dialog.getByRole("button", { name: "Proposed dashboard", exact: true }).click();
+  const rationale = dialog.locator("details").filter({ has: page.getByText("AI design rationale", { exact: true }) });
+  await expect(rationale).not.toHaveAttribute("open", "");
+  await rationale.locator("summary").click();
+  await expect(rationale.locator("p").first()).toHaveText(reason);
+  await rationale.locator("summary").click();
   await dialog.getByRole("button", { name: "Apply redesign", exact: true }).click();
   await expect(dialog).toHaveCount(1);
   await expect(dialog.locator("footer")).toContainText("Redesign applied");
