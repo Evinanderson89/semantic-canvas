@@ -23,8 +23,8 @@ const newTile = z.discriminatedUnion("kind", [
   z.object({
     ...common, kind: z.literal("metric"), title: tileSchema.shape.title.unwrap(),
     metrics: tileSchema.shape.metrics.min(1),
-    dimensions: tileSchema.shape.dimensions.removeDefault(),
-    chart: tileSchema.shape.chart.unwrap(), compare: tileSchema.shape.compare.unwrap(),
+    dimensions: tileSchema.shape.dimensions.removeDefault().describe("Governed dimensions. Period KPIs and prior/yoy comparisons need exactly one time dimension, such as month:date_field from the catalog. [] means an aggregate, not the latest period."),
+    chart: tileSchema.shape.chart.unwrap(), compare: tileSchema.shape.compare.unwrap().describe("Use none for aggregates without a time dimension. prior/yoy require exactly one governed time dimension; chart:kpi alone does not establish a reporting period."),
     where: filters, limit: tileSchema.shape.limit.unwrap(),
     format: format.pick({ number: true, palette: true }).required(),
   }).strict(),

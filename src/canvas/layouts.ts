@@ -1,6 +1,7 @@
 import { metricOf, type Model } from "../semantic/model.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import { arrange, overlaps } from "./geometry.ts";
+import { mergeTextFormat } from "../format/format.ts";
 
 /**
  * Named layout templates Smart Arrange chooses between, rather than always
@@ -46,6 +47,27 @@ const isKpiTile = (t: TileSpec) =>
   (t.chart === "kpi" || t.chart === "stat" ||
    (!t.chart && (t.dimensions ?? []).length === 0 && t.metrics.length === 1));
 const isDataTile = (t: TileSpec) => (t.kind ?? "metric") === "metric";
+
+/** A side caption becomes a short reading block when a report layout gives
+ * it a whole row. Estimate conservatively, preserving paragraphs and room
+ * for long words. Grid and pinned content keep their authored dimensions. */
+function noteHeight(tile: TileSpec, width: number): number {
+  const format = mergeTextFormat(tile.format);
+  const usable = Math.max(1, width - 40);
+  const capacity = Math.max(1, Math.floor(usable / (format.textSize * .68)));
+  const lines = (tile.text ?? "").split("\n").reduce((sum, paragraph) => {
+    let used = 0, count = 1;
+    for (const word of paragraph.split(/\s+/)) {
+      const length = [...word].reduce((n, c) => n + (c.codePointAt(0)! > 255 ? 2 : 1), 0);
+      if (used && used + 1 + length > capacity) { count++; used = 0; }
+      const total = used + (used ? 1 : 0) + length;
+      count += Math.max(0, Math.ceil(total / capacity) - 1);
+      used = total ? (total - 1) % capacity + 1 : 0;
+    }
+    return sum + count;
+  }, 0);
+  return Math.max(48, Math.ceil((lines * format.textSize * 1.55 + 24) / 8) * 8);
+}
 
 /**
  * How well a layout fits the CURRENT tile set -- higher is better, mirroring
@@ -105,7 +127,7 @@ function placeAroundPins(packed: TileSpec[], fixed: TileSpec[], width: number, s
   for (const row of rows.values()) {
     const remaining = [...row].sort((a, b) => a.layout.x - b.layout.x);
     while (remaining.length) {
-      const height = Math.max(...remaining.map(t => t.layout.h));
+      const height = Math.max(...remaining.map(t => t.kind === "text" && name !== "grid" ? Math.max(t.layout.h, noteHeight(t, minWidth(t))) : t.layout.h));
       const blockers = fixed.filter(t => t.layout.y < y + height + GAP && t.layout.y + t.layout.h + GAP > y);
       let bands = [{ left: PAD, right: PAD + available }];
       for (const { layout: b } of blockers) bands = bands.flatMap(band => {
@@ -131,8 +153,9 @@ function placeAroundPins(packed: TileSpec[], fixed: TileSpec[], width: number, s
         let x = band.left;
         fitting.forEach((t, i) => {
           const w = minWidth(t) + (totalExtra ? Math.min(1, extra / totalExtra) * desiredExtra[i] : 0);
-          placed.push({ ...t, layout: { ...t.layout, x: Math.round(x), y: Math.round(y), w: Math.floor(w) } });
-          x += w + GAP; rowHeight = Math.max(rowHeight, t.layout.h);
+          const h = t.kind === "text" && name !== "grid" ? noteHeight(t, Math.floor(w)) : t.layout.h;
+          placed.push({ ...t, layout: { ...t.layout, x: Math.round(x), y: Math.round(y), w: Math.floor(w), h } });
+          x += w + GAP; rowHeight = Math.max(rowHeight, h);
         });
       }
       if (rowHeight) y += rowHeight + GAP;
@@ -199,6 +222,7 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
           return { ...t, layout: { ...t.layout, w, h } };
         }), width, { stretch, fillRows: name !== "grid" });
         row = row.map(t => ({ ...t, layout: { ...t.layout, y: t.layout.y - PAD } }));
+        if (name !== "grid" && run[0].kind === "text") row = row.map(t => ({ ...t, layout: { ...t.layout, h: noteHeight(t, t.layout.w) } }));
       }
       packed.push(...row.map(t => ({ ...t, ...(heading ? { section: heading.id } : {}), layout: { ...t.layout, y: t.layout.y + localY } })));
       localY += Math.max(...row.map(t => t.layout.y + t.layout.h)) + GAP;

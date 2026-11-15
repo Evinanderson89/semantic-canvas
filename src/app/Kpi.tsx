@@ -14,12 +14,13 @@ type Point = { x: unknown; y: number };
  * wants a zero baseline, a retention ratio wants a tight domain or it reads as
  * a flat line.
  */
-export function Kpi({ label, series, options, onOptions, format, grain, previous, comparison, onComparison, direction = "neutral", percent = false, actions, precisionLimited = false, partialWindow, unverifiedPeriods }: {
+export function Kpi({ label, series, options, onOptions, format, grain, previous, comparison, onComparison, direction = "neutral", percent = false, actions, notice, precisionLimited = false, partialWindow, unverifiedPeriods }: {
   comparison?: CardComparison; onComparison?: (comparison: CardComparison) => void;
   precisionLimited?: boolean;
   partialWindow?: { start: boolean; end: boolean };
   unverifiedPeriods?: string[];
   actions?: ReactNode;
+  notice?: ReactNode;
   percent?: boolean;
   direction?: "higher" | "lower" | "neutral";
   label: string; series: Point[]; grain?: string | null; previous?: number | null;
@@ -139,7 +140,7 @@ export function Kpi({ label, series, options, onOptions, format, grain, previous
         {actions}
       </div>
 
-      <div className="kpi-asof">{grain === "month" ? "Period " : "As of "}{grain === "month" && series.at(-1)?.x ? new Date(String(series.at(-1)?.x).slice(0, 10) + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" }) : period(series.at(-1)?.x) || "—"}</div>
+      <div className="kpi-asof"><span>{grain === "month" ? "Period " : "As of "}{grain === "month" && series.at(-1)?.x ? new Date(String(series.at(-1)?.x).slice(0, 10) + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" }) : period(series.at(-1)?.x) || "—"}</span>{notice}</div>
       <div className="kpi-value">{latest == null ? "—" : fmt(latest)}</div>
       <div className="kpi-delta">
         {mode === "none" ? <span className="flat">comparison off</span> : coverageLimited ? <span className="flat" title="Review the ratio's input dates before comparing these periods.">input coverage · no comparison</span> : partialComparison ? <span className="flat" title="Use complete reporting periods or a finer grain before comparing this selected window.">partial period · no comparison</span> : precisionLimited ? <span className="flat" title="Displayed values may round together. Inspect the data check and compare the exact returned values in the warehouse.">precision limited</span> : delta == null ? <span className="flat" title={mode === "first" && series.length < 2 ? "At least two shown periods are needed to compare with the first." : "A valid comparison value is unavailable."}>no comparison</span> : (
@@ -165,10 +166,11 @@ export function Kpi({ label, series, options, onOptions, format, grain, previous
         )}
       </div>
 
-      {!!gaps.length && <span className="spark-missing">Missing periods</span>}
+      {!!gaps.length && !(o.showRange && points.length > 1) && <span className="spark-missing">Missing periods</span>}
       {o.showRange && points.length > 1 && (
         <div className="spark-range" title={`${valid.length} observations. ${gaps.length ? "Missing periods remain gaps. " : ""}Period completeness is not declared by the source.`}>
           <span>{period(points[0].x)}</span>
+          {!!gaps.length && <span className="spark-missing">Missing periods</span>}
           <span>{period(points.at(-1)!.x)}</span>
         </div>
       )}

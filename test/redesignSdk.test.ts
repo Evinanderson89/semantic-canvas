@@ -31,6 +31,23 @@ function provider(responses: unknown[]) {
 const run = () => chat({ provider: "anthropic", model: "synthetic-model", apiKey: "synthetic-test-key" }, [], "Improve this synthetic dashboard", {}, active, undefined, "redesign");
 afterEach(() => vi.restoreAllMocks());
 
+it("names the invalid blank-canvas KPI and teaches a bounded correction without silently selecting a period", async () => {
+  const empty = { ...active, spec: { title: "Empty", tiles: [] } };
+  const newCard = { kind: "metric", id: "new-revenue-card", title: "Revenue", metrics: ["revenue"], dimensions: [],
+    chart: "kpi", compare: "prior", where: [], limit: 500, section: null,
+    layout: { x: 24, y: 24, w: 400, h: 200 }, format: { number: "currency", palette: "default" } };
+  const rejected = { title: "Revenue summary", reason: "Show revenue by reporting month.", actions: [{ type: "add", tile: newCard }] };
+  const corrected = { ...rejected, actions: [{ type: "add", tile: { ...newCard, dimensions: ["month:sold_on"] } }] };
+  const requests = provider([rejected, { endText: "Ready." }, corrected]);
+  const result = await chat({ provider: "anthropic", model: "synthetic-model", apiKey: "synthetic-test-key" }, [], "Build an executive dashboard", {}, empty, undefined, "redesign");
+  const feedback = JSON.stringify(requests[2].messages);
+  expect(feedback).toContain("Tile new-revenue-card: period comparison requires a time dimension");
+  expect(feedback).toContain("grain:date_field");
+  expect(result.proposal).toEqual(corrected);
+  expect(empty.spec.tiles).toEqual([]);
+  expect(requests).toHaveLength(3);
+});
+
 it("accepts a description update together with a real redesign without mutating the active document", async () => {
   const proposal = { ...valid, actions: [...valid.actions, { type: "describe", description: "Revenue by reporting month." }] };
   const original = structuredClone(active.spec);

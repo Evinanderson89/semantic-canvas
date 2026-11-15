@@ -143,7 +143,7 @@ button{font:inherit;cursor:pointer}
 .tile .body > div{max-width:100%;max-height:100%}
 .tile figure{margin:0!important;max-width:100%}
 .tile figure svg,.tile .body > div > svg{max-width:100%;display:block}
-.tile .kpi-body{padding:14px 16px;overflow:hidden}
+.tile .kpi-body{padding:10px 16px;overflow:auto}
 .tile .err{color:var(--neg);background:color-mix(in srgb,var(--neg) 12%,transparent);
   border-radius:var(--r-m);padding:10px;font-size:12px}
 
@@ -1015,7 +1015,11 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .ratio-period-scroll caption { text-align:left; padding:10px; font-weight:600; }
 .ratio-period-scroll th,.ratio-period-scroll td { padding:10px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); min-width:120px; max-width:220px; overflow-wrap:anywhere; }
 .ratio-period-scroll th { position:sticky; top:0; background:var(--panel); }
-.kpi-asof { font-size: 9px; color: var(--ink-3); margin: 4px 0 1px; }
+.kpi-asof { font-size: 9px; color: var(--ink-3); margin: 4px 0 1px; display:flex;align-items:center;justify-content:space-between;gap:6px; }
+.kpi-data-check { font:inherit;font-size:9px;line-height:1.2;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn,#a36b19);border-radius:4px;padding:2px 5px;white-space:nowrap;cursor:pointer; }
+.kpi-data-check:hover { border-color:var(--accent); }
+.kpi .spark { height:100%; }
+.kpi .spark-range .spark-missing { font:inherit;color:var(--ink-3);white-space:nowrap; }
 .kpi .kpi-value { margin-top: 0; }
 .review-coverage { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius:var(--r-l); font-size: 12px; }
 .review-coverage p { margin: 6px 0 0; line-height: 1.5; }

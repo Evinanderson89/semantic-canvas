@@ -85,7 +85,11 @@ export function applyProposal(spec: DashboardSpec, canvas: CanvasSpec, raw: unkn
       .map(t => ({ tileId: t.id, field: f.field })),
   ] }));
   const issues = validateDashboard(model, next);
-  if (issues.length) throw new Error(issues.map(i => i.problem).join("; "));
+  if (issues.length) throw new Error(issues.map(i => {
+    const correction = i.problem === "period comparison requires a time dimension"
+      ? ' Use a governed time dimension (grain:date_field) for a period KPI, or compare:"none" for an aggregate. Do not invent a date field or silently change the reporting scope.' : "";
+    return `Tile ${i.tile}: ${i.problem}.${correction}`;
+  }).join("; "));
   // Validate the final combination, not intermediate action order. Leave an
   // unchanged broken chart available for layout recovery; new/changed chart
   // encodings must satisfy the same structural and unit checks as rendering.

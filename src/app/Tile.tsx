@@ -496,7 +496,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       {currentResult && state.status === "ok" && state.truncated && <EvidenceWarning message={`${state.window ? "Latest window" : "Limited results"} · ${state.limit} rows · export is limited`} title={state.warnings?.join(" ")} label="Inspect result limit" onInspect={() => setEvidenceOpen(true)} />}
       {currentResult && state.status === "ok" && (state.partial?.selected?.start || state.partial?.selected?.end) && <EvidenceWarning message="Selected window includes partial observed periods · comparisons involving those periods are unavailable" label="Inspect selected period" onInspect={() => setEvidenceOpen(true)} />}
       {currentResult && state.status === "ok" && !!state.partial?.ratio?.length && <EvidenceWarning message="Ratio input periods need review · inspect both input windows before interpreting" label="Inspect input periods" onInspect={() => setEvidenceOpen(true)} />}
-      {!presentation && reviewFindingCount > 0 && <div className="data-check-notice"><button onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setEvidenceOpen(true); }}>{reviewFindingCount} data check{reviewFindingCount === 1 ? "" : "s"} to review</button></div>}
+      {!presentation && reviewFindingCount > 0 && !(kind === "kpi" && kpiTimeDimIndex >= 0) && <div className="data-check-notice"><button onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setEvidenceOpen(true); }}>{reviewFindingCount} data check{reviewFindingCount === 1 ? "" : "s"} to review</button></div>}
       {evidenceOpen && <MetricEvidence title={title} metrics={spec.metrics} dimensions={dimensions} where={where} model={model}
         findings={dataFindings} state={state.key === queryKey ? state : { status: "loading" }} scopeWarnings={scopeWarnings}
         policy={scopedBy(state.rlsApplied, session?.policy)?.full} provenance={connected ? dataAsOf(connected) : undefined}
@@ -622,6 +622,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                    onComparison={onUpdate && !locked ? mode => onUpdate(withCardComparison(spec, mode)) : undefined}
                    precisionLimited={dataFindings.some(f => f.id === `precision:${spec.metrics[0]}`)}
                    partialWindow={state.partial?.selected}
+                   notice={!presentation && reviewFindingCount > 0 ? <button className="kpi-data-check" aria-label={`${reviewFindingCount} data check${reviewFindingCount === 1 ? "" : "s"} to review`} title="Review data checks" onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setEvidenceOpen(true); }}>{reviewFindingCount} check{reviewFindingCount === 1 ? "" : "s"}</button> : undefined}
                    unverifiedPeriods={state.partial?.ratio?.map((r: { period: string | null }) => r.period).filter((p: string | null) => p != null)}
                    series={(state.rows ?? []).filter((r: any[]) => r[state.columns.indexOf(dimAlias(dimensions[kpiTimeDimIndex]))] != null).map((r: any[]) =>
                      ({ x: r[state.columns.indexOf(dimAlias(dimensions[kpiTimeDimIndex]))], y: numericValue(r[state.columns.indexOf(spec.metrics[0])]) ?? NaN }))

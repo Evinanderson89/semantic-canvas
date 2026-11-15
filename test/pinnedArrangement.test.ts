@@ -22,6 +22,21 @@ const assertFits = (tiles: TileSpec[], width: number) => {
   }
 };
 
+it.each(["exec-summary", "executive", "story"] as const)("%s fits a former side caption to its finished reading width", name => {
+  const note = tile({ id: "caption", kind: "text", metrics: [], dimensions: [],
+    text: "Revenue increased in August. Compare the monthly trend with the same reporting window before drawing a conclusion.",
+    format: { textSize: 14 }, layout: { x: 776, y: 200, w: 344, h: 320 } });
+  const result = applyLayout(name, [chart("trend", 200), note], 1120);
+  expect(result[1].layout.h).toBeLessThan(120);
+  expect(result[1].text).toBe(note.text);
+  assertFits(result, 1120);
+  expect(applyLayout(name, result, 1120)).toEqual(result);
+  expect(applyLayout("grid", [note], 1120)[0].layout.h).toBe(320);
+  expect(applyLayout(name, [{ ...note, pinned: true }], 1120)[0].layout).toEqual(note.layout);
+  const long = { ...note, text: Array(30).fill(note.text).join("\n") };
+  expect(applyLayout(name, [long], 640)[0].layout.h).toBeGreaterThan(320);
+});
+
 it.each(["exec-summary", "executive", "story"] as const)("%s gives an unpaired chart the finished row width", name => {
   const original = [kpi("metric", 24, 0), chart("trend", 200), chart("support", 600)];
   const result = applyLayout(name, original, 1120, true, model);
