@@ -19,7 +19,7 @@ export const proposalSchema = z.object({
   reason: z.string().min(1).max(4000).describe("Concise design rationale covering key choices, removals and scope caveats. Aim for a few sentences; preserve necessary disclosures. Maximum 4000 characters."),
   actions: z.array(z.discriminatedUnion("type", [
     z.object({ type: z.literal("rename"), title: text }).strict(),
-    z.object({ type: z.literal("describe"), description: dashboardSchema.shape.description.unwrap() }).strict().describe("Replace the dashboard-wide description explicitly; an empty string clears it. Keep references to other tabs intact. This does not edit any tile's authored commentary."),
+    z.object({ type: z.literal("describe"), description: dashboardSchema.shape.description.unwrap() }).strict().describe("Set the dashboard-wide description explicitly, replacing any existing one; an empty string clears it. With no existing description this adds the first one. Keep references to other tabs intact. This does not edit any tile's authored commentary."),
     z.object({ type: z.literal("title"), id: text, title: text }).strict().describe("Rename an existing tile, including a metric chart. This does not add commentary."),
     z.object({ type: z.literal("note"), id: text.describe("ID of an existing text or heading tile, or one added earlier in this proposal. Never a metric/chart tile ID."), text: z.string().max(100000) }).strict().describe("Replace a text/heading tile's content. To add commentary about a chart, use add with a separate kind:text tile instead."),
     z.object({ type: z.literal("chart"), id: text, chart: tileSchema.shape.chart.unwrap() }).strict(),

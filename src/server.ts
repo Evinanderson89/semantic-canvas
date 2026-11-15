@@ -1081,10 +1081,11 @@ app.post("/api/agent/chat", safe(async (req, res) => {
   if (!review.success) return res.status(400).json({ error: "Invalid building-session context" });
   const mode = z.enum(["chat", "redesign"]).parse(req.body?.mode ?? "chat");
   if (mode === "redesign" && !active) return res.status(400).json({ error: "A current canvas is required for redesign" });
-  const { text, messages, proposal, providerSchemaFallback } = await agentChat(ai, history.slice(-12), message, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined, review.data, mode);
+  const { text, messages, proposal, research, providerSchemaFallback } = await agentChat(ai, history.slice(-12), message, { source, principal, auth: auth.forwarded(req), signal: controller.signal }, active ? { ...active, model: modelOf(req) } : undefined, review.data, mode);
   if (agentConversations.size >= 500) agentConversations.delete(agentConversations.keys().next().value!);
   agentConversations.set(historyKey, messages.slice(-12));
-  res.json({ text, proposal, ...(providerSchemaFallback ? { providerSchemaFallback } : {}) });
+  // research lists query scopes and returned-row counts only, so a reviewer can check count claims.
+  res.json({ text, proposal, ...(research ? { research } : {}), ...(providerSchemaFallback ? { providerSchemaFallback } : {}) });
 }));
 
 /**

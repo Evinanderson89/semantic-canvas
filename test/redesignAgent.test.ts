@@ -58,3 +58,41 @@ it("does not start proposal recovery after cancellation or a provider refusal", 
   expect((await run()).proposal).toBeUndefined();
   expect(toolRunner).toHaveBeenCalledTimes(1);
 });
+
+it("tells the model which prior wording exists before it writes, and reports calculated wording changes", async () => {
+  // Replays the document shape of a captured live failure: the rationale described
+  // a "prior description" that did not exist. No provider call is made here.
+  const described = { ...proposal, actions: [...proposal.actions, { type: "describe", description: "Revenue by month." }] };
+  let feedback: any;
+  toolRunner.mockImplementationOnce(params => runner(params));
+  toolRunner.mockImplementationOnce(params => runner(params, params.tools[0].run(described).then((text: string) => { feedback = JSON.parse(text); return response; })));
+  await run();
+  for (const [params] of toolRunner.mock.calls) {
+    expect(params.system).toContain("This dashboard has no description");
+    expect(params.system).toContain("The dashboard title is a title, not a description");
+    expect(params.system).toContain("No text or heading tile has authored content");
+  }
+  expect(feedback.textChanges.dashboardDescription).toEqual({ status: "added", before: null, after: "Revenue by month." });
+  expect(feedback.textGuidance).toContain("no prior wording existed");
+  expect(feedback.researchQueries).toEqual([]);
+  // Without research there is no verified count to cite.
+  expect(toolRunner.mock.calls[1][0].messages.at(-1).content).toContain("No governed query was run");
+});
+
+it("records query scopes and returned-row counts, never rows, so count claims can be checked", async () => {
+  const rows = Array.from({ length: 6 }, (_, i) => [`2026-0${i + 1}-01`, i]);
+  const fetchMock = vi.fn(async () => new Response(JSON.stringify({ columns: ["month", "revenue"], rows, sql: "SELECT secret", truncated: false, partial: { start: true, end: false }, evidence: { rowsChecked: 6 } })));
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    toolRunner.mockImplementationOnce(params => runner(params, params.tools.find((t: any) => t.name === "query_metric")
+      .run({ metrics: ["revenue"], dimensions: ["month:sold_on"], limit: 6, compare: "prior" }).then(() => response)));
+    toolRunner.mockImplementationOnce(params => runner(params, params.tools[0].run(proposal).then(() => response)));
+    const result = await run();
+    const ledger = [{ metrics: ["revenue"], dimensions: ["month:sold_on"], where: [], compare: "prior", limit: 6, rowsChecked: 6, partial: { start: true, end: false }, truncated: false }];
+    expect(result.research).toEqual(ledger);
+    const finalPrompt = toolRunner.mock.calls[1][0].messages.at(-1).content;
+    expect(finalPrompt).toContain(JSON.stringify(ledger));
+    expect(finalPrompt).toContain("only verified row counts");
+    expect(JSON.stringify(result.research)).not.toContain("SELECT secret");
+  } finally { vi.unstubAllGlobals(); }
+});
