@@ -39,7 +39,20 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
     {sectionsOf(spec.tiles).filter(group => group.some(t => t.kind !== "heading")).map((group, index) => {
       const heading = group[0].kind === "heading" ? group[0] : null;
       const content = heading ? group.slice(1) : group;
-      const headlineCount = content.filter(t => isMetric(t) && ["kpi", "stat"].includes(inferChart(model, t))).length;
+      const isHeadline = (t: TileSpec) => isMetric(t) && ["kpi", "stat"].includes(inferChart(model, t));
+      const headlineSpans = new Map<string, number>();
+      // Balance each uninterrupted run without moving authored notes. Four
+      // cards form two pairs, rather than leaving one card below a full row.
+      for (let i = 0; i < content.length;) {
+        if (!isHeadline(content[i])) { i++; continue; }
+        const start = i;
+        while (i < content.length && isHeadline(content[i])) i++;
+        for (let row = start; row < i;) {
+          const count = i - row === 4 ? 2 : Math.min(3, i - row);
+          for (let j = 0; j < count; j++) headlineSpans.set(content[row + j].id, 6 / count);
+          row += count;
+        }
+      }
       const lead = content.find(t => isMetric(t) && !["kpi", "stat"].includes(inferChart(model, t)));
       const isSupport = (t: TileSpec) => isMetric(t) && t.id !== lead?.id && !["kpi", "stat"].includes(inferChart(model, t));
       const fullWidthSupport = new Set<string>();
@@ -57,7 +70,7 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
           const metric = isMetric(t), headline = metric && ["kpi", "stat"].includes(inferChart(model, t));
           const query = metric ? visibleQuery(model, t, [...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])], drills[t.id]) : null;
           const check = checks[t.id];
-          return <article key={t.id} data-report-tile={t.id} style={headline && headlineCount < 3 ? { "--headline-span": 6 / headlineCount } as CSSProperties : undefined} className={`report-item ${metric ? headline ? "headline" : t.id === lead?.id ? "lead-chart" : `support-chart${fullWidthSupport.has(t.id) ? " full-row" : ""}` : "authored-content"}`}>
+          return <article key={t.id} data-report-tile={t.id} style={headline ? { "--headline-span": headlineSpans.get(t.id) } as CSSProperties : undefined} className={`report-item ${metric ? headline ? "headline" : t.id === lead?.id ? "lead-chart" : `support-chart${fullWidthSupport.has(t.id) ? " full-row" : ""}` : "authored-content"}`}>
             {t.kind === "filter" ? <div className="report-filter-note"><strong>{t.title ?? spec.filters?.find(f => f.id === t.filterId)?.label ?? "Dashboard filter"}</strong><p>Selections are captured in each chart’s scope below. Change them on the dashboard.</p></div>
               : <div className={`report-tile ${metric ? headline ? "headline-tile" : inferChart(model, t) === "table" ? "table-tile" : "chart-tile" : "content-tile"}`} style={t.kind === "image" ? { height: Math.max(180, t.layout.h) } : undefined}>
                 <TileBoundary label={t.title ?? t.metrics.join(", ")} onError={message => onReadiness(t.id, { status: "error", message })}>

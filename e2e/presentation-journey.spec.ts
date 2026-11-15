@@ -13,6 +13,36 @@ async function open(page: Page, spec: DashboardSpec) {
   return id;
 }
 
+test("four headline cards form balanced pairs in Story and Infographic, then stack on narrow screens", async ({ page }, info) => {
+  await open(page, { title: `Balanced headlines ${crypto.randomUUID()}`, tiles:
+    ["ending_mrr", "nrr", "cac", "ltv_cac_ratio"].map((metric, i) => ({ id: `headline-${i}`, title: metric,
+      metrics: [metric], dimensions: ["month:fct_saas_monthly.month"], chart: "kpi" as const,
+      layout: { x: 24 + i * 260, y: 24, w: 250, h: 200 } })),
+  });
+  await page.getByRole("button", { name: "Review and share", exact: true }).click();
+  const review = page.getByRole("dialog", { name: "Review and share" });
+  for (const mode of ["Story", "Infographic"]) {
+    await review.getByRole("button", { name: mode, exact: true }).click();
+    await expect(review.getByRole("button", { name: `Export ${mode.toLowerCase()} as PNG` })).toBeEnabled();
+    const cards = await review.locator(".report-item.headline").evaluateAll(nodes => nodes.map(n => {
+      const r = n.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width };
+    }));
+    expect(cards).toHaveLength(4);
+    expect(cards[0].y).toBeCloseTo(cards[1].y, 0);
+    expect(cards[2].y).toBeCloseTo(cards[3].y, 0);
+    expect(cards[2].y).toBeGreaterThan(cards[0].y);
+    expect(cards[2].x).toBeCloseTo(cards[0].x, 0);
+    expect(cards[3].x).toBeCloseTo(cards[1].x, 0);
+    expect(cards.every(c => Math.abs(c.width - cards[0].width) < 1)).toBe(true);
+  }
+  const download = page.waitForEvent("download");
+  await review.getByRole("button", { name: "Export infographic as PNG" }).click();
+  await (await download).saveAs(info.outputPath("balanced-headlines.png"));
+  await page.setViewportSize({ width: 760, height: 1000 });
+  const narrow = await review.locator(".report-item.headline").evaluateAll(nodes => nodes.map(n => ({ x: n.getBoundingClientRect().x, y: n.getBoundingClientRect().y })));
+  expect(narrow.every((c, i) => !i || c.y > narrow[i - 1].y && Math.abs(c.x - narrow[0].x) < 1)).toBe(true);
+});
+
 test("presentation keeps chart references and consolidates evidence across sections", async ({ page }, info) => {
   await page.route("**/api/query", route => {
     const q = route.request().postDataJSON();

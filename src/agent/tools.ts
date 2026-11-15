@@ -5,6 +5,7 @@ import { dashboardSchema, canvasSchema, filterSchema, profileFieldsSchema } from
 import { z } from "zod";
 import { LAYOUTS, LAYOUT_NAMES } from "../canvas/layouts.ts";
 import { reviewedModel } from "../semantic/model.ts";
+import { seriesSummarySchema, summarizeMetricSeries } from "../suggest/seriesSummary.ts";
 
 /**
  * The tool surface any agent gets -- an MCP client attached over stdio
@@ -120,8 +121,12 @@ export const TOOLS: ToolSpec[] = [
       limit: z.number().optional(),
       source: sourceSpec,
       principal: principalSpec,
+      summarize: seriesSummarySchema.optional().describe("Request calculated threshold counts and range for one metric over a stated calendar window. Use this before writing 'X of Y periods above/below a reference'; do not count a series by eye."),
     },
-    handler: async ({ source, principal, ...tile }) => api("/api/query?evidence=1", { method: "POST", body: tile, source, principal }),
+    handler: async ({ source, principal, summarize, ...tile }) => {
+      const result = await api("/api/query?evidence=1", { method: "POST", body: tile, source, principal });
+      return summarize ? { ...result, seriesSummary: summarizeMetricSeries({ ...tile, dimensions: tile.dimensions ?? [] }, result, summarize, result.evidence?.reportingCalendar) } : result;
+    },
   },
   {
     name: "list_dashboards",
