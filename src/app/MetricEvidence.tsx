@@ -14,10 +14,10 @@ export function findingTitle(finding: DataFinding, model?: Model): string {
     ? finding.title.slice(0, -match![1].length) + metric.label : finding.title;
 }
 
-export function DataFindings({ findings, model }: { findings: DataFinding[]; model?: Model }) {
-  return <ul className="data-findings">{[...findings].sort((a, b) => Number(isScopeNote(a)) - Number(isScopeNote(b))).map(f => <li key={f.id} className={isScopeNote(f) ? "scope-note" : "quality-finding"}>
+export function DataFindings({ findings, model, compact = false }: { findings: DataFinding[]; model?: Model; compact?: boolean }) {
+  return <ul className={`data-findings${compact ? " compact" : ""}`}>{[...findings].sort((a, b) => Number(isScopeNote(a)) - Number(isScopeNote(b))).map(f => <li key={f.id} className={isScopeNote(f) ? "scope-note" : "quality-finding"}>
     <span className="finding-category">{isScopeNote(f) ? "Reporting scope" : "Review before interpreting"}</span>
-    <h4>{findingTitle(f, model)}</h4><p>{f.evidence}</p>{f.impact && <p><strong>Why it matters:</strong> {f.impact}</p>}<p><strong>What to check:</strong> {f.nextStep}</p>
+    <h4>{findingTitle(f, model)}</h4><p className="finding-evidence">{f.evidence}</p>{f.impact && <p><strong>Why it matters:</strong> {f.impact}</p>}<p><strong>What to check:</strong> {f.nextStep}</p>
   </li>)}</ul>;
 }
 

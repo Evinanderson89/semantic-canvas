@@ -1519,6 +1519,10 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .report-note-charts{font-size:11px;line-height:1.5;color:var(--ink-2);margin:16px 0 4px}
 .report-section-notes .data-findings{margin:4px 0 14px;font-size:11px;line-height:1.6}
 .report-section-notes .data-findings h4{font-size:12px}
+.report-section-notes .data-findings.compact>li{padding:2px 0 2px 12px;border-width:0 0 0 2px;border-radius:0;background:transparent}
+.report-section-notes .data-findings.compact h4{display:inline;margin-right:6px}
+.report-section-notes .data-findings.compact .finding-evidence{display:inline}
+.report-section-notes .data-findings.compact p{margin:4px 0 0}
 .impact-removed-evidence{padding:12px;border-left:3px solid var(--warn,#a36b19);background:var(--surface);margin:14px 0}
 .impact-removed-evidence h4{margin:0 0 8px}
 .impact-removed-evidence code{font-size:10px;color:var(--ink-2);overflow-wrap:anywhere}
