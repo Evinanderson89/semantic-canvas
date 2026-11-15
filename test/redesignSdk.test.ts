@@ -213,3 +213,20 @@ it("retains governed chart creation, filters and presentation in the compact gra
   expect((await run()).proposal).toEqual(proposal);
   expect(active).toEqual(before);
 });
+
+it("returns computed substitutions to the actual SDK before the assistant explains the proposal", async () => {
+  const replacement = { ...valid, reason: "Nothing is removed.", actions: [
+    { type: "query", id: "revenue", metrics: ["arpu"] },
+  ] };
+  const requests = provider([replacement, { endText: "Revenue is replaced by ARPU in this proposed chart." }]);
+  const before = structuredClone(active);
+  const result = await run();
+  const feedback = requests[1].messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : [])
+    .find((block: any) => block.type === "tool_result" && block.tool_use_id === "proposal-1");
+  const content = typeof feedback.content === "string" ? feedback.content : feedback.content.map((block: any) => block.text).join("");
+  const facts = JSON.parse(content);
+  expect(facts.metricChanges).toMatchObject({ removedMetrics: ["revenue"], substitutions: [{ id: "revenue", before: ["revenue"], after: ["arpu"] }] });
+  expect(facts.guidance).toContain("Do not claim all metrics are preserved");
+  expect(result.text).toContain("Revenue is replaced by ARPU");
+  expect(active).toEqual(before);
+});

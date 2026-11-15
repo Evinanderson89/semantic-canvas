@@ -92,7 +92,7 @@ test("redesign previews monthly categorical bars and mixed-unit line labels", as
     const mrr = tiles.find((t: any) => t.metrics.includes("new_mrr"));
     const traffic = tiles.find((t: any) => t.metrics.includes("web_sessions"));
     return route.fulfill({ json: { proposal: {
-      title: "Monthly comparisons", reason: "Compare movements through time and distinguish rate from volume.",
+      title: "Monthly comparisons", reason: "Nothing is removed.",
       actions: [
         { type: "query", id: mrr.id, metrics: ["net_new_mrr"], dimensions: ["month:movement_date", "movement_type"] },
         { type: "chart", id: mrr.id, chart: "bar" },
@@ -117,4 +117,18 @@ test("redesign previews monthly categorical bars and mixed-unit line labels", as
   await expect(removed).toContainText("New MRR (USD)");
   await expect(removed).not.toContainText("Web sessions");
   await expect(removed).toBeVisible();
+  const substitutions = dialog.getByRole("region", { name: "Metric substitutions" });
+  await expect(substitutions).toBeVisible();
+  await expect(substitutions).toContainText("Before: New MRR (USD)");
+  await expect(substitutions).toContainText("Proposed: Net new MRR (USD)");
+  const rationale = dialog.locator("details").filter({ has: page.getByText("AI design rationale", { exact: true }) });
+  await expect(rationale).not.toHaveAttribute("open", "");
+  await expect(dialog.getByText("Nothing is removed.", { exact: true })).not.toBeVisible();
+  expect(await dialog.getByRole("region", { name: "Verified proposal changes" }).evaluate(el => {
+    const rationale = el.parentElement!.querySelector(":scope > details")!;
+    return !!(el.compareDocumentPosition(rationale) & Node.DOCUMENT_POSITION_FOLLOWING);
+  })).toBe(true);
+  await rationale.locator("summary").click();
+  await expect(rationale).toContainText("Nothing is removed.");
+
 });

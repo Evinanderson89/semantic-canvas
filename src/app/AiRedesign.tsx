@@ -102,7 +102,7 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, onCon
         {busy && <div role="status"><p>Reviewing the canvas and governed metrics, then preparing changes you can inspect.</p><button className="link" onClick={() => { request.current?.abort(); setBusy(false); }}>Cancel generation</button></div>}
         {error && <div><p className="err" role="alert">{error}</p>{canConfigure && <button className="review-action" onClick={onConfigure}>Check AI connection</button>}</div>}
         {explanation && <div className="ai-redesign-explanation">{renderMarkdown(explanation)}</div>}
-        {preview && <div className="ai-redesign-explanation"><h3>{preview.proposal.title}</h3><p>{preview.proposal.reason}</p>{renderMarkdown(preview.explanation)}{!stale && impact && <RedesignImpact impact={impact} />}</div>}
+        {preview && <div className="ai-redesign-explanation"><h3>{preview.proposal.title}</h3>{!stale && impact && <RedesignImpact impact={impact} />}<details><summary>AI design rationale</summary><p>{preview.proposal.reason}</p>{renderMarkdown(preview.explanation)}</details></div>}
         {!preview && !explanation && <div className="ai-redesign-imagine"><h3>More than moving boxes</h3><p>Turn an unhelpful breakdown into a trend. Put related evidence together. Bring the key numbers into focus.</p><small>The AI will propose changes based on your actual canvas and available metrics.</small></div>}
       </section>
       <section className="ai-redesign-preview" aria-label="Dashboard redesign preview">

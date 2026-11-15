@@ -1,3 +1,4 @@
+import { proposalMetricChanges } from "../canvas/metricChanges.ts";
 import type { DashboardSpec, FilterSpec, TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
 import { metricOf } from "../semantic/model.ts";
@@ -64,16 +65,17 @@ export function redesignImpact(before: DashboardSpec, after: DashboardSpec, mode
     }
     if (fields.length) changes.push({ id, title: b?.title || a?.title || b?.text || a?.text || b?.metrics.join(", ") || a?.metrics.join(", ") || id, status: !a ? "added" : !b ? "removed" : "changed", changes: fields });
   }
+  const metricChanges = proposalMetricChanges(before, after);
+  const metricLabel = (name: string) => ({ name, label: metricOf(model, name)?.label ?? name });
   return {
+    substitutions: metricChanges.substitutions.map(change => ({ ...change, before: change.before.map(metricLabel), after: change.after.map(metricLabel) })),
     tiles: changes,
     added: changes.filter(t => t.status === "added").length,
     removed: changes.filter(t => t.status === "removed").length,
     analysisChanged: changes.filter(t => t.status === "changed" && t.changes.some(c => c.analytical)).length,
     presentationChanged: changes.filter(t => t.status === "changed" && t.changes.some(c => !c.analytical)).length,
     metrics: [...new Set(after.tiles.filter(metricTile).flatMap(t => t.metrics))],
-    removedMetrics: [...new Set(before.tiles.filter(metricTile).flatMap(t => t.metrics))]
-      .filter(name => !after.tiles.some(t => metricTile(t) && t.metrics.includes(name)))
-      .map(name => ({ name, label: metricOf(model, name)?.label ?? name })),
+    removedMetrics: metricChanges.removedMetrics.map(metricLabel),
     dashboardTitle: before.title !== after.title ? { before: before.title, after: after.title } : null,
     dashboardDescription: (before.description ?? "") !== (after.description ?? "")
       ? { before: before.description ?? "", after: after.description ?? "" } : null,
