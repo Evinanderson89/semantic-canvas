@@ -1,6 +1,6 @@
 import type { DashboardSpec, FilterSpec, TileSpec } from "../compiler/spec.ts";
 import type { CSSProperties } from "react";
-import { useId } from "react";
+import { useId, useRef, useState } from "react";
 import { sectionsOf } from "../canvas/layouts.ts";
 import { inferChart } from "../suggest/chartRules.ts";
 import type { Model } from "../semantic/model.ts";
@@ -12,6 +12,7 @@ import { DataFindings, describeFilter, findingTitle } from "./MetricEvidence.tsx
 import { visibleQuery } from "./query.ts";
 import { reportFindings } from "./reportFindings.ts";
 import { isScopeNote } from "../suggest/resultQuality.ts";
+import { downloadSvg } from "./export.ts";
 
 export type PresentationMode = "dashboard" | "story" | "infographic";
 export const PRESENTATIONS: { id: PresentationMode; label: string; description: string }[] = [
@@ -27,6 +28,8 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
   checks: Record<string, Readiness>; onReadiness: (id: string, state: Readiness) => void;
 }) {
   const notesId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [posterTheme, setPosterTheme] = useState<"broadsheet" | "blueprint" | "dark">("broadsheet");
   const isMetric = (t: TileSpec) => (t.kind ?? "metric") === "metric";
   const notes = reportFindings(spec.tiles.filter(t => isMetric(t) && checks[t.id]?.dataFindings?.length && checks[t.id].status !== "checking").map(t => {
     const query = visibleQuery(model, t, [...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])], drills[t.id]);
@@ -35,7 +38,44 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
         rowRules: checks[t.id].rowRules, exceptions: scopeWarnings[t.id] ?? [] } };
   }));
   const noteId = (number: number) => `${notesId}-${number}`;
-  return <div className={`report-presentation ${mode}`}>
+  return <div ref={rootRef} className={`report-presentation ${mode}`} data-poster-theme={posterTheme}>
+    {spec.tiles.length > 0 && <div className="report-broadside-masthead">
+      <div className="report-broadside-kicker">
+        <span>{mode === "infographic" ? "EXECUTIVE BROADSIDE INFOGRAPHIC" : "BROADSIDE NARRATIVE STORY"}</span>
+        <span aria-hidden="true">·</span>
+        <span>{model.name}</span>
+      </div>
+      <div className="report-broadside-actions" data-export-ignore>
+        <div className="report-broadside-themes" role="group" aria-label="Poster theme">
+          {([
+            { id: "broadsheet", label: "Warm Broadsheet" },
+            { id: "blueprint", label: "Cobalt Blueprint" },
+            { id: "dark", label: "Boardroom Dark" },
+          ] as const).map(theme => (
+            <button
+              key={theme.id}
+              type="button"
+              className="report-theme-btn"
+              aria-pressed={posterTheme === theme.id}
+              onClick={() => setPosterTheme(theme.id)}
+            >
+              {theme.label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="report-svg-btn"
+          onClick={() => {
+            if (rootRef.current) {
+              downloadSvg(`${(spec.title || mode).toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${mode}.svg`, rootRef.current);
+            }
+          }}
+        >
+          Download Vector SVG
+        </button>
+      </div>
+    </div>}
     {sectionsOf(spec.tiles).filter(group => group.some(t => t.kind !== "heading")).map((group, index) => {
       const heading = group[0].kind === "heading" ? group[0] : null;
       const content = heading ? group.slice(1) : group;
@@ -105,6 +145,11 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
         <DataFindings findings={[note.finding]} model={model} compact />
       </section>)}
     </aside>}
+    {spec.tiles.length > 0 && <footer className="report-broadside-colophon">
+      <span>Model: {model.name} ({model.source})</span>
+      <span>Metrics verified: {spec.tiles.filter(t => (t.kind ?? "metric") === "metric").length} chart tiles</span>
+      <span>Scope & honesty notes: {notes.length} consolidated</span>
+    </footer>}
     {!spec.tiles.length && <p>Add charts or commentary to create a presentation.</p>}
   </div>;
 }
