@@ -9,18 +9,51 @@ const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 /** Absolute paths work even when Claude starts in a different directory. No server secrets are exported. */
 export function claudeSetup(port: number) {
   const require = createRequire(import.meta.url);
+  const url = `http://127.0.0.1:${port}`;
   const entry = {
     command: process.execPath,
     args: ["--import", pathToFileURL(require.resolve("tsx/esm")).href, fileURLToPath(new URL("./server.ts", import.meta.url))],
-    env: { SEMANTIC_CANVAS_URL: `http://127.0.0.1:${port}` },
+    env: { SEMANTIC_CANVAS_URL: url },
   };
-  const code = { type: "stdio", ...entry };
+  const code = { type: "stdio" as const, ...entry };
+  const mcpServers = { "semantic-canvas": entry };
+  const configToml = [
+    "[mcp_servers.semantic-canvas]",
+    `command = ${JSON.stringify(entry.command)}`,
+    `args = [${entry.args.map(arg => JSON.stringify(arg)).join(", ")}]`,
+    `env = { SEMANTIC_CANVAS_URL = ${JSON.stringify(url)} }`,
+  ].join("\n");
+  const codexCommand = [
+    "codex",
+    "mcp",
+    "add",
+    "semantic-canvas",
+    "--env",
+    quote(`SEMANTIC_CANVAS_URL=${url}`),
+    "--",
+    quote(entry.command),
+    ...entry.args.map(quote),
+  ].join(" ");
+  const genericCommand = [
+    "env",
+    ...Object.entries(entry.env).map(([key, value]) => `${key}=${value}`),
+    entry.command,
+    ...entry.args,
+  ].map(quote).join(" ");
   return {
     available: true as const,
-    desktop: { mcpServers: { "semantic-canvas": entry } },
+    desktop: { mcpServers },
     code,
     // POSIX shell syntax. Windows users can use the project JSON instead.
     command: `claude mcp add-json --scope user semantic-canvas ${quote(JSON.stringify(code))}`,
+    clients: {
+      codex: { configToml, command: codexCommand },
+      cursor: { mcpJson: { mcpServers } },
+      antigravity: { mcpConfigJson: { mcpServers } },
+      vscode: { mcpJson: { servers: { "semantic-canvas": code } } },
+      gemini: { settingsJson: { mcpServers } },
+      generic: { command: genericCommand, mcpJson: { mcpServers } },
+    },
   };
 }
 

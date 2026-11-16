@@ -68,7 +68,7 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, onCon
       const next = validateRedesign(spec, canvas, result.proposal, model, activeTabId);
       setPreview({ ...next, proposal: result.proposal, before: spec, expected: fingerprint(spec, canvas), context: snapshot, explanation: result.text || "",
         // Recalculated here from the documents and the review's query ledger, so the warning does not depend on the server reporting it.
-        rationaleWarnings: rationaleIssues(spec, next.spec, result.proposal.reason, Array.isArray(result.research) ? result.research : result.proposal ? [] : undefined) });
+        rationaleWarnings: rationaleIssues(spec, next.spec, [result.proposal.reason, result.text].filter(Boolean).join("\n\n"), Array.isArray(result.research) ? result.research : result.proposal ? [] : undefined) });
       setView("after");
     } catch (e: any) { if (!controller.signal.aborted) setError(aiError(e)); }
     finally { if (request.current === controller) setBusy(false); }

@@ -17,6 +17,7 @@ import type { FilterSpec } from "../compiler/spec.ts";
 import { prepareStoryAddition } from "../suggest/storyAdditions.ts";
 import { requireAiConfiguration } from "./configuration.ts";
 import { redesignToolSchema, strictToolSchema } from "./redesignSchema.ts";
+import { createCompatStructuredJson, isCompatSchemaError, runCompatToolPhase, type CompatTool } from "./provider.ts";
 
 /**
  * The embedded in-app agent: the AI itself, living behind the same "ai" port
@@ -109,12 +110,22 @@ export async function chat(
   mode: "chat" | "redesign" = "chat",
 ): Promise<{ text: string; messages: ChatMessage[]; proposal?: CanvasProposal; research?: ResearchQuery[]; rationaleWarnings?: RationaleIssue[]; providerSchemaFallback?: true }> {
   requireAiConfiguration(cfg);
-  const client = new Anthropic({ apiKey: cfg.apiKey });
+  const client = cfg.provider === "anthropic" ? new Anthropic({ apiKey: cfg.apiKey }) : null;
   const messages: ChatMessage[] = [...history, { role: "user", content: message }];
   let providerSchemaFallback = false;
-  const runPhase = async (params: Parameters<typeof client.beta.messages.toolRunner>[0]) => {
+  const runPhase = async (params: Parameters<Anthropic["beta"]["messages"]["toolRunner"]>[0]): Promise<{ runner: { params: Parameters<Anthropic["beta"]["messages"]["toolRunner"]>[0] }; message: { content: any[]; stop_reason: string | null } }> => {
     const locallyValidated = (tools: typeof params.tools) => tools.map(tool => ({ ...tool, strict: false }));
     if (providerSchemaFallback) params = { ...params, tools: locallyValidated(params.tools) };
+    if (!client) {
+      try {
+        return await runCompatToolPhase(cfg, params as unknown as Parameters<typeof runCompatToolPhase>[1], ctx.signal) as unknown as { runner: { params: Parameters<Anthropic["beta"]["messages"]["toolRunner"]>[0] }; message: { content: any[]; stop_reason: string | null } };
+      } catch (error) {
+        if (providerSchemaFallback || !params.tools.some(tool => "strict" in tool && tool.strict) || !isCompatSchemaError(error)) throw error;
+        ctx.signal?.throwIfAborted();
+        providerSchemaFallback = true;
+        return await runCompatToolPhase(cfg, { ...params, tools: locallyValidated(params.tools) } as unknown as Parameters<typeof runCompatToolPhase>[1], ctx.signal) as unknown as { runner: { params: Parameters<Anthropic["beta"]["messages"]["toolRunner"]>[0] }; message: { content: any[]; stop_reason: string | null } };
+      }
+    }
     let runner = client.beta.messages.toolRunner(params, { signal: ctx.signal });
     try { return { runner, message: await runner }; }
     catch (error) {
@@ -212,6 +223,9 @@ export async function chat(
     .filter((b: any) => b.type === "text")
     .map((b: any) => b.text)
     .join("\n\n");
+  if (mode === "redesign" && active && proposal) {
+    rationaleWarnings = rationaleIssues(active.spec, validateRedesign(active.spec, active.canvas, proposal, active.model, active.activeTabId).spec, [proposal.reason, text].filter(Boolean).join("\n\n"), research);
+  }
 
   return { text, proposal, messages: [...messages, { role: "assistant", content: text || "A proposal is ready for review." }], ...(research.length ? { research } : {}), ...(proposal && rationaleWarnings.length ? { rationaleWarnings } : {}), ...(providerSchemaFallback ? { providerSchemaFallback: true as const } : {}) };
 }
@@ -268,14 +282,23 @@ function describeTile(tile: ExplainTile, task: string): string {
 async function oneShot(cfg: AiConfig, system: string, tools: ToolSpec[], userText: string, ctx: ToolContext): Promise<string> {
   ctx.signal?.throwIfAborted();
   requireAiConfiguration(cfg);
-  const client = new Anthropic({ apiKey: cfg.apiKey });
-  const finalMessage = await client.beta.messages.toolRunner({
-    model: cfg.model,
-    max_tokens: 1024,
-    system,
-    tools: buildTools(ctx, tools),
-    messages: [{ role: "user", content: userText }],
-  }, { signal: ctx.signal });
+  const builtTools = buildTools(ctx, tools);
+  const messages: ChatMessage[] = [{ role: "user", content: userText }];
+  const finalMessage = cfg.provider === "anthropic"
+    ? await new Anthropic({ apiKey: cfg.apiKey }).beta.messages.toolRunner({
+        model: cfg.model,
+        max_tokens: 1024,
+        system,
+        tools: builtTools,
+        messages,
+      }, { signal: ctx.signal })
+    : (await runCompatToolPhase(cfg, {
+        model: cfg.model,
+        max_tokens: 1024,
+        system,
+        tools: builtTools as unknown as CompatTool[],
+        messages,
+      }, ctx.signal)).message;
   ctx.signal?.throwIfAborted();
   return finalMessage.content
     .filter((b: any) => b.type === "text")
@@ -399,7 +422,8 @@ export async function suggestDashboardStory(
 ): Promise<DashboardStorySuggestion> {
   requireAiConfiguration(cfg);
   if (!tiles.length) throw new Error("no tiles to look at");
-  const client = new Anthropic({ apiKey: cfg.apiKey });
+  const client = cfg.provider === "anthropic" ? new Anthropic({ apiKey: cfg.apiKey }) : null;
+  const compatJsonSchema = client ? null : strictToolSchema(z.toJSONSchema(dashboardStorySchema, { reused: "inline" })) as Record<string, unknown>;
   const tileText = tiles.map((t) =>
     `${t.id}: "${t.title}" [${t.kind}] -- metrics: ${t.metrics.join(", ") || "(none)"}; dimensions: ${t.dimensions.join(", ") || "(none)"}; filters: ${JSON.stringify(t.where ?? [])}; comparison: ${t.compare ?? "none"}; geometry: ${JSON.stringify(t.layout)}; section: ${t.section ?? "none"}; pinned: ${!!t.pinned}; text: ${t.text ?? ""}`,
   ).join("\n");
@@ -412,16 +436,32 @@ export async function suggestDashboardStory(
   // refusals can interrupt a response. Never apply a partial review.
   for (let attempt = 0; attempt < 2; attempt++) {
     ctx.signal?.throwIfAborted();
-    const message = await client.messages.create({
-      model: cfg.model, max_tokens: attempt === 0 ? 4096 : 8192,
-      system: STORY_SYSTEM(ctx),
-      output_config: { format: zodOutputFormat(dashboardStorySchema) },
-      messages: [{ role: "user", content: userText + (attempt ? "\nThe previous response was incomplete or unusable. Return a complete, concise review matching the required schema. Keep notes brief." : "") }],
-    }, { signal: ctx.signal });
+    const promptText = userText + (attempt ? "\nThe previous response was incomplete or unusable. Return a complete, concise review matching the required schema. Keep notes brief." : "");
+    let stopReason: string | null | undefined;
+    let text = "";
+    if (client) {
+      const message = await client.messages.create({
+        model: cfg.model, max_tokens: attempt === 0 ? 4096 : 8192,
+        system: STORY_SYSTEM(ctx),
+        output_config: { format: zodOutputFormat(dashboardStorySchema) },
+        messages: [{ role: "user", content: promptText }],
+      }, { signal: ctx.signal });
+      stopReason = message.stop_reason;
+      text = message.content.filter(b => b.type === "text").map(b => b.text).join("").trim();
+    } else {
+      const compat = await createCompatStructuredJson(cfg, {
+        model: cfg.model,
+        max_tokens: attempt === 0 ? 4096 : 8192,
+        system: STORY_SYSTEM(ctx),
+        userText: promptText,
+        jsonSchema: compatJsonSchema!,
+      }, ctx.signal);
+      stopReason = compat.stop_reason;
+      text = compat.text;
+    }
     ctx.signal?.throwIfAborted();
-    if (message.stop_reason === "refusal") throw new Error("The AI provider declined this review. Try a different review goal.");
-    if (message.stop_reason === "max_tokens") continue;
-    const text = message.content.filter(b => b.type === "text").map(b => b.text).join("").trim();
+    if (stopReason === "refusal") throw new Error("The AI provider declined this review. Try a different review goal.");
+    if (stopReason === "max_tokens") continue;
     try {
       const result = dashboardStorySchema.safeParse(JSON.parse(text));
       if (result.success) { parsed = result.data; break; }

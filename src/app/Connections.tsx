@@ -126,7 +126,7 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
       )}
 
       <h4 className="ex-h">AI agent</h4>
-      <p className="tbl-body-p">Enable story review, explanations, and reference imports with an Anthropic API key. Credentials stay on your server.</p>
+      <p className="tbl-body-p">Enable story review, explanations, and reference imports with an Anthropic, OpenAI, Gemini, or OpenAI-compatible API key. Credentials stay on your server.</p>
       <AiAgentSection />
       </>}
 
@@ -163,8 +163,14 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
   );
 }
 
-const aiStatusSchema = z.object({ configured: z.boolean(), provider: z.string().optional(), model: z.string().optional(), issue: z.string().nullable().optional(), canSetKey: z.boolean().optional() });
+const aiStatusSchema = z.object({ configured: z.boolean(), provider: z.string().optional(), model: z.string().optional(), baseUrl: z.string().optional(), issue: z.string().nullable().optional(), canSetKey: z.boolean().optional() });
 type AiStatus = z.infer<typeof aiStatusSchema>;
+const DEFAULT_AI_MODELS: Record<string, string> = {
+  anthropic: "claude-opus-5",
+  openai: "gpt-5.4",
+  gemini: "gemini-2.5-pro",
+  "openai-compatible": "gpt-4o",
+};
 
 /**
  * Tables Ingest registered on this source (docs/connected-canvas.md): each is a
@@ -212,6 +218,9 @@ function ConnectedTables({ sourceId, onChange }: { sourceId: string; onChange: (
 function AiAgentSection() {
   const [status, setStatus] = useState<AiStatus | null>(null);
   const [editing, setEditing] = useState(false);
+  const [provider, setProvider] = useState("anthropic");
+  const [model, setModel] = useState("claude-opus-5");
+  const [baseUrl, setBaseUrl] = useState("");
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -224,7 +233,13 @@ function AiAgentSection() {
     fetch("/api/agent/status", { signal: controller.signal }).then(readResponse).then(value => {
       const parsed = aiStatusSchema.safeParse(value);
       if (!parsed.success) throw new Error("The server returned an invalid AI status. Try loading it again.");
-      if (!controller.signal.aborted) setStatus(parsed.data);
+      if (!controller.signal.aborted) {
+        setStatus(parsed.data);
+        const p = parsed.data.provider ?? "anthropic";
+        setProvider(p);
+        setModel(parsed.data.model ?? (DEFAULT_AI_MODELS[p] ?? "claude-opus-5"));
+        setBaseUrl(parsed.data.baseUrl ?? "");
+      }
     }).catch(e => { if (!controller.signal.aborted) setStatusError(String(e?.message ?? e)); });
     return () => controller.abort();
   }, [statusAttempt]);
@@ -234,9 +249,20 @@ function AiAgentSection() {
     setError(null);
     setBusy(true);
     try {
+      const defaultProvider = status?.provider ?? "anthropic";
+      const defaultModel = status?.model ?? (DEFAULT_AI_MODELS[defaultProvider] ?? "claude-opus-5");
+      const defaultBaseUrl = status?.baseUrl ?? "";
+      const body = provider === defaultProvider && model === defaultModel && baseUrl.trim() === defaultBaseUrl
+        ? { apiKey: key }
+        : {
+            apiKey: key,
+            provider,
+            model: model.trim(),
+            ...(provider === "openai-compatible" || baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
+          };
       const r = await fetch("/api/agent/key", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ apiKey: key }),
+        body: JSON.stringify(body),
       });
       await readResponse(r);
       setKey("");
@@ -310,9 +336,40 @@ function AiAgentSection() {
       {editing && (
         <form className="cform" onSubmit={save}>
           <div className="cform-grid">
+            <label className="ctl">
+              <span>Provider</span>
+              <select aria-label="Provider" disabled={busy} value={provider}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        setProvider(next);
+                        setModel(DEFAULT_AI_MODELS[next] ?? "claude-opus-5");
+                        if (next !== "openai-compatible") setBaseUrl("");
+                      }}>
+                <option value="anthropic">Anthropic</option>
+                <option value="openai">OpenAI</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="openai-compatible">OpenAI-compatible</option>
+              </select>
+            </label>
+            <label className="ctl">
+              <span>Model</span>
+              <input required disabled={busy} value={model}
+                     placeholder={DEFAULT_AI_MODELS[provider] ?? "claude-opus-5"}
+                     onChange={(e) => setModel(e.target.value)} />
+            </label>
+            {provider === "openai-compatible" && (
+              <label className="ctl span2">
+                <span>Base URL</span>
+                <input required disabled={busy} value={baseUrl}
+                       placeholder="https://your-gateway.example.com/v1"
+                       onChange={(e) => setBaseUrl(e.target.value)} />
+              </label>
+            )}
             <label className="ctl span2">
-              <span>Anthropic API key</span>
-              <input required type="password" disabled={busy} value={key} placeholder="sk-ant-…" autoFocus
+              <span>{provider === "anthropic" ? "Anthropic API key" : provider === "openai" ? "OpenAI API key" : provider === "gemini" ? "Gemini API key" : "API key"}</span>
+              <input required type="password" disabled={busy} value={key}
+                     placeholder={provider === "anthropic" ? "sk-ant-…" : provider === "openai" ? "sk-…" : provider === "gemini" ? "AIza…" : "Bearer token or API key"}
+                     autoFocus
                      onChange={(e) => setKey(e.target.value)} />
             </label>
           </div>
@@ -321,7 +378,13 @@ function AiAgentSection() {
               {busy ? "Validating…" : "Save"}
             </button>
             <button type="button" className="ghost" disabled={busy}
-                    onClick={() => { setEditing(false); setKey(""); setError(null); }}>Cancel</button>
+                    onClick={() => {
+                      setEditing(false); setKey(""); setError(null);
+                      const p = status.provider ?? "anthropic";
+                      setProvider(p);
+                      setModel(status.model ?? (DEFAULT_AI_MODELS[p] ?? "claude-opus-5"));
+                      setBaseUrl(status.baseUrl ?? "");
+                    }}>Cancel</button>
           </div>
         </form>
       )}

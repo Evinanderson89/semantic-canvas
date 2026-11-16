@@ -38,6 +38,39 @@ it("flags a cited row count that no query in the review returned, and skips the 
   expect(ids(bare, bare, "August 2026 was $20,001.26, up 3.7% across 764 customers in 2 sections.", research)).toEqual([]);
 });
 
+it("flags claims that metrics were added only on new tiles when an existing tile gained metrics, and keeps abbreviations in one sentence", () => {
+  const existingGainedMetric = {
+    ...bare,
+    tiles: [
+      tile({ id: "sample-mrr", title: "MRR overview", metrics: ["new_mrr", "churned_mrr"] }),
+      tile({ id: "new-card", title: "Net MRR", metrics: ["net_mrr"] }),
+    ],
+  };
+  const onlyNewTileGainedMetric = {
+    ...bare,
+    tiles: [
+      tile({ id: "sample-mrr", title: "MRR overview" }),
+      tile({ id: "new-card", title: "Net MRR", metrics: ["net_mrr"] }),
+    ],
+  };
+  for (const reason of [
+    "Added metrics appear only on new tiles.",
+    "New metrics were placed only on new charts.",
+    "We did not add any metrics to existing tiles.",
+  ]) {
+    expect(rationaleIssues(bare, existingGainedMetric, reason)).toEqual([
+      {
+        id: "existing-tile-additions",
+        message: expect.stringContaining("MRR overview"),
+      },
+    ]);
+    expect(ids(bare, onlyNewTileGainedMetric, reason)).toEqual([]);
+  }
+  // Abbreviations like e.g. or i.e. must not split a negated sentence in two.
+  expect(ids(bare, described, "There was no prior description, e.g. an old description was absent.")).toEqual([]);
+  expect(ids(bare, described, "No description existed before, i.e. the previous description was missing.")).toEqual([]);
+});
+
 it("flags the preserved failed live capture and leaves its accepted sibling alone", () => {
   const dir = "../../outputs/semantic-canvas-local/ai-acceptance-2026-11-15-explanation/";
   if (!existsSync(dir + "scope-and-coverage-2.response.json")) return; // evidence lives outside the repository

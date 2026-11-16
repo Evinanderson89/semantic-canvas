@@ -41,7 +41,7 @@ import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import YAML from "yaml";
 import { describe as describeSource, connectOne, expand, loadSources, type AiConfig, type Source } from "./sources/registry.ts";
-import { listDashboardVersions, loadDashboardVersion, exportLibrary, closeStore, deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources } from "./store/store.ts";
+import { listDashboardVersions, loadDashboardVersion, exportLibrary, closeStore, deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources, recordAuditEvent, listAuditEvents, type DashboardScope } from "./store/store.ts";
 import { initializeCoreLibrary, listCoreLibrary, saveLibraryFolder, deleteLibraryFolder, loadLibraryView, saveLibraryView, updateLibraryItem, deleteLibraryView } from "./store/store.ts";
 import { viewSaveSchema } from "./library/model.ts";
 import { loadRls, type RlsConfig } from "./security/rls.ts";
@@ -52,11 +52,11 @@ import { profileEvidence, PROFILE_REQUEST_TIMEOUT_MS } from "./suggest/profileEv
 import { z } from "zod";
 import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardStory,
          type ChatMessage, type DashboardTileSummary } from "./agent/loop.ts";
-import Anthropic from "@anthropic-ai/sdk";
+import { verifyAiProvider } from "./agent/provider.ts";
 import { claudeSetup, checkClaudeConnection, chatgptSetup, checkChatgptConnection } from "./mcp/connection.ts";
 import { chatgptScopeSchema } from "./mcp/chatgpt.ts";
 import { sourceReloader } from "./sources/reload.ts";
-import { managedAiKey } from "./sources/ai.ts";
+import { defaultModelForProvider, isSupportedAiProvider, managedAiKey } from "./sources/ai.ts";
 import { aiConfigurationIssue, aiProviderIssue, requireAiConfiguration } from "./agent/configuration.ts";
 
 const SOURCES_PATH = process.env.SOURCES_PATH ?? "./sources.yaml";
@@ -65,7 +65,16 @@ const PORT = Number(process.env.PORT || 5174);
 const QUERY_TIMEOUT_MS = loadQueryTimeoutMs();
 
 const auth = new CompanyAuth(await loadAuthConfig(), (event, data) => telemetry.log(event, data));
-const telemetry = createTelemetry();
+const rawTelemetry = createTelemetry();
+const telemetry = {
+  ...rawTelemetry,
+  log(event: string, fields: Record<string, unknown> = {}, level = "info") {
+    rawTelemetry.log(event, fields, level);
+    if (ready && (event.startsWith("audit.") || event.startsWith("auth."))) {
+      void recordAuditEvent(event, fields).catch(() => {});
+    }
+  },
+};
 let ready = false;
 let sources: Source[] = [];
 let defaultPrincipal: string | null = null;
@@ -226,6 +235,11 @@ app.get("/api/operations/status", safe((_req, res) => res.json({ ready, uptimeSe
 app.get("/api/operations/backup", safe(async (_req, res) => {
   res.setHeader("Content-Disposition", 'attachment; filename="semantic-canvas-library.json"');
   const backup = await exportLibrary(); telemetry.log("audit.library_exported", { actor: identityOf(_req)?.id, count: backup.dashboards.length }); res.json(backup);
+}));
+
+app.get("/api/operations/audit", safe(async (req, res) => {
+  const limit = req.query.limit !== undefined ? Number(req.query.limit) : 100;
+  res.json({ events: await listAuditEvents(limit) });
 }));
 
 app.post("/api/setup/model", safe(async (req, res) => {
@@ -896,7 +910,14 @@ app.get("/api/suggest", safe((req, res) =>
 const ISO2 = new Set(countryCodes.map(([alpha2]) => alpha2));
 const GEO_NAME = /(country|nation|region|state|province|city|market|territory|geo|iso)/i;
 
-const dashboardScope = (req: any) => ({ source: pick(req).id, model: modelOf(req).name });
+const dashboardScope = (req: any): DashboardScope => ({
+  source: pick(req).id,
+  model: modelOf(req).name,
+  actorId: identityOf(req)?.id,
+  actorName: identityOf(req)?.name,
+  actorRole: roleOf(req),
+  enforceLock: auth.config.mode !== "local",
+});
 app.get("/api/library", safe(async (req, res) => res.json(await listCoreLibrary(dashboardScope(req)))));
 app.post("/api/library/folders", safe(async (req, res) => res.json(await saveLibraryFolder(req.body, dashboardScope(req)))));
 app.delete("/api/library/folders/:id", safe(async (req, res) => res.json(await deleteLibraryFolder(req.params.id, z.number().int().positive().parse(req.body?.revision), dashboardScope(req)))));
@@ -919,7 +940,9 @@ app.post("/api/dashboards", safe(async (req, res) => {
   const model = modelOf(req);
   const issues = validateDashboard(model, document.spec);
   if (issues.length) return res.status(400).json({ issues });
-  res.json(await saveDashboard(document, dashboardScope(req)));
+  const saved = await saveDashboard(document, dashboardScope(req));
+  telemetry.log("audit.dashboard_saved", { actor: actorOf(req), id: document.id, revision: saved.revision, ...(document.locked !== undefined ? { locked: document.locked } : {}) });
+  res.json(saved);
 }));
 app.get("/api/dashboards/:id", safe(async (req, res) => {
   const d = await loadDashboard(req.params.id, dashboardScope(req));
@@ -934,7 +957,9 @@ app.get("/api/dashboards/:id/versions/:revision", safe(async (req, res) => {
 }));
 app.delete("/api/dashboards/:id", safe(async (req, res) => {
   const revision = z.number().int().positive().parse(req.body?.revision);
-  res.json(await deleteDashboard(req.params.id, dashboardScope(req), revision));
+  const out = await deleteDashboard(req.params.id, dashboardScope(req), revision);
+  telemetry.log("audit.dashboard_deleted", { actor: actorOf(req), id: req.params.id, revision });
+  res.json(out);
 }));
 app.post("/api/dashboards/:id/arrange", safe(async (req, res) => {
   const model = modelOf(req);
@@ -1031,14 +1056,15 @@ app.post("/api/reference/analyze", safe(async (req, res) => {
 }));
 
 app.get("/api/agent/status", safe((_req, res) => res.json({
-  configured: aiConfigurationIssue(ai) === null, provider: ai?.provider ?? "anthropic", model: ai?.model ?? "claude-opus-5",
+  configured: aiConfigurationIssue(ai) === null, provider: ai?.provider ?? "anthropic", model: ai?.model ?? defaultModelForProvider(ai?.provider ?? "anthropic"),
+  ...(ai?.baseUrl ? { baseUrl: ai.baseUrl } : {}),
   issue: aiConfigurationIssue(ai), canSetKey: aiProviderIssue(ai) === null,
 })));
 
 /**
  * Same idea as the Connections screen's "test before you save" sources form:
- * the key is checked against Anthropic before it's written anywhere. A
- * models.retrieve() call is a plain auth check -- no completion, no tokens
+ * the key is checked against the configured AI provider before it's written
+ * anywhere. A models lookup is a plain auth check -- no completion, no tokens
  * spent -- the same shape of "does this credential actually work" test a
  * trial source connection is. On success it goes to .env via the same
  * upsertEnv() a Snowflake credential does, never into sources.yaml.
@@ -1046,26 +1072,32 @@ app.get("/api/agent/status", safe((_req, res) => res.json({
 app.post("/api/agent/key", safe(async (req, res) => {
   const apiKey = String(req.body?.apiKey ?? "").trim();
   if (!apiKey) return res.status(400).json({ error: "apiKey is required" });
-  const provider = ai?.provider ?? "anthropic";
-  const model = ai?.model ?? "claude-opus-5";
-  const providerIssue = aiProviderIssue(ai);
+  const provider = req.body?.provider !== undefined ? String(req.body.provider).trim() : (ai?.provider ?? "anthropic");
+  const model = req.body?.model !== undefined
+    ? String(req.body.model).trim()
+    : (req.body?.provider !== undefined && provider !== ai?.provider && isSupportedAiProvider(provider)
+      ? defaultModelForProvider(provider)
+      : (ai?.model ?? defaultModelForProvider(provider)));
+  const baseUrl = req.body?.baseUrl !== undefined ? (String(req.body.baseUrl).trim() || undefined) : ai?.baseUrl;
+  const candidate: AiConfig = baseUrl ? { provider, model, apiKey, baseUrl } : { provider, model, apiKey };
+  const providerIssue = aiProviderIssue(candidate);
   if (providerIssue) return res.status(422).json({ error: providerIssue });
   try {
-    await new Anthropic({ apiKey }).models.retrieve(model);
+    await verifyAiProvider(candidate);
   } catch (e: any) {
-    const msg = e instanceof Anthropic.AuthenticationError ? "that key was rejected as invalid"
-      : e instanceof Anthropic.NotFoundError ? `the model "${model}" isn't available on this key`
-      : String(e?.message ?? e);
-    return res.status(422).json({ error: msg });
+    return res.status(422).json({ error: String(e?.message ?? e) });
   }
-  await upsertEnv(managedAiKey(apiKey), "AI agent");
+  await upsertEnv(
+    managedAiKey(apiKey, req.body?.provider || req.body?.model || req.body?.baseUrl !== undefined ? { provider, model, baseUrl } : undefined),
+    "AI agent",
+  );
   aiCredentialRevision++;
-  ai = { provider, model, apiKey };
-  res.json({ configured: true, provider, model });
+  ai = candidate;
+  res.json({ configured: true, provider, model, ...(baseUrl ? { baseUrl } : {}) });
 }));
 
 app.delete("/api/agent/key", safe(async (_req, res) => {
-  await upsertEnv(managedAiKey(""), "AI agent");
+  await upsertEnv(managedAiKey("", ai ? { provider: ai.provider, model: ai.model, baseUrl: ai.baseUrl } : undefined), "AI agent");
   aiCredentialRevision++;
   if (ai) ai = { ...ai, apiKey: "" };
   res.json({ configured: false });
