@@ -33,6 +33,17 @@ const formatSchema = z.object({
     finite.min(1).max(500)), textAlign: z.enum(["left", "center", "right"]),
   fontFamily: z.enum(["sans", "serif", "mono", "arial", "times", "courier", "verdana", "trebuchet", "palatino", "impact"]),
   textItalic: z.boolean(), textUnderline: z.boolean(), imageFit: z.enum(["contain", "cover"]),
+  targetValue: finite.nullable().optional(),
+  targetLabel: z.string().max(256).nullable().optional(),
+  annotations: z.array(z.object({
+    at: z.string().max(256),
+    label: z.string().max(256),
+    kind: z.enum(["policy", "launch", "note"]).optional(),
+  }).strict()).max(100).optional(),
+  referenceLines: z.array(z.object({
+    label: z.string().max(256),
+    value: finite,
+  }).strict()).max(50).optional(),
 }).partial().strict();
 export const querySchema = z.object({
   id: name.optional(), metrics: z.array(name).min(1).max(50),
@@ -86,6 +97,7 @@ export const canvasSchema = z.object({
   preset: name, width: finite.min(100).max(100000), height: finite.min(100).max(100000),
   snap: z.boolean(), grid: finite.positive().max(1000), locked: z.boolean(),
   background: z.string().max(128).optional(),
+  theme: z.enum(["broadside", "newsroom-dark", "swiss-grid", "studio-warm"]).optional(),
 }).strict();
 export const saveSchema = z.object({
   id: name, name: z.string().max(1000).optional(), spec: dashboardSchema,

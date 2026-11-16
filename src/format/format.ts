@@ -36,6 +36,7 @@ export interface FormatSpec {
   targetValue?: number | null;
   targetLabel?: string | null;
   annotations?: { at: string; label: string; kind?: "policy" | "launch" | "note" }[];
+  referenceLines?: { label: string; value: number }[];
 }
 
 export type EditorialThemeId = "broadside" | "newsroom-dark" | "swiss-grid" | "studio-warm";
@@ -141,12 +142,14 @@ export function buildChartAnnotations(
   format: Partial<FormatSpec> | undefined,
   domainValues?: unknown[],
 ): NormalizedChartAnnotations {
-  const rawTarget = format?.targetValue;
+  const firstRef = Array.isArray(format?.referenceLines) ? format.referenceLines[0] : undefined;
+  const rawTarget = format?.targetValue ?? firstRef?.value;
+  const rawLabel = format?.targetLabel ?? firstRef?.label;
   const target = typeof rawTarget === "number" && Number.isFinite(rawTarget)
     ? {
         value: rawTarget,
-        label: typeof format?.targetLabel === "string" && format.targetLabel.trim()
-          ? format.targetLabel.trim()
+        label: typeof rawLabel === "string" && rawLabel.trim()
+          ? rawLabel.trim()
           : `Target ${rawTarget}`,
         style: "dashed" as const,
       }

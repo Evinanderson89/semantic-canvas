@@ -40,7 +40,8 @@ import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
 import { applyLayout } from "../canvas/layouts.ts";
 import { prepareNewTile } from "../suggest/prepareTile.ts";
-import { downloadPng, slugForFilename } from "./export.ts";
+import { downloadPng, downloadSvg, slugForFilename } from "./export.ts";
+import { ExecutiveDigestDialog, YamlCodeSyncDialog, OperationsAuditDialog } from "./CommercialDrawers.tsx";
 import { metricOf, calendarOf, prettifyModelName, todayOf, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
@@ -101,6 +102,9 @@ export function App() {
   const [handoff, setHandoff] = useState(false);
   const [interview, setInterview] = useState(false);
   const [aiRedesign, setAiRedesign] = useState(false);
+  const [digestOpen, setDigestOpen] = useState(false);
+  const [yamlSyncOpen, setYamlSyncOpen] = useState(false);
+  const [opsAuditOpen, setOpsAuditOpen] = useState(false);
   // /modeler is the Modeler's own address on the gateway (registered as its own app); the SPA serves it like any path.
   const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library" | "modeler">(() => location.pathname.replace(/\/+$/, "") === "/modeler" ? "modeler" : "home");
   // ?source=&table= from an "Open in Semantic Canvas" link: read once, applied when the sources (then the model) are known, and stripped.
@@ -724,9 +728,22 @@ export function App() {
                   <button disabled={!session.canEdit} onClick={() => { close(); setDistributing(true); }}>Copy charts to…</button>
                   <button disabled={!session.canEdit || !dash.tiles.length} onClick={() => { close(); coreLibrary.refresh(); setSaveViewOpen(true); }}>Save a view to library</button>
                   <button disabled={!session.canEdit} onClick={() => { close(); setReferenceImport(true); }}>Recreate from reference</button>
+                  <button onClick={() => { close(); setDigestOpen(true); }}>Executive digest & verified brief</button>
+                  <button onClick={() => { close(); setYamlSyncOpen(true); }}>Dashboard-as-Code (YAML)</button>
                   <button disabled={exportingPng} onClick={() => { close(); exportDashboardPng(); }}>
                     {exportingPng ? "Exporting…" : "Export dashboard as PNG"}
                   </button>
+                  <button onClick={() => {
+                    close();
+                    const surface = scrollRef.current?.querySelector<HTMLElement>(".canvas-surface");
+                    if (!surface) return;
+                    try {
+                      downloadSvg(`${slugForFilename(dash?.title ?? "dashboard")}.svg`, surface);
+                    } catch (e: any) {
+                      setNotice(`Could not export SVG: ${e.message}`);
+                    }
+                  }}>Export dashboard as SVG</button>
+                  <button onClick={() => { close(); setOpsAuditOpen(true); }}>Operations, ROI & audit log</button>
                   <button onClick={() => { close(); navigator.clipboard?.writeText(JSON.stringify(book, null, 2)); }}>Copy dashboard spec</button>
                 </>}
               </Popover>
@@ -943,6 +960,9 @@ export function App() {
                     onOpenPicker={() => setPicking(true)} onFilter={() => setFilterEditing("new")} />
       )}
       {picking && <Picker model={model} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onAdd={(d) => addTile(d)} onClose={() => setPicking(false)} />}
+      {digestOpen && dash && <ExecutiveDigestDialog dashboardId={dashId} spec={dash} model={model} onClose={() => setDigestOpen(false)} />}
+      {yamlSyncOpen && dash && <YamlCodeSyncDialog dashboardId={dashId} spec={dash} canvas={canvas} onApply={(nextSpec, nextCanvas) => { compose(nextSpec, nextCanvas ?? canvas); setNotice("Dashboard YAML applied to canvas.", "success"); }} onClose={() => setYamlSyncOpen(false)} />}
+      {opsAuditOpen && <OperationsAuditDialog onClose={() => setOpsAuditOpen(false)} />}
     </div>
   );
 }

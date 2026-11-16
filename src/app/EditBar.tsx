@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Popover } from "./Popover.tsx";
-import { PRESETS, presetById, type CanvasSpec } from "../canvas/presets.ts";
+import { PRESETS, THEME_PRESETS, presetById, type CanvasSpec } from "../canvas/presets.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import { boundsOf, reorderLayers } from "../canvas/geometry.ts";
 import { applyBestLayout, pinnedContent } from "../canvas/layouts.ts";
@@ -119,6 +119,11 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
             <label className="ctl"><span>Height</span><CanvasDimension label="Canvas height" value={canvas.height}
               onChange={height => onCanvas({ ...canvas, height })} /></label>
           </div>}
+          <label className="ctl"><span>Theme</span>
+            <select aria-label="Canvas theme" value={canvas.theme ?? "broadside"} onChange={(e) => onCanvas({ ...canvas, theme: e.target.value as any })}>
+              {THEME_PRESETS.map((t) => <option key={t.id} value={t.id}>{t.label}{t.hint ? ` — ${t.hint}` : ""}</option>)}
+            </select>
+          </label>
           <div className="settings-row">
             <label><input type="checkbox" checked={canvas.snap} onChange={(e) => onCanvas({ ...canvas, snap: e.target.checked })} /> Snap to grid</label>
             <select aria-label="Grid spacing" value={canvas.grid} disabled={!canvas.snap}

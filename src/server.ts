@@ -55,7 +55,7 @@ import { requireScope, scopedField } from "./security/queryScope.ts";
 import { saveSchema, querySchema, tileSchema, dashboardSchema, canvasSchema, MAX_DOCUMENT_BYTES, profileRequestSchema } from "./compiler/schema.ts";
 import { inspectTileLineage } from "./compiler/lineage.ts";
 import { checkSourceHealth } from "./sources/health.ts";
-import { dashboardFromYaml, dashboardToYaml } from "./store/codeSync.ts";
+import { dashboardFromYaml, dashboardToYaml, diffDashboardSpecs } from "./store/codeSync.ts";
 import { profileEvidence, PROFILE_REQUEST_TIMEOUT_MS } from "./suggest/profileEvidence.ts";
 import { z } from "zod";
 import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardStory,
@@ -262,15 +262,33 @@ app.get("/api/operations/audit", safe(async (req, res) => {
 }));
 app.get("/api/operations/metrics", safe(async (_req, res) => {
   const auditEvents = await listAuditEvents(500);
-  res.json(computeGovernanceMetrics({
+  const base = computeGovernanceMetrics({
     auditEvents,
     counters: telemetry.counters,
     sources: sources.map(describeSource),
     uptimeSeconds: Math.floor(process.uptime()),
-  }));
+  });
+  res.json({
+    ...base,
+    activeUsers: base.uniqueActors,
+    totalQueries: telemetry.counters.queries ?? 0,
+    aiRedesigns: base.metricsProposed,
+    digestExports: base.lockedDashboardsSaved,
+    cacheHits: Math.max(0, (telemetry.counters.requests ?? 0) - (telemetry.counters.queries ?? 0)),
+  });
 }));
 app.get("/api/operations/manifest", safe((_req, res) => {
-  res.json(getReleaseManifest({ mode: auth.config.mode, aiProvider: ai?.provider ?? "anthropic" }));
+  const base = getReleaseManifest({ mode: auth.config.mode, aiProvider: ai?.provider ?? "anthropic" });
+  res.json({
+    ...base,
+    apiVersion: `v${base.libraryFormatVersion}`,
+    minGatewayVersion: base.compatibility.gatewayMinVersion,
+    capabilities: [
+      ...base.supportedAdapters,
+      ...base.supportedConnectors,
+      ...base.supportedAiProviders,
+    ],
+  });
 }));
 app.post("/api/operations/compatibility", safe((req, res) => {
   const result = verifySuiteCompatibility(req.body ?? {});
@@ -991,11 +1009,22 @@ app.post("/api/dashboards", safe(async (req, res) => {
 }));
 app.post("/api/dashboards/import-yaml", safe(async (req, res) => {
   const parsed = dashboardFromYaml(String(req.body?.yaml ?? ""), modelOf(req));
-  if (req.body?.save === true) {
+  const currentSpec = req.body?.currentSpec ? dashboardSchema.safeParse(req.body.currentSpec).data : undefined;
+  const rawDiff = diffDashboardSpecs(currentSpec ?? parsed.spec, parsed.spec);
+  const diff = {
+    ...rawDiff,
+    summary: {
+      addedTiles: rawDiff.addedTiles.length,
+      removedTiles: rawDiff.removedTiles.length,
+      modifiedTiles: rawDiff.modifiedTiles.length,
+      changedFilters: rawDiff.filterChanges.added.length + rawDiff.filterChanges.removed.length,
+    },
+  };
+  if (req.body?.save === true && !req.body?.dryRun) {
     const saved = await saveDashboard({ ...parsed, schemaVersion: 1, revision: Number(req.body?.revision ?? 0) }, dashboardScope(req));
-    return res.json({ ...parsed, ...saved });
+    return res.json({ ...parsed, ...saved, valid: true, diff });
   }
-  res.json(parsed);
+  res.json({ ...parsed, valid: true, diff });
 }));
 app.get("/api/dashboards/:id/yaml", safe(async (req, res) => {
   const d = await loadDashboard(req.params.id, dashboardScope(req));
@@ -1006,7 +1035,38 @@ app.post("/api/dashboards/:id/digest", safe(async (req, res) => {
   const d = await loadDashboard(req.params.id, dashboardScope(req));
   if (!d) return res.status(404).json({ error: "Dashboard not found in this source" });
   const digest = await generateExecutiveDigest(modelOf(req), connOf(req), d.spec, { role: roleOf(req), principal: principalOf(req)?.id ?? null });
-  res.json({ digest, markdown: formatDigestMarkdown(digest), bundle: exportVerifiedBriefBundle(d.spec, digest) });
+  const markdown = formatDigestMarkdown(digest);
+  const bundle = exportVerifiedBriefBundle(d.spec, digest);
+  const highlights = digest.kpis.map((k) => ({
+    tileId: k.tileId,
+    title: k.title,
+    metric: k.metric,
+    label: k.label,
+    formattedValue: k.formattedValue,
+    delta: k.delta,
+    percentChange: k.percentChange,
+    period: k.period,
+  }));
+  const headline = digest.headlineBullets[0] ?? `${digest.title} — Executive Digest`;
+  const html = `<article class="executive-digest"><h1>${digest.title} — Executive Digest</h1><p>${headline}</p><ul>${digest.headlineBullets.map((b) => `<li>${b}</li>`).join("")}</ul><footer>Verified SHA-256: <code>${bundle.signatureHash}</code></footer></article>`;
+  res.json({
+    digest: {
+      ...digest,
+      headline,
+      briefFingerprint: bundle.signatureHash,
+      highlights,
+      scopeNotes: digest.caveats,
+      markdown,
+      html,
+    },
+    headline,
+    briefFingerprint: bundle.signatureHash,
+    highlights,
+    scopeNotes: digest.caveats,
+    markdown,
+    html,
+    bundle,
+  });
 }));
 app.get("/api/dashboards/:id", safe(async (req, res) => {
   const d = await loadDashboard(req.params.id, dashboardScope(req));
@@ -1387,7 +1447,8 @@ app.post("/api/query/drivers", safe(async (req, res) => {
   if (!metric) return res.status(400).json({ error: "metric is required" });
   const model = modelOf(req), m = metricOf(model, metric);
   if (!m) return res.status(400).json({ error: `Unknown metric: ${metric}` });
-  const scope = requireScope(model, m.baseTable, rls, principalOf(req), identityOf(req)?.policy);
+  const who = principalOf(req) ?? (auth.config.mode === "local" && !req.header("x-sc-principal") ? (rls.principals[defaultPrincipal ?? "admin"] ?? null) : null);
+  const scope = requireScope(model, m.baseTable, rls, who, identityOf(req)?.policy);
   const where = [...(Array.isArray(req.body?.where) ? req.body.where : []), ...scope.filters];
   const analysis = await analyzeMetricDrivers(model, connOf(req), {
     metric,
@@ -1396,7 +1457,18 @@ app.post("/api/query/drivers", safe(async (req, res) => {
     maxDimensions: typeof req.body?.maxDimensions === "number" ? req.body.maxDimensions : undefined,
     topN: typeof req.body?.topN === "number" ? req.body.topN : undefined,
   });
-  res.json(analysis);
+  res.json({
+    ...analysis,
+    dimensions: analysis.dimensions.map((d) => ({
+      ...d,
+      topDrivers: d.segments.map((s) => ({
+        ...s,
+        value: s.segment,
+        contribution: s.delta,
+        share: s.shareOfChange,
+      })),
+    })),
+  });
 }));
 
 app.post("/api/query/lineage", safe(async (req, res) => {
@@ -1412,8 +1484,13 @@ app.post("/api/query/lineage", safe(async (req, res) => {
     policy: identityOf(req)?.policy,
     role,
   });
+  const tables = Array.from(new Set([lineage.baseTable, ...lineage.joins.map((j) => j.right)].filter(Boolean)));
+  const filters = [...(tile.where ?? []).map((f) => f.field), ...lineage.rlsApplied];
   res.json({
     ...lineage,
+    metrics: lineage.metricDag,
+    tables,
+    filters,
     source: { id: source.id, label: source.label },
     principal: who?.id ?? null,
   });

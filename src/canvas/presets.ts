@@ -36,6 +36,19 @@ export interface CanvasSpec {
   theme?: "broadside" | "newsroom-dark" | "swiss-grid" | "studio-warm";
 }
 
+export interface ThemePreset {
+  id: NonNullable<CanvasSpec["theme"]>;
+  label: string;
+  hint?: string;
+}
+
+export const THEME_PRESETS: ThemePreset[] = [
+  { id: "broadside", label: "Broadside", hint: "Warm paper & high-contrast ink" },
+  { id: "newsroom-dark", label: "Newsroom Dark", hint: "Deep slate for control rooms" },
+  { id: "swiss-grid", label: "Swiss Grid", hint: "Crisp monochrome & red accent" },
+  { id: "studio-warm", label: "Studio Warm", hint: "Editorial cream & amber" },
+];
+
 export const DEFAULT_CANVAS: CanvasSpec = {
   preset: "desktop", width: 1440, height: 900, snap: true, grid: 8, locked: false,
 };

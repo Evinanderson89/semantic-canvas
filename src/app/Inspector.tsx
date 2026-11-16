@@ -9,6 +9,7 @@ import { useFieldProfiles } from "./useFieldProfiles.ts";
 import { resolvedChartKind } from "../suggest/chartRules.ts";
 import { cardComparison, withCardComparison, CARD_COMPARISONS } from "../charts/cardComparison.ts";
 import { pickImage } from "./imagePicker.ts";
+import { TileLineageAndDriversSection } from "./TileLineageAndDrivers.tsx";
 
 /**
  * Formatting happens after a tile is on the canvas, against the selection --
@@ -215,6 +216,8 @@ export function Inspector({ model, tile, queryContext = "", onChange, onClose }:
               <em>{f.padding}px</em>
             </label>
           </Section>
+
+          <TileLineageAndDriversSection model={model} tile={tile} onChange={onChange} />
         </>
       )}
     </aside>
