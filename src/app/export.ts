@@ -74,3 +74,62 @@ export async function downloadPng(filename: string, el: HTMLElement, options: { 
   if (!blob) throw new Error("could not render this as an image");
   downloadBlob(filename, blob);
 }
+
+const DEFAULT_SVG_TOKENS: Record<string, string> = {
+  "--ink": "#111827",
+  "--ink-2": "#4b5563",
+  "--ink-3": "#6b7280",
+  "--line": "#e5e7eb",
+  "--surface": "#ffffff",
+  "--accent": "#1d4ed8",
+};
+
+/**
+ * Extracts and normalizes an `<svg>` subtree with resolved CSS design tokens
+ * and XML namespaces so it imports cleanly into Figma, Keynote, or Illustrator.
+ */
+export function serializeSvgElement(
+  root: { tagName?: string; outerHTML?: string; querySelector?: (sel: string) => any },
+  tokenMap?: Record<string, string>,
+): string {
+  const svgEl = root?.tagName?.toLowerCase() === "svg"
+    ? root
+    : root?.querySelector?.("svg");
+  if (!svgEl || typeof svgEl.outerHTML !== "string") {
+    throw new Error("no <svg> element found to export");
+  }
+
+  let raw = svgEl.outerHTML;
+  raw = raw.replace(/^<svg\b([^>]*)>/i, (_full: string, attrs: string) => {
+    let nextAttrs = attrs;
+    if (!/\bxmlns\s*=/.test(nextAttrs)) {
+      nextAttrs += ' xmlns="http://www.w3.org/2000/svg"';
+    }
+    if (!/\bxmlns:xlink\s*=/.test(nextAttrs)) {
+      nextAttrs += ' xmlns:xlink="http://www.w3.org/1999/xlink"';
+    }
+    return `<svg${nextAttrs}>`;
+  });
+
+  const mergedTokens: Record<string, string> = { ...DEFAULT_SVG_TOKENS };
+  if (tokenMap) {
+    for (const [k, v] of Object.entries(tokenMap)) {
+      mergedTokens[k.startsWith("--") ? k : `--${k}`] = v;
+    }
+  }
+
+  return raw.replace(/var\(\s*(--[a-zA-Z0-9_-]+)\s*(?:,\s*([^)]+?)\s*)?\)/g, (match: string, name: string, fallback?: string) => {
+    if (name in mergedTokens) return mergedTokens[name];
+    if (fallback) return fallback.trim();
+    return match;
+  });
+}
+
+export function downloadSvg(
+  filename: string,
+  el: HTMLElement | SVGElement,
+  tokenMap?: Record<string, string>,
+) {
+  const serialized = serializeSvgElement(el, tokenMap);
+  downloadBlob(filename, new Blob([serialized], { type: "image/svg+xml;charset=utf-8" }));
+}

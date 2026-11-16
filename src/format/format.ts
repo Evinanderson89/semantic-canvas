@@ -33,15 +33,94 @@ export interface FormatSpec {
   textUnderline: boolean;
   /** Image tiles only. */
   imageFit: "contain" | "cover";
+  targetValue?: number | null;
+  targetLabel?: string | null;
+  annotations?: { at: string; label: string; kind?: "policy" | "launch" | "note" }[];
+}
+
+export type EditorialThemeId = "broadside" | "newsroom-dark" | "swiss-grid" | "studio-warm";
+
+export interface EditorialTheme {
+  id: EditorialThemeId;
+  label: string;
+  ground: string;
+  surface: string;
+  ink: string;
+  accent: string;
+  displayFont: string;
+  bodyFont: string;
+  monoFont: string;
+  palette: string;
 }
 
 export const PALETTES: Record<string, string[]> = {
-  default:  ["#5b8fb0", "#43866c", "#b18442", "#bb7460", "#9680b5", "#509b96"],
-  cool:     ["#5aa9e6", "#4fb3b1", "#7c9ce8", "#57c2c8", "#8f8fe0", "#3fbf8f"],
-  warm:     ["#e5934d", "#e5736a", "#d8a24d", "#cf7fa0", "#c9964f", "#e0645c"],
-  mono:     ["#5aa9e6", "#7fbcea", "#a3cfee", "#c6e1f3", "#3f88bd", "#2f6b96"],
-  contrast: ["#5aa9e6", "#e5736a", "#3fbf8f", "#d8a24d", "#9b8ade", "#4fb3b1"],
+  default:   ["#5b8fb0", "#43866c", "#b18442", "#bb7460", "#9680b5", "#509b96"],
+  cool:      ["#5aa9e6", "#4fb3b1", "#7c9ce8", "#57c2c8", "#8f8fe0", "#3fbf8f"],
+  warm:      ["#e5934d", "#e5736a", "#d8a24d", "#cf7fa0", "#c9964f", "#e0645c"],
+  mono:      ["#5aa9e6", "#7fbcea", "#a3cfee", "#c6e1f3", "#3f88bd", "#2f6b96"],
+  contrast:  ["#5aa9e6", "#e5736a", "#3fbf8f", "#d8a24d", "#9b8ade", "#4fb3b1"],
+  broadside: ["#1d4ed8", "#0f766e", "#b45309", "#be123c", "#4338ca", "#334155"],
+  swiss:     ["#dc2626", "#171717", "#525252", "#2563eb", "#ca8a04", "#737373"],
+  editorial: ["#2f6b96", "#3d7a5a", "#b86b35", "#a84448", "#6d598a", "#4a8580"],
 };
+
+export const EDITORIAL_THEMES: Record<EditorialThemeId, EditorialTheme> = {
+  broadside: {
+    id: "broadside",
+    label: "Broadside",
+    ground: "#ffffff",
+    surface: "#ffffff",
+    ink: "#111827",
+    accent: "#1d4ed8",
+    displayFont: '"Bricolage Grotesque", Georgia, serif',
+    bodyFont: '"Source Serif 4", Georgia, serif',
+    monoFont: '"JetBrains Mono", ui-monospace, monospace',
+    palette: "broadside",
+  },
+  "newsroom-dark": {
+    id: "newsroom-dark",
+    label: "Newsroom Dark",
+    ground: "#0f141c",
+    surface: "#161d28",
+    ink: "#f3f4f6",
+    accent: "#38bdf8",
+    displayFont: '"Bricolage Grotesque", Georgia, serif',
+    bodyFont: '"Source Serif 4", Georgia, serif',
+    monoFont: '"JetBrains Mono", ui-monospace, monospace',
+    palette: "cool",
+  },
+  "swiss-grid": {
+    id: "swiss-grid",
+    label: "Swiss Grid",
+    ground: "#ffffff",
+    surface: "#fafafa",
+    ink: "#0a0a0a",
+    accent: "#dc2626",
+    displayFont: "Helvetica, Arial, sans-serif",
+    bodyFont: "Helvetica, Arial, sans-serif",
+    monoFont: '"JetBrains Mono", ui-monospace, monospace',
+    palette: "swiss",
+  },
+  "studio-warm": {
+    id: "studio-warm",
+    label: "Studio Warm",
+    ground: "#faf7f2",
+    surface: "#f3ede2",
+    ink: "#1c1917",
+    accent: "#b45309",
+    displayFont: '"Bricolage Grotesque", Georgia, serif',
+    bodyFont: '"Source Serif 4", Georgia, serif',
+    monoFont: '"JetBrains Mono", ui-monospace, monospace',
+    palette: "editorial",
+  },
+};
+
+export function resolveEditorialTheme(id?: string): EditorialTheme {
+  if (id && id in EDITORIAL_THEMES) {
+    return EDITORIAL_THEMES[id as EditorialThemeId];
+  }
+  return EDITORIAL_THEMES.broadside;
+}
 
 export const DEFAULT_FORMAT: FormatSpec = {
   number: "auto", decimals: null, xTitle: null, yTitle: null,
@@ -50,7 +129,46 @@ export const DEFAULT_FORMAT: FormatSpec = {
   backgroundColor: null, backgroundOpacity: 100,
   textSize: 16, textAlign: "left", fontFamily: "sans",
   textItalic: false, textUnderline: false, imageFit: "contain",
+  targetValue: null, targetLabel: null, annotations: [],
 };
+
+export interface NormalizedChartAnnotations {
+  target: { value: number; label: string; style: "dashed" } | null;
+  callouts: { at: string; label: string; kind: "policy" | "launch" | "note" }[];
+}
+
+export function buildChartAnnotations(
+  format: Partial<FormatSpec> | undefined,
+  domainValues?: unknown[],
+): NormalizedChartAnnotations {
+  const rawTarget = format?.targetValue;
+  const target = typeof rawTarget === "number" && Number.isFinite(rawTarget)
+    ? {
+        value: rawTarget,
+        label: typeof format?.targetLabel === "string" && format.targetLabel.trim()
+          ? format.targetLabel.trim()
+          : `Target ${rawTarget}`,
+        style: "dashed" as const,
+      }
+    : null;
+
+  const domainSet = domainValues ? new Set(domainValues.map((v) => String(v))) : null;
+  const callouts: { at: string; label: string; kind: "policy" | "launch" | "note" }[] = [];
+  if (Array.isArray(format?.annotations)) {
+    for (const item of format.annotations) {
+      const at = typeof item?.at === "string" ? item.at.trim() : "";
+      const label = typeof item?.label === "string" ? item.label.trim() : "";
+      if (!at || !label) continue;
+      if (domainSet && !domainSet.has(at)) continue;
+      const kind = item.kind === "policy" || item.kind === "launch" || item.kind === "note"
+        ? item.kind
+        : "note";
+      callouts.push({ at, label, kind });
+    }
+  }
+
+  return { target, callouts };
+}
 
 /** Web-safe stacks only -- no @font-face, so nothing to load and nothing
  *  that can render as a broken fallback if a font isn't installed. */

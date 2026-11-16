@@ -25,6 +25,8 @@ if (typeof process.loadEnvFile === "function") {
 }
 import { compileTile, splitPartialPeriods, validateTile } from "./compiler/compile.ts";
 import { suggestDashboard } from "./suggest/suggest.ts";
+import { generateExecutiveDigest, formatDigestMarkdown, exportVerifiedBriefBundle } from "./suggest/digest.ts";
+import { analyzeMetricDrivers } from "./suggest/drivers.ts";
 import type { Connector } from "./connectors/types.ts";
 import { executionBudget } from "./connectors/execution.ts";
 import { fieldReachable, isNumeric, metricOf, reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
@@ -48,7 +50,10 @@ import { viewSaveSchema } from "./library/model.ts";
 import { loadRls, type RlsConfig } from "./security/rls.ts";
 import { applyBestLayout, applyLayout, LAYOUTS } from "./canvas/layouts.ts";
 import { requireScope, scopedField } from "./security/queryScope.ts";
-import { saveSchema, querySchema, dashboardSchema, canvasSchema, MAX_DOCUMENT_BYTES, profileRequestSchema } from "./compiler/schema.ts";
+import { saveSchema, querySchema, tileSchema, dashboardSchema, canvasSchema, MAX_DOCUMENT_BYTES, profileRequestSchema } from "./compiler/schema.ts";
+import { inspectTileLineage } from "./compiler/lineage.ts";
+import { checkSourceHealth } from "./sources/health.ts";
+import { dashboardFromYaml, dashboardToYaml } from "./store/codeSync.ts";
 import { profileEvidence, PROFILE_REQUEST_TIMEOUT_MS } from "./suggest/profileEvidence.ts";
 import { z } from "zod";
 import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardStory,
@@ -836,13 +841,19 @@ app.delete("/api/sources/:sourceId/metrics/:name", safe(async (req, res) => {
 }));
 
 function connectedSource(req: any): Source {
-  const id = String(req.params.sourceId);
+  const id = String(req.params.sourceId ?? req.params.id);
   if (!canUseSource(identityOf(req), id)) throw Object.assign(new Error("This source is not available to your account"), { status: 403 });
   const source = sources.find((s) => s.id === id);
   if (!source) throw Object.assign(new Error(`no source named "${id}"`), { status: 404 });
   return source;
 }
 const ownsEntry = (req: any, entry: ConnectedEntry) => roleOf(req) === "admin" || entry.registeredBy === actorOf(req);
+
+app.get("/api/sources/:id/health", safe(async (req, res) => {
+  const source = connectedSource(req);
+  if (source.status !== "ready" || !source.model || !source.conn) return res.status(503).json({ error: "This source is not ready." });
+  res.json(await checkSourceHealth(source.model, source.conn));
+}));
 
 app.get("/api/sources/:sourceId/connected", safe(async (req, res) => {
   const source = connectedSource(req), overlay = await readOverlay(source.id);
@@ -959,6 +970,25 @@ app.post("/api/dashboards", safe(async (req, res) => {
   const saved = await saveDashboard(document, dashboardScope(req));
   telemetry.log("audit.dashboard_saved", { actor: actorOf(req), id: document.id, revision: saved.revision, ...(document.locked !== undefined ? { locked: document.locked } : {}) });
   res.json(saved);
+}));
+app.post("/api/dashboards/import-yaml", safe(async (req, res) => {
+  const parsed = dashboardFromYaml(String(req.body?.yaml ?? ""), modelOf(req));
+  if (req.body?.save === true) {
+    const saved = await saveDashboard({ ...parsed, schemaVersion: 1, revision: Number(req.body?.revision ?? 0) }, dashboardScope(req));
+    return res.json({ ...parsed, ...saved });
+  }
+  res.json(parsed);
+}));
+app.get("/api/dashboards/:id/yaml", safe(async (req, res) => {
+  const d = await loadDashboard(req.params.id, dashboardScope(req));
+  if (!d) return res.status(404).json({ error: "Dashboard not found in this source" });
+  res.type("text/yaml").send(dashboardToYaml(d));
+}));
+app.post("/api/dashboards/:id/digest", safe(async (req, res) => {
+  const d = await loadDashboard(req.params.id, dashboardScope(req));
+  if (!d) return res.status(404).json({ error: "Dashboard not found in this source" });
+  const digest = await generateExecutiveDigest(modelOf(req), connOf(req), d.spec, { role: roleOf(req), principal: principalOf(req)?.id ?? null });
+  res.json({ digest, markdown: formatDigestMarkdown(digest), bundle: exportVerifiedBriefBundle(d.spec, digest) });
 }));
 app.get("/api/dashboards/:id", safe(async (req, res) => {
   const d = await loadDashboard(req.params.id, dashboardScope(req));
@@ -1333,6 +1363,43 @@ app.get("/api/principals", safe((req, res) =>
     principals: Object.values(rls.principals).filter(p => auth.config.mode === "local" || p.id === identityOf(req)?.principal).map((p) => ({ id: p.id, name: p.name })),
     policies: rls.policies.map((p) => ({ id: p.id, field: `${p.table}.${p.column}`, claim: p.claim })),
   })));
+
+app.post("/api/query/drivers", safe(async (req, res) => {
+  const metric = String(req.body?.metric ?? "").trim();
+  if (!metric) return res.status(400).json({ error: "metric is required" });
+  const model = modelOf(req), m = metricOf(model, metric);
+  if (!m) return res.status(400).json({ error: `Unknown metric: ${metric}` });
+  const scope = requireScope(model, m.baseTable, rls, principalOf(req), identityOf(req)?.policy);
+  const where = [...(Array.isArray(req.body?.where) ? req.body.where : []), ...scope.filters];
+  const analysis = await analyzeMetricDrivers(model, connOf(req), {
+    metric,
+    timeDimension: typeof req.body?.timeDimension === "string" ? req.body.timeDimension : undefined,
+    where,
+    maxDimensions: typeof req.body?.maxDimensions === "number" ? req.body.maxDimensions : undefined,
+    topN: typeof req.body?.topN === "number" ? req.body.topN : undefined,
+  });
+  res.json(analysis);
+}));
+
+app.post("/api/query/lineage", safe(async (req, res) => {
+  const parsed = (req.body?.layout ? tileSchema : querySchema).parse(req.body);
+  const tile = { ...parsed, id: parsed.id ?? "query", layout: (parsed as any).layout ?? { x: 0, y: 0, w: 1, h: 1 } };
+  const source = pick(req), model = source.model!, role = roleOf(req);
+  const issues = validateTile(model, tile, { role });
+  if (issues.length) return res.status(400).json({ issues });
+  const who = principalOf(req);
+  const lineage = inspectTileLineage(model, connOf(req), tile, {
+    rls,
+    principal: who,
+    policy: identityOf(req)?.policy,
+    role,
+  });
+  res.json({
+    ...lineage,
+    source: { id: source.id, label: source.label },
+    principal: who?.id ?? null,
+  });
+}));
 
 app.post("/api/query", safe(async (req, res) => {
   const query = querySchema.parse(req.body);

@@ -16,6 +16,7 @@ export const PRESETS: CanvasPreset[] = [
   { id: "tablet",    label: "Tablet",         group: "Screen", width: 1024, height: 768,  hint: "1024 × 768" },
   { id: "phone",     label: "Phone",          group: "Screen", width: 390,  height: 844,  hint: "390 × 844" },
   { id: "widescreen",label: "Widescreen 16:9",group: "Screen", width: 1280, height: 720,  hint: "1280 × 720" },
+  { id: "slide-16x9",label: "Executive Slide 16:9", group: "Presentation", width: 1600, height: 900, hint: "1600 × 900 board deck" },
   // Print sizes are in CSS pixels at 96dpi, so a Letter canvas is literally the
   // page it will print onto.
   { id: "letter",    label: "Letter",         group: "Print",  width: 816,  height: 1056, hint: '8.5" × 11" portrait' },
@@ -32,6 +33,7 @@ export interface CanvasSpec {
   grid: number;
   locked: boolean;
   background?: string;
+  theme?: "broadside" | "newsroom-dark" | "swiss-grid" | "studio-warm";
 }
 
 export const DEFAULT_CANVAS: CanvasSpec = {
