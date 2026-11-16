@@ -22,6 +22,8 @@ export function mountChartActivity(app: Express, deps: {
   safe: (fn: (req: any, res: any) => any) => any; auth: CompanyAuth;
   source: (req: Request) => Source; sources: () => Source[];
   principal: (req: Request) => Principal | null; rls: () => RlsConfig;
+  /** Time budget for one scheduled or previewed alert query. */
+  queryTimeoutMs?: number;
 }) {
   // Version the audience: legacy rows did not record gateway scope and cannot
   // safely be made visible under the new interpretation.
@@ -65,7 +67,7 @@ export function mountChartActivity(app: Express, deps: {
   const fingerprint = (query: ReturnType<typeof chartQuery>, source: Source) => hash({ query: { metrics: query.metrics, dimensions: query.dimensions, where: query.where }, model: source.model });
   async function evaluate(source: Source, query: ReturnType<typeof chartQuery>, rule: AlertInput, who: Principal | null, role: string) {
     const sql = compileTile(source.model!, source.conn!, query, { probe: true, role });
-    const raw = await source.conn!.execute(sql, 1001, `alert:${who?.id ?? "anon"}:${randomUUID()}`);
+    const raw = await source.conn!.execute(sql, 1001, `alert:${who?.id ?? "anon"}:${randomUUID()}`, deps.queryTimeoutMs === undefined ? undefined : { timeoutMs: deps.queryTimeoutMs });
     const result = splitPartialPeriods(raw);
     return evaluateAlert(rule, result, query.dimensions[0], new Date(), calendarOf(source.model));
   }

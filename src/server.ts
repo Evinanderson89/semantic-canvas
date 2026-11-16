@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
 import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
+import { budgetFailure, loadQueryTimeoutMs, requestBudget } from "./connectors/queryBudget.ts";
 import { createTelemetry } from "./operations/telemetry.ts";
 import { providerFailureDiagnostic, requestFailure } from "./operations/requestFailure.ts";
 import { resolve } from "node:path";
@@ -61,6 +62,7 @@ import { aiConfigurationIssue, aiProviderIssue, requireAiConfiguration } from ".
 const SOURCES_PATH = process.env.SOURCES_PATH ?? "./sources.yaml";
 const ENV_PATH = process.env.SC_ENV_PATH ?? ".env"; // matches the bare process.loadEnvFile() call above
 const PORT = Number(process.env.PORT || 5174);
+const QUERY_TIMEOUT_MS = loadQueryTimeoutMs();
 
 const auth = new CompanyAuth(await loadAuthConfig(), (event, data) => telemetry.log(event, data));
 const telemetry = createTelemetry();
@@ -1235,9 +1237,12 @@ app.get("/api/values", safe(async (req, res) => {
     const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req), identityOf(req)?.policy);
     const sql = `SELECT value, count(*) AS n FROM ${relation} ` +
                 `GROUP BY 1 ORDER BY n DESC, value ASC LIMIT 501`;
-    const r = await connOf(req).execute(sql, 501);
+    const r = await connOf(req).execute(sql, 501, undefined, requestBudget(res, QUERY_TIMEOUT_MS));
     res.json({ values: r.rows.slice(0, 500).map((row) => ({ value: row[0], n: row[1] })), truncated: r.rows.length > 500, ms: r.ms });
   } catch (e: any) {
+    if (res.destroyed) return; // the client left and its query was cancelled
+    const overBudget = budgetFailure(e, QUERY_TIMEOUT_MS);
+    if (overBudget) { telemetry.log("query.budget_exceeded", { requestId: res.locals.requestId, actor: identityOf(req)?.id, route: req.path }, "warn"); return res.status(overBudget.status).json({ error: overBudget.error }); }
     res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) });
   }
 }));
@@ -1253,9 +1258,12 @@ app.get("/api/extent", safe(async (req, res) => {
   try {
     const relation = scopedField(modelOf(req), connOf(req), base || t, field, rls, principalOf(req), identityOf(req)?.policy);
     const r = await connOf(req).execute(
-      `SELECT min(value), max(value) FROM ${relation}`, 1);
+      `SELECT min(value), max(value) FROM ${relation}`, 1, undefined, requestBudget(res, QUERY_TIMEOUT_MS));
     res.json({ min: r.rows[0]?.[0] ?? null, max: r.rows[0]?.[1] ?? null });
   } catch (e: any) {
+    if (res.destroyed) return; // the client left and its query was cancelled
+    const overBudget = budgetFailure(e, QUERY_TIMEOUT_MS);
+    if (overBudget) { telemetry.log("query.budget_exceeded", { requestId: res.locals.requestId, actor: identityOf(req)?.id, route: req.path }, "warn"); return res.status(overBudget.status).json({ error: overBudget.error }); }
     res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) });
   }
 }));
@@ -1269,7 +1277,7 @@ function principalOf(req: any) {
   return rls.principals[id] ?? null;
 }
 
-const chartActivity = mountChartActivity(app, { safe, auth, source: pick, sources: () => sources, principal: principalOf, rls: () => rls });
+const chartActivity = mountChartActivity(app, { safe, auth, queryTimeoutMs: QUERY_TIMEOUT_MS, source: pick, sources: () => sources, principal: principalOf, rls: () => rls });
 
 app.get("/api/principals", safe((req, res) =>
   res.json({
@@ -1293,7 +1301,7 @@ app.post("/api/query", safe(async (req, res) => {
     const scope = requireScope(model, base, rls, who, identityOf(req)?.policy);
     const scoped = { ...tile, where: [...(tile.where ?? []), ...scope.filters] };
     const sql = compileTile(model, connOf(req), scoped, { probe: true, role });
-    const out = await connOf(req).execute(sql, resultLimit(tile) + 1, `${who?.id ?? "anon"}:${req.header("x-sc-refresh") ?? ""}`);
+    const out = await connOf(req).execute(sql, resultLimit(tile) + 1, `${who?.id ?? "anon"}:${req.header("x-sc-refresh") ?? ""}`, requestBudget(res, QUERY_TIMEOUT_MS));
     // A coarsened time dimension's first/last bucket, if it doesn't span a
     // full period, comes back flagged rather than silently dropped -- split
     // out here, right at the query's only consumer, so no caller of
@@ -1313,6 +1321,9 @@ app.post("/api/query", safe(async (req, res) => {
       rlsUnenforceable: scope.unenforceable.map((p) => p.id),
       ...(req.query.evidence === "1" ? { evidence: queryEvidence(visibleModel(model, role), tile, { ...finished, partial }) } : {}) });
   } catch (e: any) {
+    if (res.destroyed) return; // the client left and its query was cancelled
+    const overBudget = budgetFailure(e, QUERY_TIMEOUT_MS);
+    if (overBudget) { telemetry.log("query.budget_exceeded", { requestId: res.locals.requestId, actor: identityOf(req)?.id, route: req.path }, "warn"); return res.status(overBudget.status).json({ error: overBudget.error }); }
     res.status(e instanceof z.ZodError ? 400 : e.status ?? 500).json({ error: e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(e?.message ?? e) });
   }
 }));
