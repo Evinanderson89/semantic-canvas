@@ -173,6 +173,12 @@ The single-process scheduler checks due watches once a minute, up to 100 per swe
 
 Anomaly checks are robust statistical heuristics, not a guarantee of incident detection. Stale or missing data yields a waiting state. Closed reporting periods follow the model’s week start, fiscal year start, timezone (UTC when unset), and optional pinned reporting date. Audit timestamps still record the real check time. Source completeness and warehouse ingestion watermarks are not verified. Query timeouts/cancellation and richer seasonal forecasting remain part of the broader operational work below.
 
+### Request limits
+
+In company and gateway modes each signed-in account has per-minute request limits, counted in the application process: 30 AI requests (chat, redesign, explain, suggestions, story and reference analysis), 600 warehouse-backed requests (chart queries, field profiles, filter values and extents) and 1200 other API requests. Set `SC_RATE_AI_PER_MINUTE`, `SC_RATE_QUERY_PER_MINUTE` or `SC_RATE_API_PER_MINUTE` to change one; `0` disables it, and an invalid value stops startup. A refused request returns 429 with `Retry-After` and writes an `audit.rate_limited` record with the pseudonymous actor. An assistant's own tool queries run as the signed-in user and count toward that user's query limit. Local mode is unlimited.
+
+These limits bound one account's provider spend and warehouse load. They are not a spending cap in currency, do not limit concurrent or long-running queries, reset when the process restarts, and are not a defence against unauthenticated or distributed traffic: rate-limit sign-in and anonymous requests at your proxy. If more than 20,000 account windows are live at once the oldest is dropped, which can release that account early.
+
 ## Current operational limits
 
 One company workspace, one Node process, one DuckDB dashboard store. Horizontal scaling and highly available sessions require a different shared store/session design. Source settings are operator configuration; there is no per-company tenancy boundary inside one process. Field profiling has execution budgets and cancellation safeguards, with limits described in the [alpha contract](alpha-contract.md). General chart-query and alert execution budgets, live-warehouse cancellation verification, permission-change propagation, detailed metrics, user provisioning and security review with your actual identity provider remain work before a broad enterprise rollout.

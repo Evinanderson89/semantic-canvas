@@ -4,6 +4,7 @@ import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
+import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
 import { createTelemetry } from "./operations/telemetry.ts";
 import { providerFailureDiagnostic, requestFailure } from "./operations/requestFailure.ts";
 import { resolve } from "node:path";
@@ -141,6 +142,10 @@ app.use((error: any, _req: any, res: any, next: any) => {
 
 auth.mount(app);
 app.use("/api", auth.guard);
+// Company workspaces bound each verified account's AI, query and API request rates.
+// Local mode is one person on loopback and stays unlimited.
+if (auth.config.mode !== "local") app.use("/api", rateLimitMiddleware(loadRateLimits(), req => identityOf(req)?.id,
+  (kind, actor) => telemetry.log("audit.rate_limited", { actor, operation: kind }, "warn")));
 app.use("/api", (_req, res, next) => {
   if (auth.config.mode !== "local") {
     const json = res.json.bind(res);
