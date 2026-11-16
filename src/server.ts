@@ -4,6 +4,7 @@ import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
+import { createScimRouter } from "./security/scim.ts";
 import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
 import { budgetFailure, loadQueryTimeoutMs, requestBudget } from "./connectors/queryBudget.ts";
 import { createTelemetry } from "./operations/telemetry.ts";
@@ -54,6 +55,7 @@ import { chat as agentChat, explainTile, suggestImprovements, suggestDashboardSt
          type ChatMessage, type DashboardTileSummary } from "./agent/loop.ts";
 import { verifyAiProvider } from "./agent/provider.ts";
 import { claudeSetup, checkClaudeConnection, chatgptSetup, checkChatgptConnection } from "./mcp/connection.ts";
+import { handleRemoteMcp } from "./mcp/remote.ts";
 import { chatgptScopeSchema } from "./mcp/chatgpt.ts";
 import { sourceReloader } from "./sources/reload.ts";
 import { defaultModelForProvider, isSupportedAiProvider, managedAiKey } from "./sources/ai.ts";
@@ -70,7 +72,7 @@ const telemetry = {
   ...rawTelemetry,
   log(event: string, fields: Record<string, unknown> = {}, level = "info") {
     rawTelemetry.log(event, fields, level);
-    if (ready && (event.startsWith("audit.") || event.startsWith("auth."))) {
+    if (ready && (event.startsWith("audit.") || event.startsWith("auth.") || event.startsWith("scim."))) {
       void recordAuditEvent(event, fields).catch(() => {});
     }
   },
@@ -152,6 +154,7 @@ app.use((error: any, _req: any, res: any, next: any) => {
 });
 
 auth.mount(app);
+app.use("/api/scim/v2", createScimRouter({ auth, onAudit: (event, data) => telemetry.log(event, data ?? {}) }));
 app.use("/api", auth.guard);
 // Company workspaces bound each verified account's AI, query and API request rates.
 // Local mode is one person on loopback and stays unlimited.
@@ -197,7 +200,16 @@ app.get("/api/sources", safe((req, res) => res.json({
 app.get("/api/setup/guide", safe((_req, res) => res.type("text/plain").sendFile(resolve("docs/self-hosting.md"))));
 app.get("/api/setup/claude", safe((_req, res) => res.json(auth.config.mode === "local" ? claudeSetup(PORT) : {
   available: false, reason: "Claude Desktop and Claude Code connections currently require a local Canvas installation. Authenticated company connections are not supported yet.",
+  remoteMcpUrl: `${auth.config.publicUrl}/api/mcp`,
 })));
+app.post("/api/mcp", safe(async (req, res) => {
+  await handleRemoteMcp(req, res, {
+    source: pick(req).id,
+    principal: principalOf(req)?.id ?? "",
+    role: roleOf(req),
+    forwarded: auth.forwarded(req),
+  });
+}));
 let checkingClaude = false;
 let checkingChatgpt = false;
 app.get("/api/setup/chatgpt", safe((req, res) => {
@@ -240,6 +252,10 @@ app.get("/api/operations/backup", safe(async (_req, res) => {
 app.get("/api/operations/audit", safe(async (req, res) => {
   const limit = req.query.limit !== undefined ? Number(req.query.limit) : 100;
   res.json({ events: await listAuditEvents(limit) });
+}));
+app.post("/api/operations/access/reload", safe(async (_req, res) => {
+  if (typeof (auth as any).reloadAccess !== "function") return res.status(409).json({ error: "Access policy reload is not available" });
+  res.json(await (auth as any).reloadAccess(rls.principals));
 }));
 
 app.post("/api/setup/model", safe(async (req, res) => {

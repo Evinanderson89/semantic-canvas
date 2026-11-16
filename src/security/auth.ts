@@ -27,7 +27,8 @@ export interface ForwardedAuth {
 }
 interface Session { identity: Identity; csrf: string; expires: number; forwarded?: ForwardedAuth;
   /** Team mode only, held server-side: lets Canvas ask the provider whether this account still has access. */
-  refreshToken?: string; nextCheck?: number; checking?: Promise<boolean> }
+  refreshToken?: string; nextCheck?: number; checking?: Promise<boolean>; claims?: Record<string, unknown> }
+const identityClaims = new WeakMap<Identity, Record<string, unknown>>();
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
 export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string;
   /** How the client secret reaches the token endpoint. Unset: body, or header when discovery advertises only that. */
@@ -84,7 +85,10 @@ export function mapIdentity(claims: Record<string, unknown>, issuer: string, acc
   const groups = Array.isArray(claims[access.groupsClaim]) ? claims[access.groupsClaim] as unknown[] : [];
   // Explicit ordered policy: the first matching binding wins, then the optional default. No implicit administrator or domain-wide access.
   const grant = access.bindings.find(b => b.subject ? b.subject === claims.sub : groups.includes(b.group)) ?? access.default;
-  return grant ? { id: digest(`${issuer}\0${claims.sub}`), name: String(claims.name ?? "Team member").slice(0, 150), role: grant.role, principal: grant.principal, sources: grant.sources } : null;
+  if (!grant) return null;
+  const identity: Identity = { id: digest(`${issuer}\0${claims.sub}`), name: String(claims.name ?? "Team member").slice(0, 150), role: grant.role, principal: grant.principal, sources: grant.sources };
+  identityClaims.set(identity, claims);
+  return identity;
 }
 export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
   const mode = env.SC_MODE ?? "local";
@@ -161,14 +165,40 @@ export class CompanyAuth {
     return null;
   }
   session(req: Request) { if (this.config.mode === "gateway") { const session = (req as any).gatewaySession as Session | undefined; return session && session.expires > Date.now() ? session : undefined; } const key = cookie(req, "__Host-sc_session"); const session = key ? this.sessions.get(digest(key)) : undefined; return session && session.expires > Date.now() ? session : undefined; }
-  issue(identity: Identity, res: Response, refreshToken?: string) {
+  issue(identity: Identity, res: Response, refreshToken?: string, claims = identityClaims.get(identity)) {
     this.prune(); if (this.sessions.size >= 5000) throw new Error("Session capacity reached");
     const recheck = (this.config.recheckSeconds ?? 0) * 1000;
     const key = token(), session: Session = { identity, csrf: token(), expires: Date.now() + this.config.sessionSeconds * 1000,
-      ...(refreshToken && recheck ? { refreshToken, nextCheck: Date.now() + recheck } : {}) };
+      ...(refreshToken && recheck ? { refreshToken, nextCheck: Date.now() + recheck } : {}), ...(claims ? { claims } : {}) };
     this.sessions.set(digest(key), session);
     res.cookie("__Host-sc_session", key, { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: this.config.sessionSeconds * 1000 });
     return session;
+  }
+  revokeSubject(subjectOrId: string): number {
+    const hashed = digest(`${this.config.issuer ?? ""}\0${subjectOrId}`);
+    const match = (id: string, sub?: unknown) => id === subjectOrId || id === hashed || sub === subjectOrId;
+    let count = 0;
+    for (const [k, s] of this.sessions) if (match(s.identity.id, s.claims?.sub)) { this.sessions.delete(k); count++; }
+    for (const [k, v] of this.lastVerified) if (match(k) || match(v.identity.id, identityClaims.get(v.identity)?.sub)) { this.lastVerified.delete(k); count++; }
+    this.audit("auth.session_revoked", { actor: hashed, count });
+    return count;
+  }
+  async reloadAccess(principals: Record<string, unknown>, accessPath = process.env.SC_ACCESS_PATH): Promise<{ bindings: number; hasDefault: boolean }> {
+    if (this.config.mode === "local") return { bindings: 0, hasDefault: false };
+    if (!accessPath) throw new Error("SC_ACCESS_PATH is required to reload access");
+    const nextAccess = accessSchema.parse(YAML.parse(await readFile(accessPath, "utf8")));
+    checkAccessPrincipals(nextAccess, principals);
+    this.config.access = nextAccess;
+    const same = (a: { role: string; principal: string; sources: string[] }, b: { role: string; principal: string; sources: string[] }) =>
+      JSON.stringify([a.role, a.principal, a.sources]) === JSON.stringify([b.role, b.principal, b.sources]);
+    for (const [k, s] of this.sessions) {
+      const claims = s.claims ?? identityClaims.get(s.identity);
+      const mapped = claims ? mapIdentity(claims, this.config.issuer ?? "", nextAccess)
+        : nextAccess.bindings.find(b => b.subject ? (b.subject === s.identity.id || digest(`${this.config.issuer ?? ""}\0${b.subject}`) === s.identity.id) : same(b, s.identity)) ?? nextAccess.default;
+      if (!mapped || ("id" in mapped && mapped.id !== s.identity.id) || !same(mapped, s.identity)) { this.sessions.delete(k); this.audit("auth.session_access_changed", { actor: s.identity.id }); }
+    }
+    this.audit("auth.access_reloaded", { bindings: nextAccess.bindings.length, hasDefault: Boolean(nextAccess.default) });
+    return { bindings: nextAccess.bindings.length, hasDefault: Boolean(nextAccess.default) };
   }
   /** Ask the provider whether an open team session still stands. A provider refusal, a different
    * account or changed access ends the session, so the person signs in again under current rules.

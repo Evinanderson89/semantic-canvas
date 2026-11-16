@@ -3,6 +3,7 @@ import type { Express, Request } from "express";
 import { z } from "zod";
 import { alertInputSchema, commentInputSchema, type ActivityRecord, type AlertInput, type AlertRule, type CommentThread, type Evaluation } from "./model.ts";
 import { evaluateAlert } from "./evaluate.ts";
+import { sendAlertWebhook, type AlertWebhookPayload, type AlertWebhookResult } from "./webhook.ts";
 import { dueAlerts, listActivity, loadDashboard, mutateActivity, StoreConflict } from "../store/store.ts";
 import { identityOf, canUseSource, type CompanyAuth, type GatewayPolicyRule } from "../security/auth.ts";
 import { scopeFor } from "../security/rls.ts";
@@ -24,6 +25,8 @@ export function mountChartActivity(app: Express, deps: {
   principal: (req: Request) => Principal | null; rls: () => RlsConfig;
   /** Time budget for one scheduled or previewed alert query. */
   queryTimeoutMs?: number;
+  webhookUrl?: string;
+  onWebhookResult?: (result: AlertWebhookResult) => void;
 }) {
   // Version the audience: legacy rows did not record gateway scope and cannot
   // safely be made visible under the new interpretation.
@@ -177,7 +180,9 @@ export function mountChartActivity(app: Express, deps: {
             : await evaluate(source, query, rule, who, deps.auth.config.mode === "local" ? "admin" : identity?.role ?? "viewer");
         }
       } catch (error: any) { evaluation = error?.status === 403 ? { state: "needs_review", reason: "Current permissions no longer allow this metric. Ask an administrator to review its publication and your access.", checkedAt } : { state: "error", reason: "The check could not finish. Check the source connection and saved metric, then try again.", checkedAt }; }
+      let webhookPayload: AlertWebhookPayload | null = null;
       await mutateActivity(row, row.tileId, (rows, document) => {
+        webhookPayload = null;
         const current = rows.find(r => r.id === row.id); if (!current) return null;
         const latest = current.body as AlertRule;
         if (latest.version !== rule.version || !latest.enabled) return null;
@@ -195,13 +200,30 @@ export function mountChartActivity(app: Express, deps: {
         }
         const key = evaluation.period ?? "Current total";
         if (evaluation.state === "triggered") {
-          if (latest.breachKey !== key) latest.events = [{ ...evaluation, id: randomUUID(), read: false }, ...latest.events].slice(0, 30);
+          if (latest.breachKey !== key) {
+            latest.events = [{ ...evaluation, id: randomUUID(), read: false }, ...latest.events].slice(0, 30);
+            const tile = document.tiles.find(t => t.id === row.tileId);
+            webhookPayload = {
+              dashboardId: row.dashboardId,
+              dashboardTitle: document.title,
+              tileId: row.tileId,
+              tileTitle: tile?.title ?? latest.metric,
+              metric: latest.metric,
+              summary: evaluation.reason,
+              checkedAt: evaluation.checkedAt,
+            };
+          }
           latest.breachKey = key;
         } else if (evaluation.state === "normal") latest.breachKey = undefined;
         latest.evaluation = evaluation;
         latest.nextCheckAt = new Date(Date.now() + latest.intervalMinutes * 60_000).toISOString();
         return current;
       });
+      if (webhookPayload) {
+        void sendAlertWebhook(deps.webhookUrl ?? process.env.SC_ALERT_WEBHOOK_URL, webhookPayload)
+          .then(result => deps.onWebhookResult?.(result))
+          .catch(() => {});
+      }
     })().finally(() => inFlight.delete(row.id));
     inFlight.set(row.id, work); return work;
   }
