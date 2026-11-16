@@ -1,6 +1,8 @@
 import type { Request, Response } from "express";
 import { z } from "zod";
-import { asText, runToolInContext, TOOLS, type ToolSpec } from "../agent/tools.ts";
+import { api, asText, runToolInContext, TOOLS, type ToolSpec } from "../agent/tools.ts";
+import { coachSemanticModel, type AnalysisGoal } from "../semantic/coach.ts";
+import type { Model } from "../semantic/model.ts";
 import type { ForwardedAuth } from "../security/auth.ts";
 
 export type RemoteMcpRole = "viewer" | "editor" | "admin";
@@ -15,8 +17,25 @@ export interface RemoteMcpDeps {
 const WRITE_TOOLS = new Set(["save_dashboard", "arrange_dashboard"]);
 const EXCLUDED_REMOTE_TOOLS = new Set(["ask_user"]);
 
+const COACH_TOOL: ToolSpec = {
+  name: "coach_semantic_model",
+  description:
+    "Evaluate semantic model readiness across time-series, driver attribution, ratios & funnels, cohorts & cumulative metrics, and AI/MCP readiness, or coach a custom analysis question.",
+  inputSchema: {
+    goal: z.string().optional(),
+    question: z.string().optional(),
+  },
+  handler: async ({ goal, question }: { goal?: string; question?: string }) => {
+    const model = (await api("/api/model")) as Model;
+    return coachSemanticModel(model, {
+      goal: goal?.trim() ? (goal.trim() as AnalysisGoal) : undefined,
+      question: question?.trim() ? question.trim() : undefined,
+    });
+  },
+};
+
 export function remoteToolsForRole(role: RemoteMcpRole): ToolSpec[] {
-  return TOOLS.filter((tool) => {
+  return [...TOOLS, COACH_TOOL].filter((tool) => {
     if (EXCLUDED_REMOTE_TOOLS.has(tool.name)) return false;
     if (role === "viewer" && WRITE_TOOLS.has(tool.name)) return false;
     return true;
@@ -79,6 +98,50 @@ export async function handleRemoteMcp(req: Request, res: Response, deps: RemoteM
     const rawArgs = params?.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments)
       ? params.arguments
       : {};
+    if (name === "coach_semantic_model") {
+      const parsedCoach = z.object(COACH_TOOL.inputSchema).safeParse(rawArgs);
+      if (!parsedCoach.success) {
+        const msg = parsedCoach.error.issues.map((i) => `${i.path.join(".") || "arguments"}: ${i.message}`).join("; ");
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32602, message: msg },
+          result: { isError: true, content: [{ type: "text", text: msg }] },
+        });
+        return;
+      }
+      try {
+        const goal = typeof parsedCoach.data.goal === "string" && parsedCoach.data.goal.trim()
+          ? (parsedCoach.data.goal.trim() as AnalysisGoal)
+          : undefined;
+        const question = typeof parsedCoach.data.question === "string" && parsedCoach.data.question.trim()
+          ? parsedCoach.data.question.trim()
+          : undefined;
+        const model = (await runToolInContext(
+          { source: deps.source, principal: deps.principal, auth: deps.forwarded },
+          () => api("/api/model"),
+        )) as Model;
+        const report = coachSemanticModel(model, { goal, question });
+        res.json({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            isError: false,
+            content: [{ type: "text" as const, text: JSON.stringify(report) }],
+            structuredContent: report,
+          },
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "The Canvas tool failed";
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32000, message: msg },
+          result: { isError: true, content: [{ type: "text" as const, text: msg }] },
+        });
+      }
+      return;
+    }
     const tool = TOOLS.find((t) => t.name === name && !EXCLUDED_REMOTE_TOOLS.has(t.name));
     if (!tool) {
       res.status(404).json({

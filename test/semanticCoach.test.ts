@@ -455,4 +455,50 @@ describe("GET and POST /api/model/coach API Integration", () => {
     expect(bodyPost.questionAnalysis.canAnswerNow).toBe(false);
     expect(bodyPost.questionAnalysis.suggestedYaml).toContain("type: ratio");
   });
+
+  it("exposes coach_semantic_model via POST /api/mcp (tools/list and tools/call)", async () => {
+    const listRes = await loopbackRequest(`${url}/api/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(listRes.status).toBe(200);
+    const listBody: any = await listRes.json();
+    const coachTool = listBody.result.tools.find((t: any) => t.name === "coach_semantic_model");
+    expect(coachTool).toBeDefined();
+    expect(coachTool.inputSchema.properties).toHaveProperty("goal");
+    expect(coachTool.inputSchema.properties).toHaveProperty("question");
+
+    const callRes = await loopbackRequest(`${url}/api/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "coach_semantic_model",
+          arguments: {
+            goal: "ratios_and_funnels",
+            question: "Events per active user by country",
+          },
+        },
+      }),
+    });
+    expect(callRes.status).toBe(200);
+    const callBody: any = await callRes.json();
+    expect(callBody.result.isError).toBe(false);
+    const report = JSON.parse(callBody.result.content[0].text);
+    expect(report.modelName).toBe("sample_warehouse");
+    expect(typeof report.overallScore).toBe("number");
+    expect(report.categoryScores).toHaveProperty("time_series");
+    expect(report.categoryScores).toHaveProperty("driver_attribution");
+    expect(report.categoryScores).toHaveProperty("ratios_and_funnels");
+    expect(report.categoryScores).toHaveProperty("cohorts_and_cumulative");
+    expect(report.categoryScores).toHaveProperty("agent_readiness");
+    expect(report.questionAnalysis).toBeDefined();
+    expect(report.questionAnalysis.question).toBe("Events per active user by country");
+    expect(report.questionAnalysis.canAnswerNow).toBe(false);
+    expect(report.questionAnalysis.suggestedYaml).toContain("type: ratio");
+  });
 });
