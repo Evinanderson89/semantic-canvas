@@ -142,3 +142,38 @@ test("redesign previews monthly categorical bars and mixed-unit line labels", as
   await expect(rationale).toContainText("Nothing is removed.");
 
 });
+
+test("a rationale that contradicts calculated facts is shown with a warning, not hidden or rewritten", async ({ page }, info) => {
+  let hadDescription = false, accurate = false;
+  const invented = "The dashboard description is replaced because the prior one was vague. Period KPIs are from 6 returned monthly rows.";
+  const sound = "Adds a monthly trend so the reader can compare reporting periods. The trend query returned 23 rows.";
+  await page.route("**/api/agent/status", route => route.fulfill({ json: { configured: true } }));
+  await page.route("**/api/agent/chat", route => {
+    const spec = route.request().postDataJSON().document.spec;
+    hadDescription = !!spec.description?.trim();
+    const target = spec.tiles.find((t: any) => t.metrics.includes("new_mrr"));
+    return route.fulfill({ json: { text: "", research: [{ metrics: ["new_mrr"], dimensions: ["month:movement_date"], where: [], compare: "none", limit: 36, rowsChecked: 23, partial: { start: true, end: false }, truncated: false }],
+      proposal: { title: "Revenue through time", reason: accurate ? sound : invented,
+        actions: [{ type: "describe", description: "Monthly new-business revenue." }, { type: "query", id: target.id, dimensions: ["month:movement_date"] }, { type: "chart", id: target.id, chart: "line" }, { type: "arrange", layout: "executive" }] } } });
+  });
+  await page.goto("/"); await openStarter(page, "Dashboard cleanup demo");
+  await page.getByRole("button", { name: "Smart arrange", exact: true }).click();
+  await page.getByRole("button", { name: /Powered by AI Reimagine with AI/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Reimagine this dashboard" });
+  await dialog.getByRole("button", { name: "Show me a better dashboard", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Revenue through time", exact: true })).toBeVisible();
+  const warnings = dialog.getByRole("note", { name: "Rationale checks" });
+  await expect(warnings).toContainText("Check this rationale before relying on it");
+  await expect(warnings).toContainText("cites 6 rows, but the governed queries in this review returned 23 rows");
+  if (!hadDescription) await expect(warnings).toContainText("the dashboard had none");
+  // The rationale itself is shown in full, exactly as written.
+  await expect(dialog.getByText(invented, { exact: true })).toBeVisible();
+  await warnings.screenshot({ path: info.outputPath("rationale-warning.png") });
+  // The proposal's charts are checked separately and remain usable.
+  await expect(dialog.getByRole("button", { name: "Apply redesign", exact: true })).toBeEnabled();
+  // An accurate rationale carries no warning.
+  accurate = true;
+  await dialog.getByRole("button", { name: "Generate another version", exact: true }).click();
+  await expect(dialog.getByText(sound, { exact: true })).toBeAttached();
+  await expect(warnings).toHaveCount(0);
+});

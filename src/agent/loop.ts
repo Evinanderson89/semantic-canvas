@@ -1,5 +1,6 @@
 import { proposalMetricChanges } from "../canvas/metricChanges.ts";
 import { documentTextFacts, proposalTextChanges } from "../canvas/documentFacts.ts";
+import { rationaleIssues, type RationaleIssue } from "../canvas/rationaleChecks.ts";
 import { reviewContextSchema, additionKey, hasEquivalentTile, type ReviewContext } from "../suggest/reviewSession.ts";
 import { applyProposal, proposalSchema, type CanvasProposal } from "../canvas/proposals.ts";
 import type { DashboardSpec } from "../compiler/spec.ts";
@@ -106,7 +107,7 @@ export async function chat(
   active?: { spec: DashboardSpec; canvas: CanvasSpec; selected: string[]; model: Model; activeTabId?: string },
   review?: ReviewContext,
   mode: "chat" | "redesign" = "chat",
-): Promise<{ text: string; messages: ChatMessage[]; proposal?: CanvasProposal; research?: ResearchQuery[]; providerSchemaFallback?: true }> {
+): Promise<{ text: string; messages: ChatMessage[]; proposal?: CanvasProposal; research?: ResearchQuery[]; rationaleWarnings?: RationaleIssue[]; providerSchemaFallback?: true }> {
   requireAiConfiguration(cfg);
   const client = new Anthropic({ apiKey: cfg.apiKey });
   const messages: ChatMessage[] = [...history, { role: "user", content: message }];
@@ -129,6 +130,10 @@ export async function chat(
 
   let proposal: CanvasProposal | undefined;
   let lastRejection: string | undefined;
+  // A rationale that contradicts calculated facts is sent back once. It is never sent back on the
+  // last proposal attempt, and never twice: a remaining contradiction becomes a visible warning,
+  // not a failed redesign and not a silently edited rationale.
+  let rationaleChallenged = false, lastProposalAttempt = false, rationaleWarnings: RationaleIssue[] = [];
   const rejected = (name: string, error: unknown) => {
     if (name === "propose_canvas_changes") lastRejection = proposalRejection(error);
   };
@@ -147,8 +152,14 @@ export async function chat(
     handler: async (input) => {
       if (!active) throw new Error("No active canvas");
       const next = (mode === "redesign" ? validateRedesign : applyProposal)(active.spec, active.canvas, input, active.model, active.activeTabId);
-      proposal = proposalSchema.parse(input);
-      return { proposed: true, title: proposal.title, actions: proposal.actions.length,
+      const candidate = proposalSchema.parse(input);
+      const issues = mode === "redesign" ? rationaleIssues(active.spec, next.spec, candidate.reason, research) : [];
+      if (issues.length && !rationaleChallenged && !lastProposalAttempt) {
+        rationaleChallenged = true;
+        throw new Error(`The proposal reason contradicts calculated facts. ${issues.map(issue => issue.message).join(" ")} Resubmit the same edits with a corrected reason. Keep wording that is already accurate.`);
+      }
+      proposal = candidate; rationaleWarnings = issues;
+      return { proposed: true, ...(issues.length ? { uncorrectedRationaleIssues: issues, rationaleNote: "These contradictions remain and will be shown to the reviewer beside the rationale." } : {}), title: proposal.title, actions: proposal.actions.length,
         metricChanges: proposalMetricChanges(active.spec, next.spec),
         textChanges: proposalTextChanges(active.spec, next.spec),
         researchQueries: research,
@@ -181,6 +192,7 @@ export async function chat(
     let proposalMessages = [...runner.params.messages, { role: "user" as const, content: "Research is complete. Use the available evidence to propose a focused, useful redesign now. Preserve filters and pinned sections. If validation rejects the proposal, correct it once. Do not invent findings or add charts merely to fill space." + (research.length ? `\n${RESEARCH_GUIDANCE}\n${JSON.stringify(research)}` : "\nNo governed query was run in this review: state no values, counts or findings.") }];
     for (let attempt = 0; attempt < 2 && !proposal; attempt++) {
       ctx.signal?.throwIfAborted();
+      lastProposalAttempt = attempt === 1;
       const finalized = await runPhase({
         ...runner.params, max_iterations: 1,
         system: phaseSystem([proposalTool], false),
@@ -201,7 +213,7 @@ export async function chat(
     .map((b: any) => b.text)
     .join("\n\n");
 
-  return { text, proposal, messages: [...messages, { role: "assistant", content: text || "A proposal is ready for review." }], ...(research.length ? { research } : {}), ...(providerSchemaFallback ? { providerSchemaFallback: true as const } : {}) };
+  return { text, proposal, messages: [...messages, { role: "assistant", content: text || "A proposal is ready for review." }], ...(research.length ? { research } : {}), ...(proposal && rationaleWarnings.length ? { rationaleWarnings } : {}), ...(providerSchemaFallback ? { providerSchemaFallback: true as const } : {}) };
 }
 
 /**

@@ -96,3 +96,37 @@ it("records query scopes and returned-row counts, never rows, so count claims ca
     expect(JSON.stringify(result.research)).not.toContain("SELECT secret");
   } finally { vi.unstubAllGlobals(); }
 });
+
+it("sends a rationale that contradicts calculated facts back once, then surfaces what remains as a warning", async () => {
+  const invented = { ...proposal, reason: "The dashboard description is replaced because the prior one was vague.", actions: [...proposal.actions, { type: "describe", description: "Revenue by month." }] };
+  const corrected = { ...invented, reason: "Adds a dashboard description; there was none before." };
+  // Corrected on the second submission: no warning, one extra proposal call.
+  toolRunner.mockImplementationOnce(params => runner(params));
+  toolRunner.mockImplementationOnce(params => runner(params, params.tools[0].run(invented).then(() => response, () => response)));
+  toolRunner.mockImplementationOnce(params => runner(params, params.tools[0].run(corrected).then(() => response)));
+  let result = await run();
+  expect(result.proposal?.reason).toBe(corrected.reason);
+  expect(result.rationaleWarnings).toBeUndefined();
+  expect(toolRunner).toHaveBeenCalledTimes(3);
+
+  // Still wrong on the last attempt: the redesign is kept, unedited, with a warning.
+  toolRunner.mockReset();
+  let rejection = "";
+  toolRunner.mockImplementationOnce(params => runner(params));
+  toolRunner.mockImplementationOnce(params => runner(params, params.tools[0].run(invented).then(() => response, (error: Error) => { rejection = error.message; return response; })));
+  toolRunner.mockImplementationOnce(params => runner(params, params.tools[0].run(invented).then(() => response)));
+  result = await run();
+  expect(rejection).toMatch(/contradicts calculated facts.*had none.*Resubmit the same edits/);
+  expect(result.proposal?.reason).toBe(invented.reason);
+  expect(result.rationaleWarnings).toEqual([{ id: "prior-description", message: expect.stringContaining("had none") }]);
+
+  // A layout rejection used the first attempt: the last attempt is never spent on wording.
+  toolRunner.mockReset();
+  toolRunner.mockImplementationOnce(params => runner(params));
+  toolRunner.mockImplementationOnce(params => runner(params, params.tools[0].run({ ...invented, actions: [{ type: "remove", id: "missing" }] }).then(() => response, () => response)));
+  toolRunner.mockImplementationOnce(params => runner(params, params.tools[0].run(invented).then(() => response)));
+  result = await run();
+  expect(result.proposal).toBeDefined();
+  expect(result.rationaleWarnings).toHaveLength(1);
+  expect(toolRunner).toHaveBeenCalledTimes(3);
+});
