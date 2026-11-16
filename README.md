@@ -1,8 +1,47 @@
-# Semantic Canvas
+# Semantic Canvas (`v0.2.0`)
 
-An open-source canvas for building dashboards from governed metrics. Connect a supported semantic model, start with a suggested dashboard or an empty canvas, and arrange charts, KPIs, notes, headings and images into a story.
+An open-source canvas for building dashboards, editorial stories, and executive briefs from governed metrics. Connect a supported semantic model (`duckglue`, `dbt`, `cube`, or `snowflake-semantic`), start with a suggested dashboard or an empty canvas, and arrange charts, KPIs, notes, headings, and images into a cohesive narrative.
 
-**Open-source alpha with opt-in company mode.** Try the local sample immediately, or self-host a company workspace with OpenID Connect sign-in, server-enforced roles and source/row access. Team mode is an early release: validate your identity provider and policies before onboarding real users. Local mode’s role picker remains a simulation.
+**Open-source `v0.2.0` with opt-in company mode.** Try the local sample immediately, or self-host a company workspace with OpenID Connect sign-in, real-time IdP session revalidation, SCIM 2.0 user/group provisioning, server-enforced roles, and source/row access.
+
+## The Broadside Design Philosophy & Three Publication Views
+
+Semantic Canvas is built around the **Broadside ("honesty made visible")** design philosophy: analytical interfaces should read with the typographic hierarchy, provenance clarity, and editorial discipline of a broadsheet publication rather than a cluttered grid of widgets. Every figure discloses its scope, partial periods are hatched rather than disguised, and every AI-generated rationale is checked against calculated warehouse numbers before you apply it.
+
+Move seamlessly across three synchronized views of the same governed document:
+
+- **Dashboard:** A spatial, multi-tile freeform canvas with smart arrangement, section structure, cross-tab filter wiring, target callouts, and interactive drill-downs.
+- **Story:** A publication-grade editorial brief with serif narrative headlines, consolidated reporting-scope and provenance margin notes, embedded interactive figures alongside executive prose, and a cryptographic SHA-256 verification footer.
+- **Infographic:** A high-density executive broadside pairing a typographic KPI strip with dimensional driver attribution bars, revenue mix breakdowns, and standalone vector SVG export readiness.
+
+## What's New in `v0.2.0`
+
+### 1. BI & Analytics Engineers
+- **Expanded Semantic Layer Adapters:**
+  - **dbt (`dbt`):** Supports `simple`, `ratio`, `derived`, and `cumulative` metrics from `semantic_manifest.json`.
+  - **Cube (`cube`):** Imports Cube semantic models including `measures`, `dimensions`, `segments`, and time dimensions.
+  - **Snowflake (`snowflake-semantic`) & Native YAML (`duckglue`):** Governed multi-hop join paths and metric compilation.
+- **Warehouse Connectors:** Direct execution against **DuckDB**, **SQLite (`.db`)**, **Parquet/CSV** lakes (local or S3), and **Snowflake**.
+- **Compiled SQL & Metric Lineage DAG Inspector (`POST /api/query/lineage`):** Inspect parameterized SQL, join paths, applied RLS predicates, and the upstream table-to-metric DAG for any tile.
+- **Source Freshness & SLA Health (`GET /api/sources/:id/health`):** Real-time watermark inspection and SLA status (`healthy`, `warning`, `breached`) per source.
+- **2-Way Dashboard-as-Code YAML Sync & Diff (`GET /api/dashboards/:id/yaml`, `POST /api/dashboards/import-yaml`):** Export any dashboard to deterministic YAML for Git version control, preview structural diffs, and import YAML changes back into the workspace.
+
+### 2. Designers & Storytellers
+- **4 Curated Editorial Theme Presets:** Switch between `editorial-warm`, `executive-slate`, `high-contrast-print`, and `boardroom-dark` palettes tuned for screen, projector, and print.
+- **Chart Target Lines & Callout Annotations:** First-class horizontal/vertical target thresholds, shaded bands, and point callout labels on canvas charts.
+- **Standalone Vector SVG Export:** Export individual charts or entire dashboards, stories, and infographics as crisp, font-embedded standalone vector SVGs for Figma, Keynote, or print.
+- **Sketch & PDF Reference Import:** Upload a whiteboard sketch, screenshot, or PDF reference to map visual layouts directly onto governed catalogue metrics.
+
+### 3. Busy Executives
+- **One-Click Executive Digest & SHA-256 Verified Brief (`POST /api/dashboards/:id/digest`):** Generate a structured executive brief with headline takeaways, anomaly flags, scope disclosures, and a cryptographic SHA-256 verification hash over the underlying query results.
+- **Deterministic "Why Did This Move?" Metric Driver Attribution (`POST /api/query/drivers`):** Decompose period-over-period metric changes across catalogue dimensions ranked by absolute contribution share.
+- **AI Rationale Fact-Checking:** Every AI-suggested narrative or design rationale is cross-checked against calculated warehouse figures before presentation, flagging or zeroing out discrepancies.
+
+### 4. Enterprise & AI Ecosystem
+- **Provider-Agnostic AI:** Connect `anthropic` (Claude), `openai`, `gemini`, or any `openai-compatible` local/VPC endpoint (vLLM, Ollama, LiteLLM). Core exploration, deterministic review, driver attribution, and smart arrange require no AI key.
+- **8-Tool MCP Onboarding Hub + Authenticated Remote MCP (`POST /api/mcp`):** Ready-to-copy configurations for **Claude Desktop**, **Claude Code**, **Codex**, **Cursor**, **Antigravity**, **VS Code**, **Gemini CLI**, and **generic** stdio clients, plus authenticated remote HTTP MCP (`POST /api/mcp`) enforcing company RBAC and RLS.
+- **Identity, Provisioning & Governance:** OIDC sign-in with real-time IdP session revalidation, **SCIM 2.0 provisioning (`/api/scim/v2`)**, zero-downtime `access.yaml` hot reload, and per-dashboard ownership and lock controls.
+- **High-Availability & Operations Telemetry:** AES-256-GCM encrypted persistent sessions, distributed scheduler leases, Slack and generic webhook alert delivery, and durable audit & ROI telemetry endpoints (`GET /api/operations/audit`, `GET /api/operations/metrics`, `GET /api/operations/manifest`).
 
 ## Part of the Semantic Canvas suite
 
@@ -72,12 +111,13 @@ Open **Connections** to add, edit or select a source, or edit `sources.yaml`. A 
 | Adapter | Supported import | Explicitly unsupported |
 | --- | --- | --- |
 | `duckglue` | Bundled YAML model, trusted metric expressions and declared forward join paths, including multiple hops; ratio, derived and cumulative metrics (`docs/metric-types.md`) | Ambiguous shortest paths, reverse traversal, and declared joins that multiply base rows; see [joins](docs/joins.md) |
-| `dbt` | Simple metrics backed by supported column aggregates in `semantic_manifest.json` | Ratio, derived, cumulative and conversion metrics; metric filters; non-additive measures; computed dimensions |
+| `dbt` | `simple`, `ratio`, `derived`, and `cumulative` metrics backed by supported column aggregates in `semantic_manifest.json` | Conversion metrics; non-additive measures; arbitrary SQL metric filters |
+| `cube` | Cube `measures`, `dimensions`, `segments`, and time dimensions from YAML/JSON model files | Custom JS dynamic schemas, pre-aggregations, and arbitrary multi-hop reverse joins |
 | `snowflake-semantic` | Public plain-column fields and table-level metrics, composite equality join keys, left/inner joins, database/schema qualification | Computed fields, filters, non-additive rules, private access, variables, explicit metric join paths, SQL-defined tables, range/asof joins, top-level derived metrics, repeated physical table names with different aliases |
 
-Unsupported imports return a source error explaining what could not be represented. The dbt and Snowflake adapters import files and compile local SQL; they do not call the native dbt Semantic Layer or Snowflake semantic query service.
+Unsupported imports return a source error explaining what could not be represented. The dbt, Cube, and Snowflake adapters import files and compile local SQL; they do not call the external vendor semantic query service.
 
-Connectors: Parquet through DuckDB (a local directory, or an S3 lake), and Snowflake. The sample is tested against DuckDB. Snowflake execution requires your own credentials and verification against your model.
+Connectors: **DuckDB**, **SQLite (`.db`)**, **Parquet/CSV** through DuckDB (a local directory, or an S3 lake), and **Snowflake**. The sample is tested against DuckDB. Snowflake execution requires your own credentials and verification against your model.
 
 For an S3 lake, set `lakeRoot` to `s3://bucket/prefix` and name an `awsProfile` from the server's `~/.aws/config` (an SSO login or a `role_arn` + `source_profile` entry) plus the bucket's `awsRegion`; the credential is resolved when the source connects and renewed before an assumed role's session expires. No access key is written to `sources.yaml`. See the commented example there.
 
