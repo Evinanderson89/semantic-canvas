@@ -25,11 +25,15 @@ export interface ForwardedAuth {
   cookie?: string; authorization?: string; csrf: string; host: string; origin: string; expires: number;
   gatewayPolicy?: { body: string; signature: string };
 }
-interface Session { identity: Identity; csrf: string; expires: number; forwarded?: ForwardedAuth }
+interface Session { identity: Identity; csrf: string; expires: number; forwarded?: ForwardedAuth;
+  /** Team mode only, held server-side: lets Canvas ask the provider whether this account still has access. */
+  refreshToken?: string; nextCheck?: number; checking?: Promise<boolean> }
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
 export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string;
   /** How the client secret reaches the token endpoint. Unset: body, or header when discovery advertises only that. */
-  clientAuth?: "client_secret_post" | "client_secret_basic"; scopes: string; sessionSeconds: number; access?: AccessConfig;
+  clientAuth?: "client_secret_post" | "client_secret_basic"; scopes: string; sessionSeconds: number;
+  /** Seconds between provider re-checks of an open team session; 0 disables. */
+  recheckSeconds?: number; access?: AccessConfig;
   /** Shared with the gateway's control API; verifies the data policy it signs onto each request (gateway-platform/docs/policy.md). Absent: policies are not read. */
   policySecret?: string;
   /** This app's slug at the gateway (the first label of its public host, `semantic-canvas` at semantic-canvas.apps.example.com); a data policy signed for another app is not ours. */
@@ -104,9 +108,11 @@ export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
   if (url.protocol !== "https:" || issuer.protocol !== "https:") throw new Error("Team sign-in requires HTTPS for the public URL and identity provider");
   if (url.pathname !== "/" || url.search || url.hash || url.username || url.password || issuer.username || issuer.password || issuer.search || issuer.hash) throw new Error("Use a public origin without a path and a valid OIDC issuer URL");
   if (!config.scopes.split(/\s+/).includes("openid")) throw new Error("SC_OIDC_SCOPES must include openid");
+  const recheckSeconds = Number(env.SC_SESSION_RECHECK_SECONDS ?? 300);
+  if (!Number.isInteger(recheckSeconds) || recheckSeconds !== 0 && (recheckSeconds < 10 || recheckSeconds > 3600)) throw new Error("SC_SESSION_RECHECK_SECONDS must be 0 or between 10 and 3600");
   const clientAuth = env.SC_OIDC_CLIENT_AUTH?.trim() || undefined;
   if (clientAuth !== undefined && clientAuth !== "client_secret_post" && clientAuth !== "client_secret_basic") throw new Error("SC_OIDC_CLIENT_AUTH must be client_secret_post or client_secret_basic");
-  return { ...config, publicUrl: url.origin, issuer: issuer.href, clientId: env.SC_OIDC_CLIENT_ID, clientSecret: env.SC_OIDC_CLIENT_SECRET, ...(clientAuth ? { clientAuth } : {}),
+  return { ...config, publicUrl: url.origin, issuer: issuer.href, clientId: env.SC_OIDC_CLIENT_ID, clientSecret: env.SC_OIDC_CLIENT_SECRET, recheckSeconds, ...(clientAuth ? { clientAuth } : {}),
     access: accessSchema.parse(YAML.parse(await readFile(env.SC_ACCESS_PATH!, "utf8"))) };
 }
 
@@ -155,14 +161,50 @@ export class CompanyAuth {
     return null;
   }
   session(req: Request) { if (this.config.mode === "gateway") { const session = (req as any).gatewaySession as Session | undefined; return session && session.expires > Date.now() ? session : undefined; } const key = cookie(req, "__Host-sc_session"); const session = key ? this.sessions.get(digest(key)) : undefined; return session && session.expires > Date.now() ? session : undefined; }
-  issue(identity: Identity, res: Response) {
+  issue(identity: Identity, res: Response, refreshToken?: string) {
     this.prune(); if (this.sessions.size >= 5000) throw new Error("Session capacity reached");
-    const key = token(), session = { identity, csrf: token(), expires: Date.now() + this.config.sessionSeconds * 1000 };
+    const recheck = (this.config.recheckSeconds ?? 0) * 1000;
+    const key = token(), session: Session = { identity, csrf: token(), expires: Date.now() + this.config.sessionSeconds * 1000,
+      ...(refreshToken && recheck ? { refreshToken, nextCheck: Date.now() + recheck } : {}) };
     this.sessions.set(digest(key), session);
     res.cookie("__Host-sc_session", key, { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: this.config.sessionSeconds * 1000 });
     return session;
   }
+  /** Ask the provider whether an open team session still stands. A provider refusal, a different
+   * account or changed access ends the session, so the person signs in again under current rules.
+   * A provider outage does not: the session keeps its own expiry and the check is retried. */
+  private async recheck(key: string, session: Session): Promise<boolean> {
+    const end = (event: string) => { this.sessions.delete(key); this.audit(event, { actor: session.identity.id }); return false; };
+    try {
+      const tokens = await oidc.refreshTokenGrant(this.provider!, session.refreshToken!);
+      const claims = tokens.claims();
+      if (claims) {
+        const identity = mapIdentity(claims, this.config.issuer!, this.config.access!);
+        const access = (i: Identity) => JSON.stringify([i.id, i.role, i.principal, i.sources]);
+        if (!identity || access(identity) !== access(session.identity)) return end("auth.session_access_changed");
+      }
+      if (tokens.refresh_token) session.refreshToken = tokens.refresh_token;
+      session.nextCheck = Date.now() + this.config.recheckSeconds! * 1000;
+      return true;
+    } catch (error) {
+      // An OAuth error response is the provider's answer (revoked, disabled, signed out). Anything else is an outage.
+      const answer = (error as { error?: unknown })?.error;
+      if (typeof answer === "string" && answer !== "server_error" && answer !== "temporarily_unavailable") return end("auth.session_revoked");
+      const code = failureCode(error);
+      if (code === "OAUTH_KEY_SELECTION_FAILED") this.refreshProviderKeys();
+      session.nextCheck = Date.now() + 60_000;
+      this.audit("auth.recheck_unavailable", { errorType: code });
+      return true;
+    }
+  }
   mount(app: Express) {
+    if (this.config.mode === "team") app.use("/api", (req, _res, next) => {
+      const raw = cookie(req, "__Host-sc_session"), key = raw ? digest(raw) : undefined, session = key ? this.sessions.get(key) : undefined;
+      if (!key || !session?.refreshToken || !this.provider || session.expires <= Date.now() || (session.nextCheck ?? Infinity) > Date.now()) return next();
+      // Concurrent requests share one provider call.
+      session.checking ??= this.recheck(key, session).finally(() => { session.checking = undefined; });
+      void session.checking.then(() => next(), () => next());
+    });
     if (this.config.mode === "gateway" && !this.config.policySecret) console.error(JSON.stringify({ event: "auth.policy_secret_missing", level: "warn", message: "SC_GATEWAY_POLICY_SECRET is not set: a data policy the gateway delivers cannot be verified, and any request carrying one is refused." }));
     if (this.config.mode === "gateway") app.use("/api", (req, res, next) => {
       const policySupplied = "x-gateway-policy" in req.headers || "x-gateway-policy-sig" in req.headers;
@@ -242,7 +284,7 @@ export class CompanyAuth {
         const identity = claims && mapIdentity(claims, this.config.issuer!, this.config.access!);
         if (!identity) { this.audit("auth.access_denied"); return res.status(403).send("Your account has no Semantic Canvas access. Ask your administrator to assign a group."); }
         const old = cookie(req, "__Host-sc_session"); if (old) this.sessions.delete(digest(old));
-        this.issue(identity, res); this.audit("auth.signed_in", { actor: identity.id, role: identity.role }); res.redirect("/");
+        this.issue(identity, res, tokens.refresh_token); this.audit("auth.signed_in", { actor: identity.id, role: identity.role }); res.redirect("/");
       } catch (error) {
         const code = failureCode(error);
         this.audit("auth.callback_failed", { errorType: code });
