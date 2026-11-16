@@ -8,6 +8,8 @@ import { createScimRouter } from "./security/scim.ts";
 import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
 import { budgetFailure, loadQueryTimeoutMs, requestBudget } from "./connectors/queryBudget.ts";
 import { createTelemetry } from "./operations/telemetry.ts";
+import { computeGovernanceMetrics } from "./operations/usageMetrics.ts";
+import { getReleaseManifest, verifySuiteCompatibility } from "./operations/releaseManifest.ts";
 import { providerFailureDiagnostic, requestFailure } from "./operations/requestFailure.ts";
 import { resolve } from "node:path";
 import { analyzeReference, validateReferenceUpload } from "./reference/analyze.ts";
@@ -258,6 +260,22 @@ app.get("/api/operations/audit", safe(async (req, res) => {
   const limit = req.query.limit !== undefined ? Number(req.query.limit) : 100;
   res.json({ events: await listAuditEvents(limit) });
 }));
+app.get("/api/operations/metrics", safe(async (_req, res) => {
+  const auditEvents = await listAuditEvents(500);
+  res.json(computeGovernanceMetrics({
+    auditEvents,
+    counters: telemetry.counters,
+    sources: sources.map(describeSource),
+    uptimeSeconds: Math.floor(process.uptime()),
+  }));
+}));
+app.get("/api/operations/manifest", safe((_req, res) => {
+  res.json(getReleaseManifest({ mode: auth.config.mode, aiProvider: ai?.provider ?? "anthropic" }));
+}));
+app.post("/api/operations/compatibility", safe((req, res) => {
+  const result = verifySuiteCompatibility(req.body ?? {});
+  res.status(result.compatible ? 200 : 422).json(result);
+}));
 app.post("/api/operations/access/reload", safe(async (_req, res) => {
   if (typeof (auth as any).reloadAccess !== "function") return res.status(409).json({ error: "Access policy reload is not available" });
   res.json(await (auth as any).reloadAccess(rls.principals));
@@ -478,7 +496,7 @@ app.post("/api/sources", safe(async (req, res) => {
     return res.status(400).json({ error: "id must be lowercase letters, digits and hyphens, starting with a letter" });
   if (sources.some((s) => s.id === id))
     return res.status(409).json({ error: `a source named "${id}" already exists` });
-  if (!["duckglue", "dbt", "snowflake-semantic"].includes(adapter))
+  if (!["duckglue", "dbt", "snowflake-semantic", "cube"].includes(adapter))
     return res.status(400).json({ error: `unknown adapter "${adapter}"` });
   if (!model)
     return res.status(400).json({ error: "model path is required" });
@@ -718,7 +736,7 @@ app.put("/api/sources/:id", safe(async (req, res) => {
   const model = String(body.model ?? existing.parsed.model ?? "").trim();
   const connectorType = String(body.connector?.type ?? existing.parsed.connector?.type ?? "");
 
-  if (!["duckglue", "dbt", "snowflake-semantic"].includes(adapter))
+  if (!["duckglue", "dbt", "snowflake-semantic", "cube"].includes(adapter))
     return res.status(400).json({ error: `unknown adapter "${adapter}"` });
   if (!model) return res.status(400).json({ error: "model path is required" });
 
