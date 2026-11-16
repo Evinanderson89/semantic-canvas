@@ -49,6 +49,18 @@ The team project uses separate volumes from the demo and starts with no sources.
 
 Caddy manages HTTPS certificates and forwards the original Host header. The app has no published host port in this recipe. If using another proxy, preserve Host exactly as `SC_PUBLIC_URL`, terminate TLS, and keep the upstream private. Do not log full callback URLs, cookies, Authorization headers or request bodies at the proxy.
 
+### Identity provider notes
+
+These notes come from simulated provider profiles in `test/identityProviderProfiles.test.ts`, which reproduce each vendor's documented issuer, client authentication and ID-token shapes. They are not acceptance against a real Okta or Microsoft Entra tenant; test with yours before onboarding users.
+
+`npm run check:keycloak` goes further for one provider: it starts a real Keycloak container with a throwaway realm, starts Canvas in company mode against it, and drives password logins through Keycloak's own login page. It checks role mapping, refusals, code replay, anti-forgery, group removal at the next sign-in, signature verification across a signing-key rotation, sign-out and log contents. It needs Docker and openssl, removes its fixtures, and is not part of CI. It is acceptance against Keycloak over a self-signed local issuer, not against your provider, a browser or your network.
+
+- **Client authentication.** Canvas sends the client secret in the token request body (`client_secret_post`) unless discovery advertises only the Authorization-header method. Okta advertises both, but each application accepts only the method it is registered with, and web applications default to the header method: set `SC_OIDC_CLIENT_AUTH=client_secret_basic` for those. A mismatch fails sign-in with an `auth.callback_failed` record whose `errorType` is `invalid_client`.
+- **Okta groups.** Group names appear only after you add a groups claim to the application or authorization server. Without it every account is refused.
+- **Entra groups.** The `groups` claim carries group object IDs, not names; bind those IDs. An account in more groups than a token can carry receives a Graph reference instead of a `groups` claim. Canvas does not call Graph, so that account is refused unless it has a subject binding. Entra app roles avoid the limit: assign roles and set `groupsClaim: roles`.
+- **Subject bindings** match the token's `sub`. In Entra that value is specific to the application and differs from the object ID shown in the portal.
+- **Signatures and key rotation.** Canvas verifies the ID token signature against the provider's published keys. A provider that publishes its next key before signing with it rotates without interruption. If a token is signed with a key Canvas has not seen, that one sign-in fails closed and Canvas re-reads the provider's keys, at most once every ten seconds; the person's next attempt then succeeds. An unknown key is never accepted.
+
 ### Roles and sessions
 
 | Capability | Viewer | Editor | Administrator |
