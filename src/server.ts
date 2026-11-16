@@ -32,6 +32,7 @@ import { analyzeMetricDrivers } from "./suggest/drivers.ts";
 import type { Connector } from "./connectors/types.ts";
 import { executionBudget } from "./connectors/execution.ts";
 import { fieldReachable, isNumeric, metricOf, reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
+import { coachSemanticModel, type AnalysisGoal } from "./semantic/coach.ts";
 import { metricIssues, publicationEntry, publicationRevision, publishSchema, readOverlay, registrationEntry, registerSchema, summarize, writeOverlay, type ConnectedEntry } from "./sources/connected.ts";
 import { connectConnector } from "./sources/registry.ts";
 import { discoverSchema } from "./sources/schema.ts";
@@ -947,6 +948,17 @@ app.delete("/api/sources/:sourceId/connected/:dataset", safe(async (req, res) =>
 }));
 
 app.get("/api/model", safe((req, res) => res.json(modelOf(req))));
+app.get("/api/model/coach", safe((req, res) => {
+  const goal = typeof req.query.goal === "string" && req.query.goal.trim() ? (req.query.goal.trim() as AnalysisGoal) : undefined;
+  const question = typeof req.query.question === "string" && req.query.question.trim() ? req.query.question.trim() : undefined;
+  res.json(coachSemanticModel(modelOf(req), { goal, question }));
+}));
+app.post("/api/model/coach", safe((req, res) => {
+  const body = req.body ?? {};
+  const goal = typeof body.goal === "string" && body.goal.trim() ? (body.goal.trim() as AnalysisGoal) : undefined;
+  const question = typeof body.question === "string" && body.question.trim() ? body.question.trim() : undefined;
+  res.json(coachSemanticModel(modelOf(req), { goal, question }));
+}));
 /** Source-authorized schema discovery. */
 app.get("/api/schema", safe(async (req, res) => {
   const src = pick(req);

@@ -5,6 +5,7 @@ import { prettyTable } from "./Sidebar.tsx";
 import { Provenance, UnreviewedBadge, MetricReviewBadge } from "./connected.tsx";
 import { useSession } from "./Session.tsx";
 import { readResponse } from "./http.ts";
+import { SemanticCoachPanel } from "./SemanticCoach.tsx";
 
 const when = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 /** Where a metric came from, when it was not the base model: proposed here and waiting, or added in Canvas and published. */
@@ -99,6 +100,7 @@ export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "
   const session = useSession();
   const [q, setQ] = useState("");
   const [table, setTable] = useState<string | null>(initialTable);
+  const [coachOpen, setCoachOpen] = useState(false);
   const all = Object.values(model.metrics);
   const tables = Object.keys(metricsByTable(model));
 
@@ -115,6 +117,12 @@ export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "
       <div className="eyebrow">Your semantic layer</div>
       <h1>Metric Registry</h1>
       <p className="lede">A shared language for your data. Explore a metric, understand its meaning, and bring it onto the canvas.</p>
+      <div className="story-actions">
+        <button type="button" className={`tgl${coachOpen ? " on" : ""}`} onClick={() => setCoachOpen((v) => !v)}>
+          Semantic Layer Coach
+        </button>
+      </div>
+      {coachOpen && <SemanticCoachPanel model={model} sourceId={sourceId} onChanged={onChanged} />}
       {session.canEdit && sourceId && <ProposeMetric model={model} sourceId={sourceId} onChanged={onChanged} />}
 
       <div className="ex-tools">
@@ -158,14 +166,21 @@ export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "
   );
 }
 
-export function DataModel({ model }: { model: Model }) {
+export function DataModel({ model, sourceId = "", onChanged = () => {} }: { model: Model; sourceId?: string; onChanged?: () => void }) {
   const byTable = metricsByTable(model);
+  const [coachOpen, setCoachOpen] = useState(false);
   return (
     <div className="explore">
       <h1>Data Model</h1>
       <p className="lede">{Object.keys(model.tables).length} tables and {model.joins.length} joins,
         read from the {model.source} semantic layer. Joins are what let a metric on one table be
         cut by a dimension on another.</p>
+      <div className="story-actions">
+        <button type="button" className={`tgl${coachOpen ? " on" : ""}`} onClick={() => setCoachOpen((v) => !v)}>
+          Semantic Layer Coach
+        </button>
+      </div>
+      {coachOpen && <SemanticCoachPanel model={model} sourceId={sourceId} onChanged={onChanged} />}
 
       <h4 className="ex-h">Joins</h4>
       <div className="joins">
