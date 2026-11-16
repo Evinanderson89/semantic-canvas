@@ -42,6 +42,7 @@ import { applyLayout } from "../canvas/layouts.ts";
 import { prepareNewTile } from "../suggest/prepareTile.ts";
 import { downloadPng, downloadSvg, slugForFilename } from "./export.ts";
 import { ExecutiveDigestDialog, YamlCodeSyncDialog, OperationsAuditDialog } from "./CommercialDrawers.tsx";
+import { SemanticCoachDialog } from "./SemanticCoach.tsx";
 import { metricOf, calendarOf, prettifyModelName, todayOf, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
@@ -105,6 +106,7 @@ export function App() {
   const [digestOpen, setDigestOpen] = useState(false);
   const [yamlSyncOpen, setYamlSyncOpen] = useState(false);
   const [opsAuditOpen, setOpsAuditOpen] = useState(false);
+  const [coachOpen, setCoachOpen] = useState(false);
   // /modeler is the Modeler's own address on the gateway (registered as its own app); the SPA serves it like any path.
   const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library" | "modeler">(() => location.pathname.replace(/\/+$/, "") === "/modeler" ? "modeler" : "home");
   // ?source=&table= from an "Open in Semantic Canvas" link: read once, applied when the sources (then the model) are known, and stripped.
@@ -670,7 +672,7 @@ export function App() {
             setView("home"); build({ table: t, metrics: [m], audience: "operator", grain });
           }} />
         ) : !dash && view === "model" ? (
-          <DataModel model={model} />
+          <DataModel model={model} sourceId={activeSourceId ?? ""} onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} />
         ) : !dash && view === "modeler" ? (
           <Modeler sources={sources} onPublished={() => refreshSources()} />
         ) : !dash ? (
@@ -730,6 +732,7 @@ export function App() {
                   <button disabled={!session.canEdit} onClick={() => { close(); setReferenceImport(true); }}>Recreate from reference</button>
                   <button onClick={() => { close(); setDigestOpen(true); }}>Executive digest & verified brief</button>
                   <button onClick={() => { close(); setYamlSyncOpen(true); }}>Dashboard-as-Code (YAML)</button>
+                  <button onClick={() => { close(); setCoachOpen(true); }}>Semantic layer coach</button>
                   <button disabled={exportingPng} onClick={() => { close(); exportDashboardPng(); }}>
                     {exportingPng ? "Exporting…" : "Export dashboard as PNG"}
                   </button>
@@ -963,6 +966,7 @@ export function App() {
       {digestOpen && dash && <ExecutiveDigestDialog dashboardId={dashId} spec={dash} model={model} onClose={() => setDigestOpen(false)} />}
       {yamlSyncOpen && dash && <YamlCodeSyncDialog dashboardId={dashId} spec={dash} canvas={canvas} onApply={(nextSpec, nextCanvas) => { compose(nextSpec, nextCanvas ?? canvas); setNotice("Dashboard YAML applied to canvas.", "success"); }} onClose={() => setYamlSyncOpen(false)} />}
       {opsAuditOpen && <OperationsAuditDialog onClose={() => setOpsAuditOpen(false)} />}
+      {coachOpen && <SemanticCoachDialog model={model} sourceId={activeSourceId ?? ""} onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} onClose={() => setCoachOpen(false)} />}
     </div>
   );
 }
