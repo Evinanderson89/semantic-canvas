@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { openStore, closeStore, saveDashboard, loadDashboard, listDashboards, deleteDashboard } from "../src/store/store.ts";
+import { openStore, closeStore, saveDashboard, loadDashboard, listDashboards, deleteDashboard, updateLibraryItem } from "../src/store/store.ts";
 import { DEFAULT_CANVAS } from "../src/canvas/presets.ts";
 import { dashboardSchema, querySchema } from "../src/compiler/schema.ts";
 import { tile } from "./fixtures.ts";
@@ -29,6 +29,17 @@ it("does not treat malformed documents as saved work", async () => {
   expect(querySchema.safeParse({ metrics: ["revenue"], filters: ["raw SQL"] }).success).toBe(false);
 });
 it("migrates legacy text size presets on read without losing the authored format", async () => {
-  await saveDashboard({ ...document, id: "legacy-format", spec: { title: "Legacy", tiles: [tile({ kind: "text", metrics: [], format: { textSize: "xl" } })] } }, a);
+  await saveDashboard({ ...document, id: "legacy-format", spec: { title: "Legacy", tiles: [{ ...tile({ kind: "text", metrics: [] }), format: { textSize: "xl" } }] } }, a);
   expect((await loadDashboard("legacy-format", a))?.spec.tiles[0].format?.textSize).toBe(34);
+});
+
+it("round trips plain title punctuation through saving and renaming", async () => {
+  const title = "SaaS Revenue & Retention — Exec Summary";
+  await saveDashboard({ ...document, id: "title-punctuation", name: title, spec: { ...document.spec, title } }, a);
+  expect((await loadDashboard("title-punctuation", a))?.name).toBe(title);
+  const renamed = "Revenue & Retention <review>";
+  await updateLibraryItem("dashboard", "title-punctuation", { revision: 1, name: renamed }, a);
+  const saved = await loadDashboard("title-punctuation", a);
+  expect(saved?.name).toBe(renamed);
+  expect(saved?.spec.title).toBe(renamed);
 });

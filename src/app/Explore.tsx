@@ -1,8 +1,8 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Metric, Model, Origin } from "../semantic/model.ts";
-import { metricOf, isUnreviewed, isUnreviewedTable, metricsByTable } from "../semantic/model.ts";
+import { metricOf, isUnreviewedTable, metricsByTable } from "../semantic/model.ts";
 import { prettyTable } from "./Sidebar.tsx";
-import { Provenance, UnreviewedBadge } from "./connected.tsx";
+import { Provenance, UnreviewedBadge, MetricReviewBadge } from "./connected.tsx";
 import { useSession } from "./Session.tsx";
 import { readResponse } from "./http.ts";
 
@@ -18,8 +18,8 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(
 
 /**
  * Propose a metric (docs/modeler.md, "Proposed metrics"): one aggregate over a
- * table's own columns. Nothing runs when it is defined; the server probes it
- * once, then it is live for editors, badged, until an administrator publishes it.
+ * table's own columns. Submission runs one warehouse probe; an accepted
+ * definition is available to editors until an administrator publishes it.
  */
 function ProposeMetric({ model, sourceId, onChanged }: { model: Model; sourceId: string; onChanged: () => void }) {
   const tables = Object.keys(model.tables).filter((t) => !isUnreviewedTable(model.tables[t]));
@@ -27,23 +27,30 @@ function ProposeMetric({ model, sourceId, onChanged }: { model: Model; sourceId:
   const [form, setForm] = useState({ label: "", name: "", baseTable: tables[0] ?? "", expression: "", filter: "", description: "" });
   const [nameTouched, setNameTouched] = useState(false);
   const [problems, setProblems] = useState<string[]>([]), [busy, setBusy] = useState(false), [done, setDone] = useState<string | null>(null);
+  const proposeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (!open && done) proposeButton.current?.focus(); }, [open, done]);
   const columns = model.tables[form.baseTable]?.columns ?? [];
   const submit = async (e: FormEvent) => {
-    e.preventDefault(); setBusy(true); setProblems([]); setDone(null);
+    e.preventDefault(); if (busy) return; setBusy(true); setProblems([]); setDone(null);
     try {
       const r = await fetch(`/api/sources/${encodeURIComponent(sourceId)}/metrics`, { method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: form.name, label: form.label, baseTable: form.baseTable, expression: form.expression, ...(form.filter.trim() ? { filter: form.filter } : {}), ...(form.description.trim() ? { description: form.description } : {}) }) });
       const body = await r.json().catch(() => ({}));
-      if (!r.ok) { setProblems(body.problems?.length ? body.problems : [body.error ?? "Could not propose it."]); return; }
-      setDone(form.label); setForm({ label: "", name: "", baseTable: form.baseTable, expression: "", filter: "", description: "" }); setNameTouched(false); onChanged();
+      if (!r.ok) {
+        const messages = Array.isArray(body.problems) ? body.problems.filter((p: unknown): p is string => typeof p === "string") : [];
+        setProblems(messages.length ? messages : [typeof body.error === "string" ? body.error : "Could not propose it."]); return;
+      }
+      if (body.metric?.name !== form.name || body.metric?.baseTable !== form.baseTable || body.metric?.reviewed !== false || typeof body.metric?.label !== "string")
+        throw new Error("Canvas could not confirm the new metric. Refresh Metric Registry to check whether it was added before trying again.");
+      setDone(body.metric.label); setForm({ label: "", name: "", baseTable: form.baseTable, expression: "", filter: "", description: "" }); setNameTouched(false); setOpen(false); onChanged();
     } catch (err: any) { setProblems([String(err?.message ?? err)]); } finally { setBusy(false); }
   };
-  if (!open) return <div className="propose-metric-cta"><button className="tgl" onClick={() => setOpen(true)}>Propose a metric</button>{done && <span className="conn-meta" role="status"> “{done}” is live for editors, marked unreviewed; an administrator publishes it to everyone.</span>}</div>;
+  if (!open) return <div className="propose-metric-cta"><button ref={proposeButton} className="tgl" onClick={() => setOpen(true)}>Propose a metric</button>{done && <span className="conn-meta" role="status"> “{done}” is live for editors, marked unreviewed; an administrator publishes it to everyone.</span>}</div>;
   return (
     <form className="cform propose-metric" onSubmit={submit} aria-label="Propose a metric">
       <div className="eyebrow">Propose a metric</div>
-      <p className="tbl-body-p">One aggregate over one table's columns. Nothing runs until a chart asks for it; the warehouse checks it once now. Editors can chart it straight away; viewers see it when an administrator publishes it.</p>
-      <div className="cform-grid">
+      <p className="tbl-body-p">One aggregate over one table's columns. The warehouse validates the expression with a probe query when you submit. Editors can chart it after that check; viewers see it when an administrator publishes it.</p>
+      <fieldset className="cform-grid" disabled={busy}>
         <label className="ctl"><span>Label</span><input required value={form.label} placeholder="Refunded orders" onChange={(e) => setForm((f) => ({ ...f, label: e.target.value, name: nameTouched ? f.name : slug(e.target.value) }))} /></label>
         <label className="ctl"><span>Name</span><input required pattern="[a-z][a-z0-9_]*" value={form.name} placeholder="refunded_orders" onChange={(e) => { setForm((f) => ({ ...f, name: slug(e.target.value) })); setNameTouched(true); }} /></label>
         <label className="ctl"><span>Table</span><select value={form.baseTable} onChange={(e) => setForm((f) => ({ ...f, baseTable: e.target.value }))}>{tables.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
@@ -51,11 +58,11 @@ function ProposeMetric({ model, sourceId, onChanged }: { model: Model; sourceId:
         <label className="ctl span2"><span>Expression</span><input required className="mono" value={form.expression} placeholder={`SUM(${form.baseTable}.${columns.find((c) => /double|int|number/i.test(c.type))?.name ?? "amount"})`} onChange={(e) => setForm((f) => ({ ...f, expression: e.target.value }))} /></label>
         <label className="ctl span2"><span>Always-on filter (optional)</span><input className="mono" value={form.filter} placeholder={`${form.baseTable}.status = 'refunded'`} onChange={(e) => setForm((f) => ({ ...f, filter: e.target.value }))} /></label>
         <label className="ctl span2"><span>What it means (optional)</span><input value={form.description} placeholder="Orders refunded in full, counted on the refund date." onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} /></label>
-      </div>
+      </fieldset>
       {problems.length > 0 && <ul className="conn-err propose-problems" role="alert">{problems.map((p) => <li key={p}>{p}</li>)}</ul>}
       <div className="story-actions">
         <button className="primary small" disabled={busy}>{busy ? "Checking with the warehouse…" : "Check and propose"}</button>
-        <button type="button" className="tgl" onClick={() => setOpen(false)}>Cancel</button>
+        <button type="button" className="tgl" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
       </div>
     </form>
   );
@@ -99,7 +106,7 @@ export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "
     const n = q.trim().toLowerCase();
     return all.filter((m) =>
       (!table || m.baseTable === table) &&
-      (!n || `${m.name} ${m.label} ${m.description} ${m.synonyms.join(" ")}`
+      (!n || `${m.name} ${m.label} ${m.description ?? ""} ${m.synonyms.join(" ")}`
         .toLowerCase().includes(n)));
   }, [q, table, all]);
 
@@ -125,7 +132,8 @@ export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "
           <div key={m.name} className="mrow">
             <div className="mrow-top">
               <b>{m.label}</b>
-              {m.origin ? <OriginBadge origin={m.origin} reviewed={m.reviewed} /> : isUnreviewed(model, m) && <UnreviewedBadge />}
+              {m.origin && <OriginBadge origin={m.origin} reviewed={m.reviewed} />}
+              <MetricReviewBadge model={model} metric={m} />
               {sourceId && <MetricActions m={m} sourceId={sourceId} onChanged={onChanged} />}
               <button className="use" onClick={() => onUse(m.name)}>Chart it →</button>
             </div>

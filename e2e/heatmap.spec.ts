@@ -18,12 +18,32 @@ test("a heatmap draws when one axis is a date, and when there is one dimension a
     { id: "two-metrics", title: "Events, Active users", metrics: ["event_count", "active_users"], dimensions: ["day:fct_events.event_date"], chart: "heatmap", layout: { x: 24, y: 24, w: 460, h: 300 } },
     { id: "time-by-cat", title: "Events by platform over time", metrics: ["event_count"], dimensions: ["month:fct_events.event_date", "dim_users.device_platform"], chart: "heatmap", layout: { x: 500, y: 24, w: 460, h: 300 } },
   ] };
+  const results = d.tiles.map(spec => page.waitForResponse(response => response.url().endsWith("/api/query")
+    && response.request().method() === "POST"
+    && JSON.stringify(response.request().postDataJSON().metrics) === JSON.stringify(spec.metrics)
+    && JSON.stringify(response.request().postDataJSON().dimensions) === JSON.stringify(spec.dimensions)));
   await open(page, d);
-  for (const title of ["Events, Active users", "Events by platform over time"]) {
-    const tile = page.locator("article, .tile, [data-tile]").filter({ hasText: title }).first();
+  for (const [index, spec] of d.tiles.entries()) {
+    const response = await results[index]; expect(response.ok()).toBe(true);
+    const result = await response.json(); expect(result.rows.length).toBeGreaterThan(0);
+    const tile = page.getByRole("group", { name: spec.title!, exact: true });
     await expect(tile).toBeVisible();
     await expect(tile.getByText(/Could not draw/)).toHaveCount(0);
-    await expect(tile.locator("svg rect").first()).toBeVisible({ timeout: 15000 });
+    // Plot's cell marks, not legend/background/axis rectangles, must account
+    // for every returned row and each independent metric row.
+    const cells = tile.locator('figure g[aria-label="cell"] rect');
+    await expect(cells).toHaveCount(result.rows.length * (spec.dimensions.length === 1 ? spec.metrics.length : 1));
+    await expect(cells.first()).toBeVisible();
+    await expect(cells.locator("title").first()).toContainText("Events:");
+    if (spec.metrics.length > 1) {
+      await expect(cells.locator("title").filter({ hasText: "Active users:" })).toHaveCount(result.rows.length);
+      await expect(tile.locator("figcaption")).toContainText("not amounts between rows");
+    } else {
+      const platform = result.columns.indexOf("device_platform");
+      expect(platform).toBeGreaterThanOrEqual(0);
+      for (const name of new Set(result.rows.map((row: unknown[]) => String(row[platform]))))
+        expect((await cells.locator("title").allTextContents()).some(text => text.includes(String(name)))).toBe(true);
+    }
   }
   await page.screenshot({ path: "test-results/heatmap-regression.png" });
 });

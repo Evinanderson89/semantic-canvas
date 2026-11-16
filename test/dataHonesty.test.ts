@@ -65,7 +65,7 @@ describe("data honesty: rows dated in the future", () => {
     expect(f.rule).toBe("future");
     expect(f.text).toContain("starts Sep 21, after today");
     expect(f.fixes).toEqual([{ kind: "exclude-future", field: "fct_sales.sold_on", through: "2026-09-11" }]);
-    expect(futureFilter("t1", f.fixes[0] as any)).toEqual({ id: "honesty:t1:through-today", field: "fct_sales.sold_on", source: "dimension", mode: "range", max: "2026-09-11" });
+    expect(futureFilter("t1", f.fixes[0] as any)).toEqual({ id: "honesty:t1:through-today", field: "fct_sales.sold_on", source: "dimension", mode: "range", min: "2026-09-12", exclude: true });
   });
 });
 
@@ -84,10 +84,13 @@ describe("data honesty: helpers", () => {
     expect(sayDate("2026-09-06", today)).toBe("Sep 6");
     expect(sayDate("2025-09-06", today)).toBe("Sep 6, 2025");
   });
-  it("treats a date-keyed snapshot table as period-keyed", () => {
-    const snap: Model = { ...base, tables: { ...base.tables, fct_monthly: { name: "fct_monthly", grain: "one row per month", synonyms: [], partitionKeys: [], primaryKey: "month", columns: [{ name: "month", type: "date" }, { name: "mrr", type: "double" }] } },
+  it("requires an explicit period declaration instead of inferring coverage from a date key", () => {
+    const snap: Model = { ...base, tables: { ...base.tables, fct_monthly: { name: "fct_monthly", grain: "one row per month", period: { column: "month", grain: "month" }, synonyms: [], partitionKeys: [], primaryKey: "month", columns: [{ name: "month", type: "date" }, { name: "mrr", type: "double" }] } },
       metrics: { ...base.metrics, mrr: { name: "mrr", label: "MRR", baseTable: "fct_monthly", expression: "SUM(fct_monthly.mrr)", filter: null, synonyms: [] } } };
     expect(isPeriodKeyed(snap, tile({ metrics: ["mrr"] }) as any, "month:month")).toBe(true);
+    expect(isPeriodKeyed(snap, tile({ metrics: ["mrr"] }) as any, "quarter:month")).toBe(false);
+    delete snap.tables.fct_monthly.period;
+    expect(isPeriodKeyed(snap, tile({ metrics: ["mrr"] }) as any, "month:month")).toBe(false);
     expect(isPeriodKeyed(base, tile() as any, "week:sold_on")).toBe(false);
   });
 });

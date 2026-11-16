@@ -1,8 +1,6 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-
-export interface WorkspaceSession { mode: "local" | "team"; authenticated: boolean; canEdit: boolean; canAdmin: boolean; csrf?: string; gatewayUrl?: string; expiresAt?: number; user?: { id: string; name: string; role: string };
-  /** Row-level rules the gateway set for this person (gateway-platform/docs/policy.md); every chart is filtered by them. */
-  policy?: { field: string; mode: "only" | "not"; values: string[] }[] }
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { parseWorkspaceSession, sameWorkspaceAccess, type WorkspaceSession } from "./sessionContract.ts";
+export type { WorkspaceSession } from "./sessionContract.ts";
 const local: WorkspaceSession = { mode: "local", authenticated: true, canEdit: true, canAdmin: true };
 const Context = createContext(local);
 export const useSession = () => useContext(Context);
@@ -23,20 +21,29 @@ export function signInHref(session: { gatewayUrl?: string } | null): string {
 
 export function SessionBoundary({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<WorkspaceSession | null>(null);
+  const currentSession = useRef<WorkspaceSession | null>(null);
   const [error, setError] = useState("");
+  const endSession = (current: WorkspaceSession, message = "") => {
+    if (currentSession.current !== current || !current.authenticated) return;
+    // Save under the original account before unmounting its workspace. Never
+    // install the next account's identity over an existing dashboard.
+    window.dispatchEvent(new Event("sc:session-ending"));
+    currentSession.current = { ...current, authenticated: false, canEdit: false, canAdmin: false };
+    setError(message); setSession(currentSession.current);
+  };
   useEffect(() => {
     const original = window.fetch;
-    let current: WorkspaceSession | null = null, alive = true;
+    let alive = true;
     window.fetch = async (input, init = {}) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, location.href);
       if (url.origin !== location.origin || !url.pathname.startsWith("/api/")) return original(input, init);
+      const current = currentSession.current;
       const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : {}));
       if (current?.csrf) headers.set("x-sc-csrf", current.csrf);
       const response = await original(input, { ...init, headers });
       const changedAccount = current?.mode === "team" && response.headers.has("x-sc-user-id") && response.headers.get("x-sc-user-id") !== current.user?.id;
-      if ((response.status === 401 || changedAccount) && current?.authenticated) {
-        window.dispatchEvent(new Event("sc:session-ending"));
-        current = { ...current, authenticated: false }; if (alive) setSession(current);
+      if ((response.status === 401 || changedAccount) && current?.mode === "team" && current.authenticated && currentSession.current === current) {
+        if (alive) endSession(current, changedAccount ? "Your workspace account changed. Sign in again to open that account’s workspace." : "");
         if (changedAccount) return new Response(JSON.stringify({ error: "Workspace account changed. Sign in again." }), { status: 401, headers: { "content-type": "application/json" } });
       }
       return response;
@@ -48,7 +55,8 @@ export function SessionBoundary({ children }: { children: ReactNode }) {
     original("/api/auth/session").then(async r => {
       if (r.status === 401) return { mode: "team", authenticated: false, gatewayUrl: (import.meta as any).env?.VITE_GATEWAY_PORTAL_URL || undefined };
       if (!r.ok) throw new Error("Workspace is unavailable"); return r.json(); })
-      .then(s => { current = s; if (alive) setSession(s); }).catch(() => { if (alive) setError("We couldn’t reach your workspace. Check the connection and try again."); });
+      .then(parseWorkspaceSession)
+      .then(s => { if (alive) { currentSession.current = s; setSession(s); } }).catch(() => { if (alive) setError("We couldn’t verify your workspace session. Check the connection and try again."); });
     return () => { alive = false; window.fetch = original; };
   }, []);
   // Silent renewal behind Gateway. The portal owns the session and renews it
@@ -63,9 +71,23 @@ export function SessionBoundary({ children }: { children: ReactNode }) {
     if (!session?.authenticated || !session.gatewayUrl || !session.expiresAt) return;
     const portal = new URL(session.gatewayUrl), lead = RENEW_LEAD_MS;
     const delay = renewDelay(session.expiresAt, Date.now());
-    let frame: HTMLIFrameElement | null = null, done = false;
-    const reread = async () => { try { const r = await fetch("/api/auth/session"); if (r.ok) setSession(await r.json()); } catch {} };
-    const cleanup = () => { frame?.remove(); frame = null; window.removeEventListener("message", onMessage); };
+    let frame: HTMLIFrameElement | null = null, done = false, fallback: number | undefined;
+    const controller = new AbortController();
+    const reread = async () => { try {
+      const r = await fetch("/api/auth/session", { signal: controller.signal });
+      if (r.ok) {
+        let refreshed: WorkspaceSession;
+        try { refreshed = parseWorkspaceSession(await r.json()); }
+        catch { if (!controller.signal.aborted) endSession(session, "Your workspace session could not be verified. Sign in again."); return; }
+        if (controller.signal.aborted || currentSession.current !== session) return;
+        if (!sameWorkspaceAccess(session, refreshed)) {
+          endSession(session, refreshed.authenticated ? "Your workspace account or access changed. Sign in again to load the current workspace." : "");
+          return;
+        }
+        currentSession.current = refreshed; setSession(refreshed);
+      }
+    } catch {} };
+    const cleanup = () => { window.clearTimeout(fallback); frame?.remove(); frame = null; window.removeEventListener("message", onMessage); };
     const onMessage = (e: MessageEvent) => { if (e.origin !== portal.origin || e.data?.type !== "gateway:session" || done) return; done = true; cleanup(); void reread(); };
     const timer = window.setTimeout(() => {
       window.addEventListener("message", onMessage);
@@ -75,9 +97,9 @@ export function SessionBoundary({ children }: { children: ReactNode }) {
       frame.src = `${portal.origin}/auth/refresh?next=${encodeURIComponent("/auth/renewed")}`;
       document.body.appendChild(frame);
       // If the portal never answers, fall back to re-reading the session at expiry so the sign-in screen appears promptly rather than after a failed request.
-      window.setTimeout(() => { if (!done) { done = true; cleanup(); void reread(); } }, lead + 5_000);
+      fallback = window.setTimeout(() => { if (!done) { done = true; cleanup(); void reread(); } }, lead + 5_000);
     }, delay);
-    return () => { window.clearTimeout(timer); cleanup(); };
+    return () => { done = true; controller.abort(); window.clearTimeout(timer); cleanup(); };
   }, [session?.authenticated, session?.gatewayUrl, session?.expiresAt]);
   if (!session || !session.authenticated) return <main className="workspace-welcome">
     <span className="eyebrow">Semantic Canvas</span><h1>{session ? "Your company’s metrics.\nA clearer story." : "Opening your workspace"}</h1>

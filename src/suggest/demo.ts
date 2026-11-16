@@ -3,7 +3,7 @@ import type { Model } from "../semantic/model.ts";
 
 /**
  * A fixed, checked-in "before" dashboard -- not generated, deliberately
- * imperfect -- so a new user can open it, click Beautify or Smart Arrange,
+ * imperfect -- so a new user can open it, click Design review or Smart arrange,
  * and see a REAL fix happen on the first try, instead of having to already
  * know what a magnitude mismatch or a degenerate breakdown looks like
  * before they can go find one. `suggestDashboard()` is built to avoid
@@ -15,16 +15,16 @@ import type { Model } from "../semantic/model.ts";
  *  - d1/d5/d6: monthly revenue, retention and acquisition-cost KPIs. They
  *    become the headline row when Design Review adds a story structure.
  *  - d2: `web_sessions` at day grain -- genuinely noisy real data (see
- *    `detectNoisy()` in recommend.ts), so Beautify offers coarsening to
+ *    `detectNoisy()` in recommend.ts), so Design review offers coarsening to
  *    week.
  *  - d3: `new_mrr` by `movement_type` -- the exact reported bug
  *    `detectDegenerate()` exists for (every category but "new" reads
  *    zero, since new_mrr is already filtered to `movement_type = 'new'`),
  *    PLUS a chart-kind mismatch: explicitly a bar chart even though
  *    `fct_mrr_movements`'s own synonyms name it a "mrr waterfall",
- *    so Beautify separately offers "Might read better as Waterfall".
+ *    so Design review separately offers "Might read better as Waterfall".
  *  - d4: `new_signups` by `dim_users.country` -- geographic data
- *    explicitly rendered as a table, so Beautify offers "Might read
+ *    explicitly rendered as a table, so Design review offers "Might read
  *    better as Map".
  *
  * The layout is deliberately overlapping and inconsistently sized, the
@@ -41,7 +41,7 @@ export function demoDashboardAvailable(model: Model): boolean {
 export function demoDashboard(width = 1120): DashboardSpec {
   const dashboard: DashboardSpec = {
     title: "SaaS Overview (rough draft)",
-    description: "A messy example: use Design review to improve the charts, then Smart arrange to bring it together.",
+    description: "Recurring revenue, retention, acquisition cost and signup distribution from the Sample Warehouse. Check each chart’s reporting period before comparing.",
     tiles: [
       { id: "d1", kind: "metric", title: "Ending MRR (USD)", metrics: ["ending_mrr"], dimensions: ["month:fct_saas_monthly.month"], chart: "kpi",
         layout: { x: 40, y: 40, w: 260, h: 156 } },
@@ -50,7 +50,7 @@ export function demoDashboard(width = 1120): DashboardSpec {
       { id: "d6", kind: "metric", title: "CAC (USD)", metrics: ["cac"], dimensions: ["month:fct_saas_monthly.month"], chart: "kpi",
         layout: { x: 740, y: 95, w: 260, h: 156 } },
       { id: "d2", kind: "metric", title: "Web sessions", metrics: ["web_sessions"],
-        dimensions: ["day:fct_web_sessions.session_date"], chart: "line",
+        dimensions: ["day:fct_web_sessions.session_date"], chart: "line", limit: 1000,
         layout: { x: 220, y: 170, w: 560, h: 280 } },
       { id: "d3", kind: "metric", title: "New MRR (USD)", metrics: ["new_mrr"],
         dimensions: ["fct_mrr_movements.movement_type"], chart: "bar",

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DuckDBInstance } from "@duckdb/node-api";
 import { compileTile } from "../src/compiler/compile.ts";
 import { scopeFor, type RlsConfig } from "../src/security/rls.ts";
 import type { TileSpec } from "../src/compiler/spec.ts";
@@ -30,13 +31,22 @@ describe("row-level security", () => {
     expect(s.filters[0].values).toEqual([]);
   });
 
-  it("compiles an empty allow-list to FALSE, not to a no-op", () => {
-    // The single most dangerous bug an RLS layer can have is dropping its own
-    // predicate when the allow-list is empty.
-    const s = scopeFor(model, "fct_sales", cfg, cfg.principals.empty);
-    const sql = compileTile(model, conn,
-      { ...tile(), where: s.filters } as TileSpec);
-    expect(sql).toContain("FALSE");
+  it("executes an empty or unknown allow-list as no rows while authorized scopes return their own totals", async () => {
+    const instance = await DuckDBInstance.create(":memory:"), db = await instance.connect();
+    const connector = { ...conn, relation: (table: string) => conn.quote(table) };
+    try {
+      await db.run(`CREATE TABLE fct_sales (user_id VARCHAR, amount DOUBLE, sold_on DATE);
+        CREATE TABLE dim_users (user_id VARCHAR, country VARCHAR);
+        INSERT INTO dim_users VALUES ('one','GB'),('two','US'),('three','DE');
+        INSERT INTO fct_sales VALUES ('one',10,'2026-01-02'),('two',20,'2026-01-02'),('three',30,'2026-01-02');`);
+      for (const [principal, expected] of [[cfg.principals.admin, [60]], [cfg.principals.emea, [40]], [cfg.principals.empty, []], [null, []]] as const) {
+        const scope = scopeFor(model, "fct_sales", cfg, principal);
+        const query = compileTile(model, connector, tile({ dimensions: ["month:sold_on"], where: scope.filters }));
+        const result = await db.runAndReadAll(query), column = result.columnNames().indexOf("revenue");
+        expect(column).toBeGreaterThanOrEqual(0);
+        expect(result.getRows().map(row => row[column]), principal?.id ?? "unknown principal").toEqual(expected);
+      }
+    } finally { db.closeSync(); instance.closeSync(); }
   });
 
   it("forces the join so a policy cannot be dodged by not joining", () => {

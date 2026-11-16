@@ -1,5 +1,51 @@
 import { openStarter } from "./library-helpers.ts";
 import { expect, test } from "@playwright/test";
+import { DEFAULT_CANVAS } from "../src/canvas/presets.ts";
+
+test("custom canvas dimensions commit complete numbers within the advertised bounds", async ({ page }) => {
+  await page.goto("/"); await page.getByRole("button", { name: /^Start from scratch/ }).click();
+  await page.getByRole("button", { name: "Canvas settings", exact: true }).click();
+  await page.getByLabel("Canvas size", { exact: true }).selectOption("custom");
+  const width = page.getByLabel("Canvas width", { exact: true }), height = page.getByLabel("Canvas height", { exact: true });
+  await width.fill("-40"); await width.press("Enter");
+  await expect(width).toHaveValue("320");
+  await height.fill("9000"); await height.press("Enter");
+  await expect(height).toHaveValue("4000");
+  await width.fill("1920"); await width.press("Enter");
+  await expect(width).toHaveValue("1920");
+  await height.fill(""); await height.press("Enter");
+  await expect(height).toHaveValue("4000");
+  expect(await page.locator(".canvas-surface").evaluate(el => ({ width: (el as HTMLElement).style.width, height: (el as HTMLElement).style.height }))).toEqual({ width: "1920px", height: "4000px" });
+});
+
+test("discarding one recovery draft preserves a newer draft that arrived after the screen rendered", async ({ page, request }) => {
+  const source = (await (await request.get("/api/sources")).json()).active;
+  const first = { key: "first", id: null, revision: 0, source, updated: new Date().toISOString(), spec: { title: "First recovery", tiles: [] }, canvas: DEFAULT_CANVAS };
+  await page.addInitScript(draft => localStorage.setItem("sc:drafts", JSON.stringify([draft])), first);
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Discard draft First recovery", exact: true })).toBeVisible();
+  const second = { ...first, key: "second", spec: { title: "Newer recovery", tiles: [] } };
+  await page.evaluate(draft => { const current = JSON.parse(localStorage.getItem("sc:drafts")!); localStorage.setItem("sc:drafts", JSON.stringify([...current, draft])); }, second);
+  await page.getByRole("button", { name: "Discard draft First recovery", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Recover draft: Newer recovery", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("sc:drafts")!).map((d: any) => d.key))).toEqual(["second"]);
+});
+
+for (const failure of ["quota", "malformed JSON"]) test(`failed draft discard preserves recovery storage after ${failure}`, async ({ page, request }) => {
+  const source = (await (await request.get("/api/sources")).json()).active;
+  await page.addInitScript(draft => localStorage.setItem("sc:drafts", JSON.stringify([draft])), { key: "keep", id: null, revision: 0, source, updated: new Date().toISOString(), spec: { title: "Keep this draft", tiles: [] }, canvas: DEFAULT_CANVAS });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Discard draft Keep this draft", exact: true })).toBeVisible();
+  await page.evaluate(failure => {
+    if (failure === "malformed JSON") localStorage.setItem("sc:drafts", "[{broken");
+    else { const original = Storage.prototype.setItem; Storage.prototype.setItem = function(key, value) { if (key === "sc:drafts") throw new DOMException("Full", "QuotaExceededError"); return original.call(this, key, value); }; }
+  }, failure);
+  const before = await page.evaluate(() => localStorage.getItem("sc:drafts"));
+  await page.getByRole("button", { name: "Discard draft Keep this draft", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Could not discard the draft");
+  expect(await page.evaluate(() => localStorage.getItem("sc:drafts"))).toBe(before);
+  await expect(page.getByRole("button", { name: "Recover draft: Keep this draft", exact: true })).toBeVisible();
+});
 
 test("long timelines disclose limits and show the latest sample date", async ({ page, request }) => {
   const response = await request.post("/api/query", { headers: { "x-sc-principal": "admin" }, data: { metrics: ["event_count"], dimensions: ["day:fct_events.event_date"], compare: "prior" } });
@@ -8,11 +54,37 @@ test("long timelines disclose limits and show the latest sample date", async ({ 
   expect(result.truncated).toBe(true); expect(result.rows).toHaveLength(500);
   expect(result.window.end).toMatch(/^2026-08-31/);
   expect(result.rows.at(-1)[result.columns.indexOf("event_count")]).toBe(2769);
+  const id = crypto.randomUUID(), title = `Long timeline ${id}`;
+  await request.post("/api/dashboards", { data: { id, spec: { title, tiles: [{ id: "timeline", kind: "metric", title: "Events", chart: "kpi", metrics: ["event_count"], dimensions: ["day:fct_events.event_date"], compare: "prior", layout: { x:24, y:24, w:500, h:300 } }] } } });
   await page.goto("/");
-  await openStarter(page, "Events & engagement");
-  await page.getByLabel("Period", { exact: true }).selectOption("day");
+  await page.getByRole("button", { name: "Open saved dashboard", exact:true }).click();
+  await page.getByRole("dialog").getByRole("button", { name:title, exact:false }).click();
   await expect(page.locator(".result-warning").first()).toContainText("500 rows");
   await expect(page.locator(".kpi-asof").first()).toContainText("2026-08-31");
+});
+
+test("query limits exclude detection rows from both category and time-series responses", async ({ request }) => {
+  for (const query of [
+    { metrics: ["new_signups"], dimensions: ["dim_users.country"] },
+    { metrics: ["event_count"], dimensions: ["day:fct_events.event_date"], compare: "prior" },
+  ]) {
+    const call = async (limit: number) => {
+      const response = await request.post("/api/query", { headers: { "x-sc-principal": "admin" }, data: { ...query, limit } });
+      expect(response.ok(), await response.text()).toBe(true);
+      return response.json();
+    };
+    const full = await call(5000), limited = await call(2);
+    expect(full.truncated).toBe(false);
+    expect(full.rows.length).toBeGreaterThan(2);
+    expect(limited).toMatchObject({ truncated: true, limit: 2 });
+    expect(limited.rows).toHaveLength(2);
+    expect(limited.columns).toEqual(full.columns);
+    expect(limited.columns.some((name: string) => name.startsWith("__"))).toBe(false);
+    const temporal = query.dimensions[0].includes(":");
+    expect(limited.rows).toEqual(temporal ? full.rows.slice(-2) : full.rows.slice(0, 2));
+    if (temporal) expect(limited.window).toEqual({ start: limited.rows[0][0], end: limited.rows[1][0] });
+    else expect(limited.window).toBeNull();
+  }
 });
 
 test("unsupported snapshot periods fail clearly while the canvas remains monthly", async ({ page, request }) => {
@@ -36,6 +108,12 @@ test("a failed recovery write cannot abandon the current document", async ({ pag
   await expect(page.locator(".note-text")).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("Recovery backup failed");
   await expect(page.getByRole("button", { name: "Download backup" })).toBeVisible();
+  await page.getByRole("button", { name: "Dismiss notification", exact: true }).click();
+  await expect(page.locator(".document-notice")).toHaveCount(0);
+  await expect(page.locator(".note-text")).toBeVisible();
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Recovery backup failed");
+  await expect(page.locator(".note-text")).toBeVisible();
 });
 
 test("text cursor keys do not move notes and canvas keyboard resizing works", async ({ page }) => {
@@ -85,6 +163,14 @@ test("AI proposals receive unsaved content and apply through undo", async ({ pag
   expect(received.document.spec.title).toBe("Untitled dashboard"); expect(received.document.canvas.width).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Apply changes", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Revenue story", exact: true })).toBeVisible();
+  // Applying returns focus to the composer. Text undo must not mutate the dashboard.
+  const composer = page.getByRole("textbox", { name: "Message the agent", exact: true });
+  await expect(composer).toBeFocused();
+  await composer.pressSequentially("Continue the story");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
+  await expect(page.getByRole("heading", { name: "Revenue story", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Open agent chat", exact: true })).toBeFocused();
   await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z");
   await expect(page.getByRole("heading", { name: "Untitled dashboard", exact: true })).toBeVisible();
 });

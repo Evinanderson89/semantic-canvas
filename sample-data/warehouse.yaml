@@ -153,7 +153,7 @@ tables:
     primary_key: spend_id
     columns:
       - {name: spend_id, type: string, description: "Unique spend row identifier."}
-      - {name: channel, type: string, description: "Paid channel: paid_search, social or email. Values align with dim_users.signup_source."}
+      - {name: channel, type: string, description: "Paid channel: paid_search, social or email. Only paid_search and social also occur in dim_users.signup_source; email has no signup-source counterpart. Shared labels do not establish customer attribution or a valid join."}
       - {name: campaign, type: string, description: "Campaign name."}
       - {name: spend_usd, type: double, description: "Amount spent in USD on this channel that day."}
       - {name: impressions, type: bigint, description: "Ad impressions served."}
@@ -170,6 +170,7 @@ tables:
     synonyms: [saas summary, monthly mart, unit economics, nrr, retention]
     partition_keys: []
     primary_key: month
+    period: { column: month, grain: month }
     columns:
       - {name: month, type: date, description: "First day of the calendar month."}
       - {name: starting_mrr_usd, type: double, description: "MRR at the start of the month."}
@@ -237,6 +238,7 @@ metrics:
     synonyms: [average time on action]
 
   new_signups:
+    unit: number
     label: New signups
     base_table: dim_users
     expression: COUNT(DISTINCT dim_users.user_id)
@@ -268,6 +270,7 @@ metrics:
     synonyms: [average revenue per user]
 
   web_sessions:
+    unit: number
     label: Web sessions
     base_table: fct_web_sessions
     expression: COUNT(*)
@@ -293,30 +296,38 @@ metrics:
   # Contraction and churn are reported as positive magnitudes.
 
   new_mrr:
+    unit: currency
     label: New MRR (USD)
     base_table: fct_mrr_movements
-    expression: "SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type = 'new')"
+    expression: "SUM(CASE WHEN fct_mrr_movements.movement_type = 'new' THEN fct_mrr_movements.mrr_delta_usd ELSE 0 END)"
     description: MRR added by customers starting their first paid subscription.
     synonyms: [new business mrr, new revenue, acquisition mrr]
 
   expansion_mrr:
     label: Expansion MRR (USD)
     base_table: fct_mrr_movements
-    expression: "SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type = 'expansion')"
+    expression: "SUM(CASE WHEN fct_mrr_movements.movement_type = 'expansion' THEN fct_mrr_movements.mrr_delta_usd ELSE 0 END)"
     description: MRR added by existing customers through add-ons and extra seats.
     synonyms: [upsell mrr, upgrade revenue, expansion revenue]
+
+  reactivation_mrr:
+    label: Reactivation MRR (USD)
+    base_table: fct_mrr_movements
+    expression: "SUM(CASE WHEN fct_mrr_movements.movement_type = 'reactivation' THEN fct_mrr_movements.mrr_delta_usd ELSE 0 END)"
+    description: MRR restored when a previously churned customer returns. Included in gross additions, not subtracted from churn or contraction losses.
+    synonyms: [returning customer mrr, reactivated revenue]
 
   contraction_mrr:
     label: Contraction MRR (USD)
     base_table: fct_mrr_movements
-    expression: "-SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type = 'contraction')"
+    expression: "SUM(CASE WHEN fct_mrr_movements.movement_type = 'contraction' THEN -fct_mrr_movements.mrr_delta_usd ELSE 0 END)"
     description: MRR lost when existing customers drop add-ons but stay subscribed. Positive number.
     synonyms: [downgrade mrr, downsell]
 
   churned_mrr:
     label: Churned MRR (USD)
     base_table: fct_mrr_movements
-    expression: "-SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type = 'churn')"
+    expression: "SUM(CASE WHEN fct_mrr_movements.movement_type = 'churn' THEN -fct_mrr_movements.mrr_delta_usd ELSE 0 END)"
     description: MRR lost to cancellations. Positive number.
     synonyms: [lost mrr, cancelled revenue, revenue churn]
 
@@ -324,21 +335,21 @@ metrics:
     label: Net new MRR (USD)
     base_table: fct_mrr_movements
     expression: SUM(fct_mrr_movements.mrr_delta_usd)
-    description: New plus expansion minus contraction and churn. Summed over all time this equals live MRR.
+    description: New plus expansion plus reactivation, minus contraction and churn. This is the signed change in MRR; add the opening balance to reconcile closing MRR for a complete movement ledger.
     synonyms: [net mrr, mrr change, net revenue movement]
 
   gross_new_mrr:
     label: Gross new MRR (USD)
     base_table: fct_mrr_movements
-    expression: "SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type IN ('new','expansion'))"
-    description: All MRR added, before any losses.
+    expression: "SUM(CASE WHEN fct_mrr_movements.movement_type IN ('new','expansion','reactivation') THEN fct_mrr_movements.mrr_delta_usd ELSE 0 END)"
+    description: New, expansion and reactivation MRR added before churn and contraction losses. Reactivation is included in this model's gross-additions definition.
     synonyms: [gross mrr added, added revenue]
 
   quick_ratio:
     label: SaaS quick ratio
-    base_table: fct_mrr_movements
-    expression: "SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type IN ('new','expansion')) / NULLIF(-SUM(fct_mrr_movements.mrr_delta_usd) FILTER (WHERE fct_mrr_movements.movement_type IN ('churn','contraction')), 0)"
-    description: Gross new MRR divided by lost MRR. Above 4 is healthy growth; below 1 means shrinking.
+    type: derived
+    expression: gross_new_mrr / NULLIF(churned_mrr + contraction_mrr, 0)
+    description: Gross additions (new, expansion and reactivation) divided by churn and contraction losses. Undefined when losses are zero; this model includes reactivation in the numerator.
     synonyms: [growth efficiency, sales quick ratio]
 
   # ---- computed metrics (docs/metric-types.md) -----------------------------
@@ -364,15 +375,15 @@ metrics:
   lost_mrr:
     label: Lost MRR (USD)
     type: derived
-    expression: gross_new_mrr - net_new_mrr
-    description: MRR lost to churn and contraction in the period, as the gap between gross and net new MRR.
+    expression: churned_mrr + contraction_mrr
+    description: Churn plus contraction losses in the period, reported as a positive magnitude. New business, expansion and reactivation do not reduce this loss measure.
     synonyms: [churned and contracted mrr, mrr lost]
 
   cumulative_net_new_mrr:
     label: Cumulative net new MRR (USD)
     type: cumulative
     metric: net_new_mrr
-    description: Net new MRR summed from the first period shown to each period; the live MRR curve when the window starts at the beginning.
+    description: Net new MRR summed from the start of the query's input window to each period. This is accumulated change; add the opening MRR balance to obtain a closing balance from a complete ledger.
     synonyms: [mrr curve, running mrr]
 
   trailing_3_period_net_new_mrr:
@@ -380,7 +391,7 @@ metrics:
     type: cumulative
     metric: net_new_mrr
     window: 3
-    description: Net new MRR summed over the current period and the two before it.
+    description: Available net new MRR summed over the current reporting period and the two preceding calendar periods at the chart's time grain. Missing periods do not pull in older values; date filters restrict the input and coverage may be incomplete.
 
   new_paying_customers:
     label: New paying customers
@@ -468,6 +479,7 @@ metrics:
     synonyms: [opening mrr, bom mrr]
 
   ending_mrr:
+    unit: currency
     direction: higher
     importance: 100
     time_grains: [month]
@@ -479,6 +491,7 @@ metrics:
     synonyms: [closing mrr, eom mrr]
 
   nrr:
+    unit: percent
     direction: higher
     importance: 90
     time_grains: [month]
@@ -520,6 +533,7 @@ metrics:
     synonyms: [mrr churn rate, dollar churn]
 
   cac:
+    unit: currency
     direction: lower
     importance: 80
     label: CAC (USD)
@@ -556,13 +570,14 @@ metrics:
     synonyms: [ltv to cac, ltv cac]
 
   cac_payback_months:
+    unit: months
     direction: lower
     time_grains: [month]
     time_dimension: fct_saas_monthly.month
     label: CAC payback (months)
     base_table: fct_saas_monthly
     expression: "(SUM(fct_saas_monthly.marketing_spend_usd) / NULLIF(SUM(fct_saas_monthly.new_customers), 0)) / NULLIF(SUM(fct_saas_monthly.ending_mrr_usd) / NULLIF(SUM(fct_saas_monthly.customers_end), 0), 0)"
-    description: Months of ARPA needed to repay CAC.
+    description: Months of revenue per account needed to cover CAC, assuming constant ARPA. Revenue-based; does not account for gross margin.
     synonyms: [payback period, cac payback]
 
   mrr_growth_rate:
@@ -577,19 +592,19 @@ metrics:
   nrr_annualized:
     time_grains: [month]
     time_dimension: fct_saas_monthly.month
-    label: NRR (annualized)
+    label: Annualized monthly NRR (extrapolated)
     base_table: fct_saas_monthly
     expression: "POWER((SUM(fct_saas_monthly.starting_mrr_usd) + SUM(fct_saas_monthly.expansion_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0), 12)"
-    description: Monthly NRR compounded to a yearly rate. This is the figure investors quote -- 1.20 means the existing base grows 20% a year without new customers.
-    synonyms: [annual nrr, net dollar retention annual, ndr]
+    description: Monthly NRR raised to the twelfth power, assuming the same rate each month. An extrapolation, not measured retention of a starting customer cohort over an actual year.
+    synonyms: [annualized monthly nrr, extrapolated retention]
 
   grr_annualized:
     time_grains: [month]
     time_dimension: fct_saas_monthly.month
-    label: GRR (annualized)
+    label: Annualized monthly GRR (extrapolated)
     base_table: fct_saas_monthly
     expression: "POWER((SUM(fct_saas_monthly.starting_mrr_usd) - SUM(fct_saas_monthly.contraction_mrr_usd) - SUM(fct_saas_monthly.churned_mrr_usd)) / NULLIF(SUM(fct_saas_monthly.starting_mrr_usd), 0), 12)"
-    description: Monthly GRR compounded to a yearly rate. Caps at 1.0.
+    description: Monthly GRR raised to the twelfth power under a constant-rate assumption. Extrapolated, not measured annual cohort retention. Caps at 1.0.
     synonyms: [annual grr, gross retention annual]
 
   logo_churn_annualized:

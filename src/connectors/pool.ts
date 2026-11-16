@@ -1,8 +1,9 @@
-import { leasePool } from "./leases.ts";
-import { DuckDBInstance } from "@duckdb/node-api";
+import { connectionPoolSize, leasePool } from "./leases.ts";
+import { DuckDBDecimalValue, DuckDBInstance } from "@duckdb/node-api";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { readdir } from "node:fs/promises";
-import type { CatalogTable, Connector, QueryResult } from "./types.ts";
+import type { CatalogTable, Connector, QueryResult, ExecutionOptions } from "./types.ts";
+import { executionBudget, interruptibleDuckdb } from "./execution.ts";
 
 /**
  * A small connection pool plus a result cache.
@@ -30,14 +31,24 @@ interface Entry { at: number; value: QueryResult }
 export async function pooledDuckdb(
   lakeRoot: string, opts: PooledOptions = {},
 ): Promise<Connector & { stats(): object }> {
-  const size = opts.size ?? 4;
+  const size = connectionPoolSize(opts.size ?? 4);
   const ttl = opts.cacheTtlMs ?? 15_000;
   const max = opts.cacheMax ?? 500;
 
   const instance = await DuckDBInstance.create(":memory:");
-  const conns = await Promise.all(Array.from({ length: size }, () => instance.connect()));
+  // Wait for every attempt: an early rejection must not orphan a connection
+  // that finishes opening after the failure.
+  const attempts = await Promise.allSettled(Array.from({ length: size }, () => instance.connect()));
+  const conns = attempts.flatMap(attempt => attempt.status === "fulfilled" ? [attempt.value] : []);
+  const failed = attempts.find(attempt => attempt.status === "rejected");
+  if (failed?.status === "rejected") {
+    await Promise.allSettled(conns.map(conn => Promise.resolve().then(() => conn.closeSync())));
+    try { instance.closeSync(); } catch { /* preserve the startup error */ }
+    throw failed.reason;
+  }
   const leases = leasePool(conns, c => c.closeSync());
   const { acquire, release } = leases;
+  let closing: Promise<void> | undefined;
 
   // An S3 lake needs httpfs plus a credential. No credential lives in
   // sources.yaml: awsProfile names a ~/.aws/config profile (an SSO login or
@@ -49,31 +60,47 @@ export async function pooledDuckdb(
   // assumed role's session expires (often after an hour), so it is renewed
   // well inside that window.
   let secretRefresh: ReturnType<typeof setInterval> | undefined;
-  if (lakeRoot.startsWith("s3://")) {
-    await conns[0].run("INSTALL httpfs; LOAD httpfs;");
-    if (opts.awsProfile) {
-      const creds = fromNodeProviderChain({ profile: opts.awsProfile });
-      const applySecret = async () => {
-        const c = await creds();
-        const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
-        const sessionToken = c.sessionToken ? `, SESSION_TOKEN ${q(c.sessionToken)}` : "";
-        const region = opts.awsRegion ? `, REGION ${q(opts.awsRegion)}` : "";
-        await conns[0].run(
-          `CREATE OR REPLACE SECRET lake_s3 (TYPE s3, PROVIDER config, ` +
-          `KEY_ID ${q(c.accessKeyId)}, SECRET ${q(c.secretAccessKey)}${sessionToken}${region});`,
-        );
-      };
-      await applySecret();
-      secretRefresh = setInterval(() => { applySecret().catch(() => {}); }, 20 * 60_000);
-      secretRefresh.unref?.();
-    } else {
-      // No profile configured (local development with ambient credentials):
-      // DuckDB's own credential_chain provider is fine.
-      await conns[0].run("CREATE OR REPLACE SECRET lake_s3 (TYPE s3, PROVIDER credential_chain);");
+  try {
+    if (lakeRoot.startsWith("s3://")) {
+      await conns[0].run("INSTALL httpfs; LOAD httpfs;");
+      if (opts.awsProfile) {
+        const creds = fromNodeProviderChain({ profile: opts.awsProfile });
+        let refreshing: Promise<void> | undefined;
+        const applySecret = (): Promise<void> => {
+          if (closing) return Promise.resolve();
+          // A slow provider must not create overlapping refreshes. Resolve
+          // credentials before leasing so network latency does not block the
+          // query pool or its shutdown. A retired pool rejects the late lease.
+          return refreshing ??= (async () => {
+            const c = await creds();
+            const connection = await acquire();
+            try {
+              const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+              const sessionToken = c.sessionToken ? `, SESSION_TOKEN ${q(c.sessionToken)}` : "";
+              const region = opts.awsRegion ? `, REGION ${q(opts.awsRegion)}` : "";
+              await connection.run(
+                `CREATE OR REPLACE SECRET lake_s3 (TYPE s3, PROVIDER config, ` +
+                `KEY_ID ${q(c.accessKeyId)}, SECRET ${q(c.secretAccessKey)}${sessionToken}${region});`,
+              );
+            } finally { release(connection); }
+          })().finally(() => { refreshing = undefined; });
+        };
+        await applySecret();
+        secretRefresh = setInterval(() => { applySecret().catch(() => {}); }, 20 * 60_000);
+        secretRefresh.unref?.();
+      } else {
+        // No profile configured (local development with ambient credentials):
+        // DuckDB's own credential_chain provider is fine.
+        await conns[0].run("CREATE OR REPLACE SECRET lake_s3 (TYPE s3, PROVIDER credential_chain);");
+      }
     }
+  } catch (error) {
+    if (secretRefresh) clearInterval(secretRefresh);
+    try { await leases.close(); } catch { /* preserve the setup error */ }
+    try { instance.closeSync(); } catch { /* preserve the setup error */ }
+    throw error;
   }
   let hits = 0, misses = 0;
-  let closing: Promise<void> | undefined;
 
   const cache = new Map<string, Entry>();
 
@@ -84,34 +111,40 @@ export async function pooledDuckdb(
     dateTrunc: (grain, expr) => `CAST(date_trunc('${grain}', ${expr}) AS DATE)`,
     dateAdd: (unit, expr, n) => `(${expr} + INTERVAL '${n} ${unit}')`,
     toTimezone: (expr, timezone) => `timezone('${timezone.replace(/'/g, "''")}', timezone('UTC', CAST(${expr} AS TIMESTAMP)))`,
-    relation: (table) =>
-      `read_parquet('${root}/${table}/**/*.parquet', hive_partitioning = true, union_by_name = true)`,
+    relation: (table) => {
+      const path = `${root}/${table}/**/*.parquet`.replace(/'/g, "''");
+      return `read_parquet('${path}', hive_partitioning = true, union_by_name = true)`;
+    },
 
-    async execute(sql: string, limit = 5000, cacheKey?: string): Promise<QueryResult> {
-      // The key MUST include the caller's scope. Caching on SQL alone is fine
-      // here only because row-level security is compiled INTO the SQL -- two
-      // principals produce different text. If RLS were ever applied outside the
-      // query, this cache would serve one user's rows to another.
-      if (closing) throw new Error("This connection was replaced. Refresh to use the current source.");
-      const key = `${cacheKey ?? ""}::${limit}::${sql}`;
-      const hit = cache.get(key);
-      if (hit && Date.now() - hit.at < ttl) { hits++; return { ...hit.value, cached: true } as any; }
-      misses++;
-
-      const conn = await acquire();
+    async execute(sql: string, limit = 5000, cacheKey?: string, options?: ExecutionOptions): Promise<QueryResult> {
+      const budget = executionBudget(options);
       try {
-        const t0 = performance.now();
-        const reader = await conn.runAndReadAll(sql);
-        const rows = reader.getRows().slice(0, limit);
-        const value: QueryResult = {
-          columns: reader.columnNames(),
-          rows: rows.map((r: any[]) => r.map(normalize)),
-          sql, ms: Math.round(performance.now() - t0),
-        };
-        if (cache.size >= max) cache.delete(cache.keys().next().value as string);
-        cache.set(key, { at: Date.now(), value });
-        return value;
-      } finally { release(conn); }
+        budget.signal.throwIfAborted();
+        // The key MUST include the caller's scope. Caching on SQL alone is fine
+        // here only because row-level security is compiled INTO the SQL -- two
+        // principals produce different text. If RLS were ever applied outside the
+        // query, this cache would serve one user's rows to another.
+        if (closing) throw new Error("This connection was replaced. Refresh to use the current source.");
+        const key = `${cacheKey ?? ""}::${limit}::${sql}`;
+        const hit = cache.get(key);
+        if (hit && Date.now() - hit.at < ttl) { hits++; return { ...hit.value, cached: true } as any; }
+        misses++;
+
+        const conn = await acquire(budget.signal);
+        try {
+          const t0 = performance.now();
+          const reader = await interruptibleDuckdb(conn, budget.signal, () => conn.runAndReadAll(sql));
+          const rows = reader.getRows().slice(0, limit);
+          const value: QueryResult = {
+            columns: reader.columnNames(),
+            rows: rows.map((r: any[]) => r.map(normalize)),
+            sql, ms: Math.round(performance.now() - t0),
+          };
+          if (cache.size >= max) cache.delete(cache.keys().next().value as string);
+          cache.set(key, { at: Date.now(), value });
+          return value;
+        } finally { release(conn); }
+      } finally { budget.dispose(); }
     },
 
     /** Every table directory in the lake (a directory holding Parquet), with the columns DuckDB reads from it. */
@@ -146,7 +179,10 @@ export async function pooledDuckdb(
 
 function normalize(v: any): unknown {
   if (v === null || v === undefined) return null;
-  if (typeof v === "bigint") return Number(v);
+  // Preserve scale/precision in JSON and cached results. Convert to a display
+  // number only at the chart boundary, never while transporting the result.
+  if (v instanceof DuckDBDecimalValue) return v.toString();
+  if (typeof v === "bigint") return Number.isSafeInteger(Number(v)) ? Number(v) : v.toString();
   if (typeof v === "object") {
     if (typeof v.toString === "function" && (v.days !== undefined || v.micros !== undefined))
       return v.toString();

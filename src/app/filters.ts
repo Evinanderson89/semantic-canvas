@@ -62,3 +62,11 @@ export function validateDashboard(model: Model, spec: DashboardSpec) {
   }
   return issues;
 }
+
+/** Scope exceptions stay beside each chart, rather than only on the control. */
+export function unappliedFilters(spec: DashboardSpec, tile: TileSpec, values: Record<string, FilterValue>, model: Model): string[] {
+  const controls = (spec.filters ?? []).filter(f => (f.scope === "report" || f.tabId === tabOf(spec, tile))
+    && hasFilterValue(values[f.id] ?? f.defaultValue ?? {}) && !f.bindings.some(b => b.tileId === tile.id)).map(f => f.label);
+  const cross = (spec.crossFilters ?? []).filter(f => !fieldReachable(model, metricOf(model, tile.metrics[0])?.baseTable ?? "", f.field)).map(f => f.field);
+  return [...new Set([...controls, ...cross])];
+}

@@ -30,7 +30,7 @@ test("authors shared filters, carries selections across tabs and saves the whole
 test("copies charts to a tab and preserves tabs through undo and save", async ({ page }) => {
   const d = spec(); await open(page, d);
   await page.getByRole("button", { name: "Dashboard actions", exact: true }).click(); await page.getByRole("button", { name: "Copy charts to…", exact: true }).click();
-  await page.getByLabel("Destination tab", { exact: true }).selectOption("detail"); await page.getByRole("button", { name: "Copy 1 charts", exact: true }).click();
+  await page.getByLabel("Destination tab", { exact: true }).selectOption("detail"); await page.getByRole("button", { name: "Copy 1 chart", exact: true }).click();
   await page.getByRole("tab", { name: /Detail/ }).click(); await expect(page.locator(".node")).toHaveCount(2);
   await page.keyboard.press(process.platform === "darwin" ? "Meta+z" : "Control+z"); await expect(page.locator(".node")).toHaveCount(1);
   await page.getByRole("tab", { name: /Overview/ }).click(); await expect(page.locator(".node")).toHaveCount(1);
@@ -60,17 +60,86 @@ test("copying into saved dashboards protects concurrent changes", async ({ page 
   expect((await page.request.post("/api/dashboards", { data: { id: targetId, spec: target, canvas: surface, revision: 0 } })).ok()).toBe(true);
   await open(page, source);
   await page.getByRole("button", { name: "Dashboard actions", exact: true }).click(); await page.getByRole("button", { name: "Copy charts to…", exact: true }).click();
-  await page.getByLabel("Destination dashboard", { exact: true }).selectOption(targetId); await expect(page.getByRole("button", { name: "Copy 1 charts", exact: true })).toBeEnabled();
+  await page.getByLabel("Destination dashboard", { exact: true }).selectOption(targetId); await expect(page.getByRole("button", { name: "Copy 1 chart", exact: true })).toBeEnabled();
   target.title = "Changed by a teammate";
   expect((await page.request.post("/api/dashboards", { data: { id: targetId, spec: target, canvas: surface, revision: 1 } })).ok()).toBe(true);
-  await page.getByRole("button", { name: "Copy 1 charts", exact: true }).click(); await expect(page.getByRole("dialog").getByRole("alert")).toContainText(/changed|revision|conflict/i);
+  await page.getByRole("button", { name: "Copy 1 chart", exact: true }).click(); await expect(page.getByRole("dialog").getByRole("alert")).toContainText(/changed|revision|conflict/i);
   expect((await (await page.request.get(`/api/dashboards/${targetId}`)).json()).spec.tiles).toHaveLength(2);
-  await page.getByLabel("Destination dashboard", { exact: true }).selectOption("current"); await page.getByLabel("Destination dashboard", { exact: true }).selectOption(targetId); await expect(page.getByRole("button", { name: "Copy 1 charts", exact: true })).toBeEnabled();
-  await page.getByRole("button", { name: "Copy 1 charts", exact: true }).click(); await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByLabel("Destination dashboard", { exact: true }).selectOption("current"); await page.getByLabel("Destination dashboard", { exact: true }).selectOption(targetId); await expect(page.getByRole("button", { name: "Copy 1 chart", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Copy 1 chart", exact: true }).click(); await expect(page.getByRole("dialog")).toHaveCount(0);
   const copied = await (await page.request.get(`/api/dashboards/${targetId}`)).json(); expect(copied.spec.title).toBe("Changed by a teammate"); expect(copied.spec.tiles).toHaveLength(3); expect(copied.revision).toBe(3);
 });
 
 test("the save endpoint rejects misleading filter connections", async ({ request }) => {
   const d = spec(); d.filters = [{ id: "forged", label: "Country", field: "dim_users.country", control: "select", scope: "tab", tabId: "overview", bindings: [{ tileId: "b", field: "dim_users.country" }] }];
   const result = await request.post("/api/dashboards", { data: { id: crypto.randomUUID(), spec: d, canvas: DEFAULT_CANVAS, revision: 0 } }); expect(result.status()).toBe(400); expect(await result.text()).toContain("scope");
+});
+
+for (const savedDestination of [false, true]) test(`copy scope previews ${savedDestination ? "saved destination defaults" : "current destination selections"} and preserves chart filters`, async ({ page }, info) => {
+  const source = spec(), target = spec(), targetId = crypto.randomUUID();
+  source.tiles[0].where = [{ id: "fixed", field: "dim_users.country", source: "dimension", mode: "discrete", values: ["GB"], exclude: true }];
+  source.filters = [
+    { id: "country", label: "Country", field: "dim_users.country", control: "select", scope: "report", defaultValue: { values: ["US"] }, bindings: source.tiles.map(t => ({ tileId: t.id, field: "dim_users.country" })) },
+    { id: "source-only", label: "Source country", field: "dim_users.country", control: "select", scope: "tab", tabId: "overview", defaultValue: { values: ["US"] }, bindings: [{ tileId: "a", field: "dim_users.country" }] },
+  ];
+  target.filters = [
+    { id: "destination-country", label: "Destination country", field: "dim_users.country", control: "select", scope: "report", defaultValue: { values: ["DE"] }, bindings: target.tiles.map(t => ({ tileId: t.id, field: "dim_users.country" })) },
+    { id: "unrelated", label: "Finance period", field: "fct_saas_monthly.month", control: "date", scope: "report", defaultValue: { min: "2026-07-01" }, bindings: [] },
+  ];
+  if (savedDestination) expect((await page.request.post("/api/dashboards", { data: { id: targetId, spec: target, canvas: DEFAULT_CANVAS, revision: 0 } })).ok()).toBe(true);
+  const sourceId = await open(page, source);
+  await page.getByRole("button", { name: "Choose Country", exact: true }).click();
+  await page.getByRole("checkbox", { name: "US", exact: true }).uncheck();
+  await page.getByRole("checkbox", { name: "CA", exact: true }).check();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await page.getByRole("button", { name: "Dashboard actions", exact: true }).click();
+  await page.getByRole("button", { name: "Copy charts to…", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Copy charts to another view" });
+  if (savedDestination) {
+    let release!: () => void;
+    const loaded = new Promise<void>(resolve => { release = resolve; });
+    await page.route(`**/api/dashboards/${targetId}`, async route => { await loaded; await route.continue(); });
+    await dialog.getByLabel("Destination dashboard", { exact: true }).selectOption(targetId);
+    await expect(dialog.getByRole("status")).toHaveText("Loading destination…");
+    await expect(dialog.getByRole("region", { name: "Copied chart scope" })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Copy 1 chart", exact: true })).toBeDisabled();
+    release();
+  }
+  const preview = dialog.getByRole("region", { name: "Copied chart scope" });
+  const country = savedDestination ? "DE" : "CA";
+  await expect(preview).toContainText(`includes ${country}`);
+  await expect(preview).toContainText("excludes GB");
+  await expect(preview).not.toContainText("includes US");
+  if (savedDestination) await expect(preview).toContainText("Not filtered by Finance period");
+  await preview.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: info.outputPath("copy-scope.png") });
+  await dialog.getByRole("button", { name: "Copy 1 chart", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  if (savedDestination) {
+    const persisted = await (await page.request.get(`/api/dashboards/${targetId}`)).json();
+    expect(persisted.spec.tiles).toHaveLength(3);
+    expect(persisted.spec.tiles.at(-1).where).toEqual(source.tiles[0].where);
+    expect(persisted.spec.filters[0].defaultValue.values).toEqual(["DE"]);
+    expect(persisted.spec.filters[0].bindings).toHaveLength(3);
+    expect(persisted.spec.filters[1].bindings).toEqual([]);
+    expect((await (await page.request.get(`/api/dashboards/${sourceId}`)).json()).spec.tiles).toHaveLength(2);
+    const copiedQuery = page.waitForRequest(r => r.url().endsWith("/api/query") && r.postDataJSON()?.id === persisted.spec.tiles.at(-1).id);
+    await page.getByRole("button", { name: "Dashboard actions", exact: true }).click();
+    await page.getByRole("button", { name: "Open saved dashboard", exact: true }).click();
+    await page.getByRole("dialog", { name: "Saved dashboards" }).getByRole("button", { name: new RegExp(target.title) }).click();
+    expect((await copiedQuery).postDataJSON().where).toEqual([
+      source.tiles[0].where![0], { id: "control:destination-country", field: "dim_users.country", source: "dimension", mode: "discrete", values: ["DE"] },
+    ]);
+  } else {
+    const query = page.waitForRequest(r => r.url().endsWith("/api/query") && !["a", "b"].includes(r.postDataJSON()?.id));
+    await page.getByRole("tab", { name: /Detail/ }).click();
+    expect((await query).postDataJSON().where).toEqual([
+      source.tiles[0].where![0], { id: "control:country", field: "dim_users.country", source: "dimension", mode: "discrete", values: ["CA"] },
+    ]);
+    await page.getByRole("button", { name: "Save dashboard", exact: true }).click();
+    await expect(page.locator(".save-status")).toHaveText("Saved");
+    const persisted = await (await page.request.get(`/api/dashboards/${sourceId}`)).json();
+    expect(persisted.spec.filters[0].defaultValue.values).toEqual(["US"]);
+    expect(persisted.spec.filters[1].bindings).toHaveLength(1);
+  }
 });

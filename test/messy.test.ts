@@ -8,7 +8,7 @@ import { joinCandidates, probeJoins, profileTables } from "../src/modeler/intros
 import { propose } from "../src/modeler/propose.ts";
 import { driftOf, extendProposal } from "../src/modeler/extend.ts";
 import { compileTile, splitPartialPeriods } from "../src/compiler/compile.ts";
-import { reviewDataHonesty } from "../src/suggest/dataHonesty.ts";
+import { futureFilter, reviewDataHonesty } from "../src/suggest/dataHonesty.ts";
 import { proposalProblems } from "../src/modeler/proposals.ts";
 import { duckglueAdapter } from "../src/semantic/duckglue.ts";
 import type { Connector } from "../src/connectors/types.ts";
@@ -25,9 +25,8 @@ beforeAll(async () => {
 afterAll(async () => { await conn.close(); rmSync(dir, { recursive: true, force: true }); });
 
 describe("the messy lake", () => {
-  it("is generated the same every time", () => {
-    expect(counts).toEqual({ dim_regions: 6, dim_customers: 1200, dim_products: 0, fct_orders: 20000, fct_refunds: 1500, fct_events: 50000, stg_orders_2024: expect.any(Number) });
-    expect(counts.stg_orders_2024).toBeGreaterThan(1000);
+  it("contains the expected number of rows in all seven fixture tables", () => {
+    expect(counts).toEqual({ dim_regions: 6, dim_customers: 1200, dim_products: 0, fct_orders: 20000, fct_refunds: 1500, fct_events: 50000, stg_orders_2024: 3182 });
   });
 
   it("the Modeler names the table with no key, leaves out the empty one, and flags the joins that do not resolve", async () => {
@@ -49,7 +48,7 @@ describe("the messy lake", () => {
     expect(j("fct_orders", "dim_customers").resolution).toBeGreaterThan(0.85);
     expect(j("fct_orders", "dim_customers").resolution).toBeLessThan(0.95);
     expect(j("fct_orders", "dim_customers").include).toBe(true);
-    expect(p.warnings.some((w) => w.startsWith("fct_orders.customer_id → dim_customers: only") && w.includes("included, check it"))).toBe(true);
+    expect(p.warnings.some((w) => w.startsWith("fct_orders.customer_id → dim_customers:") && w.includes("unmatched") && w.includes("Included as a left join"))).toBe(true);
     expect(j("dim_customers", "dim_regions").resolution).toBeLessThan(0.95);
     expect(j("fct_refunds", "fct_orders").resolution).toBe(1);
     // Refunds fan out from orders; the Modeler proposes the join from the many side only.
@@ -84,9 +83,11 @@ describe("the messy lake", () => {
     expect(findings[0].text).toContain("after today: some rows are dated in the future");
     expect(findings[0].fixes).toEqual([{ kind: "exclude-future", field: "fct_orders.ordered_at", through: MESSY_TODAY }]);
     // With the fix applied, the real edge shows: the newest week is incomplete, and the comparison says so.
-    const fixed = { ...tile, where: [{ id: "honesty:t:through-today", field: "fct_orders.ordered_at", source: "dimension", mode: "range", max: MESSY_TODAY }] };
+    const fixed = { ...tile, where: [futureFilter(tile.id, { kind: "exclude-future", field: "fct_orders.ordered_at", through: MESSY_TODAY })] };
     const r2 = splitPartialPeriods(await conn.execute(compileTile(model, conn, fixed), 5000));
     expect(r2.partial.end).toBe(true);
+    const qualified = { ...fixed, dimensions: ["week:fct_orders.ordered_at"] };
+    expect(splitPartialPeriods(await conn.execute(compileTile(model, conn, qualified), 5000))).toEqual(r2);
     const again = reviewDataHonesty({ tile: fixed, model, columns: r2.columns, rows: r2.rows, partial: r2.partial, timeDimension: "week:ordered_at", where: fixed.where as any, today });
     expect(again.map((f) => f.rule)).toEqual(["lagging"]);
     expect(again[0].text).toContain("The newest week is not finished and is left out");

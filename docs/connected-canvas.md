@@ -1,6 +1,6 @@
 # Connected to Semantic Canvas
 
-Status: **design, agreed direction; phase 1 and 2 in progress**. This note is the contract between Ingest (`gateway-platform/apps/ingest`) and Semantic Canvas for the "Connected to Semantic Canvas" destination. Both repositories carry a copy; change them together.
+Status: **implemented alpha with local and fixture coverage; live connector acceptance and release packaging remain open**. The lake destination, registration and review workflow are implemented. The Snowflake landing destination has simulated-driver coverage, not live warehouse acceptance. This note is the contract between Ingest (`gateway-platform/apps/ingest`) and Semantic Canvas for the "Connected to Semantic Canvas" destination. Both repositories carry a copy; change them together.
 
 ## What it is
 
@@ -29,15 +29,19 @@ Operator configures one shared directory, mounted by both apps: `INGEST_CANVAS_L
   staging/<dataset>/<import_id>/manifest.json
   archive/<dataset>/<import_id>/...          previous current versions, kept for rollback
   datasets/<dataset>.json                    dataset record (below)
+.promotions/<dataset>.json                 pending local promotion recovery journal
 ```
 
 Canvas's DuckDB connector reads `<lakeRoot>/<table>/**/*.parquet` with `union_by_name`, so only `tables/` may contain current data, and each dataset folder holds exactly one version. `staging/`, `archive/` and `datasets/` sit outside `lakeRoot` and are invisible to Canvas.
 
 In the Gateway Compose deployment the directory is one shared volume: Ingest mounts it as `INGEST_CANVAS_LAKE_DIR`, Canvas as `SC_SHARED_LAKE`. Canvas's entrypoint creates `<lake>/tables`, seeds it with the sample lake when it is empty, and on first run writes a `sources.yaml` whose `duckglue-local` source reads `${SC_SHARED_LAKE}/tables`, so the sample warehouse and connected tables come from the same place.
 
-Writes go to a temporary directory under `staging/` and are renamed into place. Promote is two renames: current to `archive/<dataset>/<previous_import_id>`, then staged to `tables/<dataset>`. POSIX has no atomic directory exchange, so Canvas may see the folder missing for a few milliseconds; its query cache and the ordering above make that harmless. Rollback is the same swap in reverse.
+Writes go to a temporary directory under `staging/` and are renamed into place. Promote is two renames: current to `archive/<dataset>/<previous_import_id>`, then staged to `tables/<dataset>`. These two renames are not one atomic operation. A query during the swap can observe a missing table; cached results do not guarantee uninterrupted or fresh reads. Rollback uses the same two-step swap in reverse. Before moving data, Ingest writes a local promotion journal. The atomically saved dataset record is the commit decision: recovery restores the previous version if the record was not committed, or keeps the new version if it was. Version manifests are replaced atomically and reconstructed from that record during recovery. Recovery runs after a failed promotion, during startup, and before the next queued mutation; if storage errors prevent it, the journal is retained and the operation fails explicitly. Unknown folder identities are never deleted as orphans.
 
-**Snowflake flavour (phase 4):** the same dataset record and the same promote and rollback semantics over tables in a dedicated landing schema. Ingest's role can create only in that schema. Canvas has a read-only role on it. Ingest never writes to a schema that holds modeled tables.
+
+Local tests cover installation and metadata failures, failed rollback, recovery retry, and an isolated worker terminated after installing files but before committing its record. This is single-writer process-failure recovery, not a cross-process lock, a power-loss durability guarantee, or uninterrupted query service. Keep one Ingest writer per lake root. Preserve `.promotions/`, `datasets/`, `tables/`, `staging/` and `archive/` together in an offline backup; do not delete a pending journal to bypass a recovery error. Snowflake view/metadata recovery is a separate acceptance boundary.
+
+**Snowflake flavour (phase 4, implemented with simulated-driver coverage):** the same dataset record and promote/rollback workflow use immutable version tables behind a current-version view in a dedicated landing schema. The operator must give Ingest write access only to that landing schema and Canvas read-only access. Ingest never writes to a schema that holds modeled tables. Real Snowflake permissions, lineage binds and view behavior remain live acceptance work; fixture tests do not establish them.
 
 ## Dataset record
 
@@ -90,7 +94,7 @@ Ingest generates the draft from the reviewed mapping, in duckglue shape, and sho
 - Table: `description` from the source, `grain` "one row per <source object>", `primary_key` when a column is named `id` or `<object>_id` and is unique in the load, `partition_keys` empty, `synonyms` from the source object name.
 - Columns: mapped types, plus the three lineage columns.
 - Dimensions: text, boolean, date and timestamp columns except identifiers and lineage columns.
-- Time dimension: the first `date` or `timestamp` column, declared as `default_date_column` on the table entry; Canvas treats it as a time axis only after an admin confirms it is a periodic fact date, not a lifecycle attribute.
+- Time dimension: a proposed `date` or `timestamp` column is declared as `default_date_column` on the table entry. An administrator reviews that choice before publication; unreviewed tables stay out of automatic dashboard suggestions. The merge retains this declaration as `defaultDateColumn`, separate from physical partitions, so published metrics and built-in row counts use the authored date for default trends. This chooses an analysis axis, not a claim that every reporting period is complete. Missing or non-temporal declarations are rejected rather than replaced with another date column.
 - Only `table`, `metrics` and `provenance` travel in the registration payload. Dimension lists, partition keys and the plain-language lines stay in Ingest; Canvas derives dimensions from column types and never proposes lineage columns.
 - Draft metrics, all with `reviewed: false`: `<dataset>_rows` (`count(*)`), and for each numeric column not flagged as money-without-unit, `<dataset>_<column>_total` (`sum(column)`) and `<dataset>_<column>_avg`. No time grains, no direction, no importance until review.
 
@@ -112,22 +116,24 @@ Ingest calls Canvas with the user's own Gateway session cookie and the Canvas an
 }
 ```
 
-Canvas stores connected tables in a per-source overlay, `SC_DATA_DIR/models/connected/<sourceId>.yaml`, merged over the base model when the source loads. Base model files are never edited. Each overlay table carries `status: unreviewed | published`, `provenance`, and `loadedAt`. Registering an existing dataset again replaces its overlay entry only if the caller is the owner or an admin, and only after the drift rules above.
+Canvas stores connected tables in a per-source overlay, `SC_DATA_DIR/models/connected/<sourceId>.yaml`, merged over the base model when the source loads. Base model files are never edited. Each overlay table carries `status: unreviewed | published`, `provenance`, and `loadedAt`. Registering an existing dataset again requires the owner or an admin. A refresh with the same schema and approved expressions updates provenance while preserving published labels, descriptions, table metadata and reporting-grain decisions. An editor cannot change or remove an approved expression, or change a published column schema, primary key or default date column: Canvas returns 403 and keeps the existing definition. An administrator can stage replacement logic, but changed expressions become unreviewed; a structural table change makes the table and every metric unreviewed. The administrator must publish again before viewers can use the replacement.
 
-`GET /api/sources/:sourceId/connected/:dataset` returns the draft in full (columns, expressions, review fields) for the review screen. `POST /api/sources/:sourceId/connected/:dataset/publish` (admin) marks the table and chosen metrics reviewed and may set `time_grains`, `direction`, `importance` and a row-level policy. `DELETE /api/sources/:sourceId/connected/:dataset` (owner or admin) removes the overlay entry; data stays in the lake.
+`GET /api/sources/:sourceId/connected/:dataset` returns columns, expressions, review fields and an opaque `revision` for the review screen. `POST /api/sources/:sourceId/connected/:dataset/publish` (admin) publishes the table and sets each supplied metric’s `reviewed` state. Setting `reviewed: false` withdraws that metric from viewer queries and automatic suggestions; it does not remove the underlying table or erase saved dashboards. The dialog explains the effect before saving, and a later review can publish the metric again. The UI sends `expectedRevision`; a changed dataset returns 409 instead of overwriting another review or ingestion refresh. API clients that omit it retain partial-update behavior. Optional metadata (`time_grains`, `time_dimension`, `direction`, `importance`, table grain and default date) can be cleared with explicit `null`; omitted fields remain unchanged. Row-level policies are managed separately, not by this endpoint. `DELETE /api/sources/:sourceId/connected/:dataset` (owner or admin) removes the overlay entry; data stays in the lake.
+
+If loading the review fails, **Retry loading review** reloads it in the same dialog. While a publication request is pending, table metadata and metric choices are disabled so the submitted review cannot diverge from the visible form. A failed save keeps those values editable for correction and retry. Closing the dialog cancels its pending load.
 
 Canvas behaviour for unreviewed tables: visible to editors and admins with an "Ingested, unreviewed" badge; hidden from viewers; excluded from dashboard suggestions and from the agent's catalogue; provenance and "data as of" shown on the source and on every tile that uses the table.
 
 ## Repeat imports
 
-A second import into an existing dataset name lands in `staging/`. Nothing Canvas reads changes. The user sees "Version 2 staged" with the drift report and a **Promote** button. Promote applies the rules above, archives the previous version and swaps. **Roll back** swaps the archived version back. The overlay in Canvas is updated with the promoted version's columns and provenance; unreviewed metrics are regenerated, published metrics are kept unless the drift check removed their columns.
+A second import into an existing dataset name lands in `staging/`. Nothing Canvas reads changes. The user sees "Version 2 staged" with the drift report and a **Promote** button. Promote applies the rules above, archives the previous version and swaps. **Roll back** swaps the archived version back. The overlay in Canvas is updated with the promoted version's columns and provenance; unreviewed metrics are regenerated. Canvas independently enforces the registration and approval rules above; an upstream promotion does not grant permission to replace approved semantic logic.
 
 ## Phases
 
 1. **Ingest lake destination (done).** Layout, dataset records, lineage columns, naming, flags, quotas, staged load, promote and roll back with the drift check, draft model generation, minimal UI. Fully testable locally against a temporary lake directory. No Canvas call yet.
 2. **Canvas overlay and registration (done).** The overlay loader, the three endpoints, role rules, unreviewed visibility, provenance and "data as of" in the UI. Testable with fixtures.
 3. **Wire them together (done).** Ingest calls the registration endpoint, shows the Canvas status on the dataset, deep-links "Open in Semantic Canvas" (`<canvas>/?source=<sourceId>&table=<dataset>`: Canvas switches to that source if the caller may use it, opens the Metric Registry filtered to the table, and strips both parameters; an unknown source or table is ignored), and disconnects. Verified through the local launcher with both apps running.
-4. **Snowflake landing schema.** Same record and semantics over Snowflake tables.
+4. **Snowflake landing schema (implemented, simulated-driver tests).** `apps/ingest/src/server/landing.ts` uses version tables and a current-version view, with the shared drift, promotion, rollback and registration flow. Live Snowflake execution remains unverified.
 5. **Live acceptance and docs.** (Compose walkthrough done 10 September 2026; live provider runs and the operator guide remain.) Fresh Compose run, a real Salesforce or Stripe account, the operator guide, and the release-gate updates in `suite-packaging.md`.
 
 ## Out of scope for now

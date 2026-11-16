@@ -60,8 +60,8 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
           <path d="M10 2v16M10 6l5-2M10 12l-5 2" strokeLinecap="round" />
         </svg>
         <span>Semantic Canvas</span>
-        <button className="collapse" onClick={onToggle} title="Collapse sidebar"
-                aria-label="Collapse sidebar">
+        <button className="collapse" onClick={onToggle} title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed}>
           <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.6">
             <rect x="3" y="4" width="14" height="12" rx="2" /><path d="M8 4v12" />
           </svg>

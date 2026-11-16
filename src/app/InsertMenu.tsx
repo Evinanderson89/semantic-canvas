@@ -41,7 +41,7 @@ export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker, onFilt
               setOpen(null);
             }}>
               <b>{prettyTable(name)} KPI row</b>
-              <small>{ms.slice(0, 4).map((m) => m.label).join(" · ')".replace(")'", ""))}</small>
+              <small>{ms.slice(0, 4).map((m) => m.label).join(" · ")}</small>
             </button>
           ))}
         </div>

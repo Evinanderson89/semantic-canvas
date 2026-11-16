@@ -1,4 +1,6 @@
+import { coverage, toFeatureId } from "../charts/geo.ts";
 import type { ChartKind } from "../compiler/spec.ts";
+import { chartShapeIssue } from "../charts/capabilities.ts";
 
 export interface FieldProfile {
   field: string;
@@ -7,6 +9,7 @@ export interface FieldProfile {
   sample: string[];
   role: "temporal" | "geo" | "categorical" | "numeric";
   isoLike?: boolean;
+  warning?: string;
 }
 
 export type Fit = "ideal" | "good" | "possible" | "poor";
@@ -45,7 +48,8 @@ const RANK: Record<Fit, number> = { ideal: 3, good: 2, possible: 1, poor: 0 };
  * any model that documents itself this way, not just this one.
  */
 export function recommend(measures: string[], dims: FieldProfile[], hints?: string): VizOption[] {
-  const out = recommendByShape(measures, dims);
+  const shape = { measures: measures.length, dimensions: dims.map(d => ({ temporal: d.role === "temporal", numeric: d.role === "numeric" })) };
+  const out = recommendByShape(measures, dims).filter(o => !chartShapeIssue(o.kind, shape));
   if (!hints) return out;
   const text = hints.toLowerCase();
   for (const hint of SEMANTIC_HINTS) {
@@ -92,7 +96,7 @@ function recommendByShape(measures: string[], dims: FieldProfile[]): VizOption[]
 
   // ---- no dimensions: a single number, or a small comparison ----------------
   if (dims.length === 0) {
-    if (m === 1) add("kpi", "KPI card", "ideal", "One number with no breakdown — show it big, with its trend.", "magnitude", 1);
+    if (m === 1) add("kpi", "KPI card", "ideal", "One aggregate value with no time breakdown. Add a reporting date to show a trend.", "magnitude", 1);
     if (m > 1) {
       add("bar", "Bar", "good", `Compares ${m} measures side by side.`, "comparison");
       // Several separately-governed measures selected together, no
@@ -146,9 +150,12 @@ function recommendByShape(measures: string[], dims: FieldProfile[]): VizOption[]
     }
 
     if (d.role === "geo") {
-      add("map", "Map", m === 1 ? "ideal" : "good", d.isoLike
-        ? `Values look like country codes (${d.sample.slice(0, 3).join(", ")}) — geography is the natural encoding.`
-        : "This field looks geographic, so place carries meaning here.", "geography", m === 1 ? 1 : 0);
+      const matched = coverage(d.sample);
+      const aliases = new Set(d.sample.map(toFeatureId).filter(Boolean)).size < matched.matched;
+      const complete = matched.total > 0 && matched.matched === matched.total && !aliases;
+      add("map", "Country map", complete ? "ideal" : matched.matched && !aliases ? "possible" : "poor",
+        matched.total ? `${matched.matched} of ${matched.total} sampled values have a country shape in this map. ${aliases ? "Some keys resolve to the same country; normalize the query grouping first." : complete ? "Inspect the full result for coverage." : "Use a bar or table to retain unmatched places."}`
+          : "Country map coverage is not checked yet. This atlas does not encode cities or subnational regions.", "geography", complete ? 1 : 0);
       add("barH", "Horizontal bar", n <= 30 ? "ideal" : "good",
         `${n} places — a ranked bar answers "which is biggest" faster than a map does.`, "ranking", 0.5);
       add("bar", "Bar", n <= 15 ? "good" : "possible", `${n} categories.`, "comparison");
@@ -186,8 +193,8 @@ function recommendByShape(measures: string[], dims: FieldProfile[]): VizOption[]
     } else {
       add("barGrouped", "Grouped bar", "ideal", `${m} measures across ${n} categories, compared directly.`, "comparison", 1);
       add("barStacked", "Stacked bar", "good", "Totals per category, with each measure's contribution.", "part-to-whole");
-      add("scatter", "Scatter", m === 2 ? "good" : "possible", m === 2
-        ? `Two measures — position on both axes shows whether they move together.` : "Uses the first two measures.", "correlation");
+      if (m === 2) add("scatter", "Scatter", "good",
+        "Two measures — position on both axes shows whether they move together.", "correlation");
     }
     add("table", "Table", "possible", "Exact values.", "precision");
     return sort(out);
@@ -195,7 +202,7 @@ function recommendByShape(measures: string[], dims: FieldProfile[]): VizOption[]
 
   // ---- two dimensions -------------------------------------------------------
   const t = temporal[0], c = cats[0] ?? geo[0];
-  if (t && c) {
+  if (dims.length === 2 && m === 1 && t && c) {
     const n = card(c);
     add("line", "Multi-series line", n <= 8 ? "ideal" : "good", n <= 8
       ? `One line per ${short(c.field)} (${n} of them) over time.`
@@ -214,7 +221,7 @@ function recommendByShape(measures: string[], dims: FieldProfile[]): VizOption[]
     add("table", "Table", "possible", "Every combination as a row.", "precision");
     return sort(out);
   }
-  if (dims.length === 2) {
+  if (dims.length === 2 && m === 1) {
     const [a, b] = dims;
     add("heatmap", "Heatmap", "ideal", `${short(a.field)} × ${short(b.field)} — colour shows the measure at each intersection.`, "density", 1);
     add("barStacked", "Stacked bar", card(b) <= 8 ? "good" : "possible", `Grouped by ${short(a.field)}, split by ${short(b.field)}.`, "part-to-whole");
@@ -222,7 +229,7 @@ function recommendByShape(measures: string[], dims: FieldProfile[]): VizOption[]
     return sort(out);
   }
 
-  add("table", "Table", "ideal", `${dims.length} dimensions — beyond what a chart can encode.`, "precision", 1);
+  add("table", "Table", "ideal", `${dims.length} breakdowns and ${m} measures — a table keeps every selected field visible.`, "precision", 1);
   return sort(out);
 }
 
@@ -269,18 +276,33 @@ export interface NoiseFinding {
 }
 
 export function detectNoisy(rows: unknown[][], columns: string[], measures: string[]): NoiseFinding[] {
+  return noiseScores(rows, columns, measures).filter(f => f.score >= NOISE_THRESHOLD);
+}
+
+/** Score observed adjacent pairs without inventing zeros or joining across
+ * missing values. No score means insufficient evidence, not a smooth line. */
+export function noiseScores(rows: unknown[][], columns: string[], measures: string[]): NoiseFinding[] {
   const out: NoiseFinding[] = [];
   for (const m of measures) {
     const i = columns.indexOf(m);
     if (i < 0) continue;
-    const vals = rows.map((r) => Number(r[i])).filter(Number.isFinite);
-    if (vals.length < MIN_POINTS_FOR_NOISE) continue;
-    const range = Math.max(...vals) - Math.min(...vals);
-    if (range <= 0) continue;
-    const diffs = vals.slice(1).map((v, idx) => Math.abs(v - vals[idx]));
+    const vals = rows.map(r => {
+      const v = r[i];
+      if (typeof v !== "number" && typeof v !== "string" || typeof v === "string" && !v.trim()) return null;
+      return Number.isFinite(Number(v)) ? Number(v) : null;
+    });
+    const observed = vals.filter((v): v is number => v !== null);
+    const diffs: number[] = [];
+    for (let j = 1; j < vals.length; j++) {
+      const a = vals[j - 1], b = vals[j];
+      if (a !== null && b !== null) diffs.push(Math.abs(b - a));
+    }
+    if (observed.length < MIN_POINTS_FOR_NOISE || diffs.length < MIN_POINTS_FOR_NOISE - 1) continue;
+    const range = Math.max(...observed) - Math.min(...observed);
+    if (range === 0) { out.push({ measure: m, score: 0 }); continue; }
     const meanAbsDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
     const score = meanAbsDiff / range;
-    if (score >= NOISE_THRESHOLD) out.push({ measure: m, score });
+    if (Number.isFinite(score)) out.push({ measure: m, score });
   }
   return out;
 }
@@ -308,6 +330,7 @@ export interface DegenerateFinding {
   measure: string;
   /** The one category actually carrying a value, for the why-text. */
   dominantValue: string;
+  basis: "single-category" | "single-nonzero";
 }
 
 export function detectDegenerate(
@@ -316,10 +339,14 @@ export function detectDegenerate(
   const dimIdx = columns.indexOf(dimension);
   const mIdx = columns.indexOf(measure);
   if (dimIdx < 0 || mIdx < 0 || rows.length === 0) return null;
-  if (rows.length === 1) return { dimension, measure, dominantValue: String(rows[0][dimIdx]) };
-  const withValue = rows.filter((r) => { const v = Number(r[mIdx]); return Number.isFinite(v) && v !== 0; });
+  // Unknown values are not measured zeros. Repeated category rows are also
+  // ambiguous: this check cannot choose their aggregation semantics.
+  if (rows.some(r => r[dimIdx] == null || (typeof r[mIdx] !== "number" && typeof r[mIdx] !== "string") || typeof r[mIdx] === "string" && !r[mIdx].trim() || !Number.isFinite(Number(r[mIdx])))) return null;
+  if (new Set(rows.map(r => JSON.stringify([typeof r[dimIdx], r[dimIdx]]))).size !== rows.length) return null;
+  if (rows.length === 1) return { dimension, measure, dominantValue: String(rows[0][dimIdx]), basis: "single-category" };
+  const withValue = rows.filter((r) => Number(r[mIdx]) !== 0);
   if (withValue.length !== 1) return null;
-  return { dimension, measure, dominantValue: String(withValue[0][dimIdx]) };
+  return { dimension, measure, dominantValue: String(withValue[0][dimIdx]), basis: "single-nonzero" };
 }
 
 /** One step coarser than `grain` -- day and week both step to month rather

@@ -1,27 +1,15 @@
 import type { AlertInput, Evaluation } from "./model.ts";
-import type { TimeGrain } from "../semantic/model.ts";
-
-export function periodStart(input: Date, grain: TimeGrain) {
-  const d = new Date(input); d.setUTCHours(0, 0, 0, 0);
-  if (grain === "week") d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7);
-  if (["month", "quarter", "year"].includes(grain)) d.setUTCDate(1);
-  if (grain === "quarter") d.setUTCMonth(Math.floor(d.getUTCMonth() / 3) * 3);
-  if (grain === "year") d.setUTCMonth(0);
-  return d;
-}
-export function nextPeriod(input: Date, grain: TimeGrain, n = 1) {
-  const d = new Date(input);
-  if (grain === "day" || grain === "week") d.setUTCDate(d.getUTCDate() + n * (grain === "week" ? 7 : 1));
-  else d.setUTCMonth(d.getUTCMonth() + n * (grain === "year" ? 12 : grain === "quarter" ? 3 : 1));
-  return d;
-}
+import { DEFAULT_CALENDAR, type Calendar, type TimeGrain } from "../semantic/model.ts";
+import { periodStart, nextPeriod, reportingDay } from "../semantic/calendar.ts";
+import type { PartialEdges } from "../compiler/compile.ts";
+export { periodStart, nextPeriod } from "../semantic/calendar.ts";
 const median = (values: number[]) => { const a = [...values].sort((a, b) => a - b); return (a[Math.floor((a.length - 1) / 2)] + a[Math.ceil((a.length - 1) / 2)]) / 2; };
 const numeric = (v: unknown): number | null => v === null || v === undefined || typeof v === "boolean" || typeof v === "string" && !v.trim() ? null : Number.isFinite(Number(v)) ? Number(v) : null;
 
 /** A robust outlier heuristic, not a confidence interval or proof of causation.
  * Scaled MAD: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/mad.htm
  * Fit historical changes only; the observation being tested never enters its baseline. */
-export function evaluateAlert(rule: AlertInput, result: { columns: string[]; rows: unknown[][] }, timeDimension?: string, now = new Date()): Evaluation {
+export function evaluateAlert(rule: AlertInput, result: { columns: string[]; rows: unknown[][]; partial?: PartialEdges }, timeDimension?: string, now = new Date(), calendar: Calendar = DEFAULT_CALENDAR): Evaluation {
   const checkedAt = now.toISOString();
   const waiting = (reason: string): Evaluation => ({ state: "waiting", reason, checkedAt });
   const metricIndex = result.columns.indexOf(rule.metric);
@@ -33,19 +21,28 @@ export function evaluateAlert(rule: AlertInput, result: { columns: string[]; row
     if (!["day", "week", "month", "quarter", "year"].includes(grain)) return waiting("Choose a supported reporting period.");
     const index = result.columns.indexOf(`${field.split(".").at(-1)}_${g}`);
     if (index < 0) return waiting("A reporting date is needed to check this chart.");
-    const cutoff = periodStart(now, grain);
+    const cutoff = periodStart(reportingDay(now, calendar), grain, calendar);
     for (const row of result.rows) {
       const raw = row[index]; if (raw == null) return waiting("A reporting date is missing. No alert was raised.");
       const literal = raw instanceof Date ? raw.toISOString() : String(raw);
       const date = new Date(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(literal) ? literal.replace(" ", "T") + "Z" : literal);
       if (!Number.isFinite(+date)) return waiting("A reporting date could not be read.");
-      if (+date < +cutoff) points.push({ date, value: numeric(row[metricIndex]) });
+      points.push({ date, value: numeric(row[metricIndex]) });
     }
     points.sort((a, b) => +a.date - +b.date);
+    const first = points[0]?.date, end = points.at(-1)?.date;
+    const selectedPartial = (date: Date) => result.partial?.selected?.start && +date === +first! || result.partial?.selected?.end && +date === +end!;
+    const ratioPeriods = new Set(result.partial?.ratio?.map(r => r.period));
+    const unverifiedRatio = (date: Date) => ratioPeriods.has(date.toISOString().slice(0, 10));
+    const removedRatio = points.some(p => +p.date < +cutoff && unverifiedRatio(p.date));
+    const removedClosedEdge = points.some(p => +p.date < +cutoff && selectedPartial(p.date));
+    points = points.filter(p => +p.date < +cutoff && !selectedPartial(p.date) && !unverifiedRatio(p.date));
+    if (!points.length && removedRatio) return waiting("Ratio input coverage needs review before checking this alert.");
+    if (!points.length && removedClosedEdge) return waiting("The selected window has partial observed edge periods. Use complete periods or a finer grain before checking this alert.");
     if (!points.length) return waiting("Waiting for a closed reporting period. The current period is excluded.");
     if (new Set(points.map(p => +p.date)).size !== points.length) return waiting("This chart has multiple values per period. Remove its category breakdown before watching it.");
     const last = points.at(-1)!; value = last.value; period = last.date.toISOString().slice(0, 10);
-    if (+last.date !== +nextPeriod(cutoff, grain, -1)) return { ...waiting(`Latest data is ${period}. Waiting for the most recently closed ${grain}.`), period };
+    if (+last.date !== +nextPeriod(cutoff, grain, -1)) return { ...waiting(`Latest data is ${period}. Waiting for the most recently closed ${grain}.${removedClosedEdge ? " Selected partial observed edge periods were left out of the alert check." : ""}${removedRatio ? " Periods with unverified ratio input coverage were left out." : ""}`), period };
   } else {
     if (result.rows.length !== 1) return waiting("Watch a total or a time series with no category breakdown.");
     value = numeric(result.rows[0][metricIndex]);

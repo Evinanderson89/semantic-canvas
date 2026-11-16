@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { compileTile, validateTile } from "../src/compiler/compile.ts";
+import { compileTile, validateTile, splitPartialPeriods } from "../src/compiler/compile.ts";
 import { computedMetricIssue, derivedReferences, metricComponents } from "../src/semantic/model.ts";
 import { duckglueAdapter } from "../src/semantic/duckglue.ts";
 import { duckdbConnector } from "../src/connectors/duckdb.ts";
@@ -59,7 +59,7 @@ describe("metric types: SQL", () => {
   it("runs a cumulative metric as a window along the time axis, partitioned by the other dimensions, before the limit", () => {
     const sql = compileTile(model, conn, tile({ metrics: ["running_revenue", "trailing_revenue"], dimensions: ["month:sold_on", "dim_users.country"] }) as any);
     expect(sql).toContain('SUM("__m_revenue") OVER (PARTITION BY "country" ORDER BY "sold_on_month" ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS "running_revenue"');
-    expect(sql).toContain('ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS "trailing_revenue"');
+    expect(sql).toContain("RANGE BETWEEN INTERVAL '2 month' PRECEDING AND CURRENT ROW) AS \"trailing_revenue\"");
     expect(sql.indexOf("OVER (")).toBeLessThan(sql.indexOf("LIMIT"));
     expect(sql).toContain('"__partial_start"');
   });
@@ -90,18 +90,21 @@ describe("metric types on the sample lake", () => {
   it("a same-table ratio equals its parts divided; a derived metric equals its arithmetic", async () => {
     const r = await run({ metrics: ["mrr_per_subscriber", "mrr", "paying_subscribers"], dimensions: [] });
     expect(col(r, "mrr_per_subscriber")[0]).toBeCloseTo(col(r, "mrr")[0] / col(r, "paying_subscribers")[0], 6);
-    const d = await run({ metrics: ["lost_mrr", "gross_new_mrr", "net_new_mrr"], dimensions: ["month:movement_date"] });
+    const d = await run({ metrics: ["lost_mrr", "churned_mrr", "contraction_mrr", "gross_new_mrr", "net_new_mrr"], dimensions: ["month:movement_date"] });
     expect(d.rows.length).toBeGreaterThan(3);
-    for (let i = 0; i < d.rows.length; i++) expect(col(d, "lost_mrr")[i]).toBeCloseTo(col(d, "gross_new_mrr")[i] - col(d, "net_new_mrr")[i], 4);
+    for (let i = 0; i < d.rows.length; i++) {
+      expect(col(d, "lost_mrr")[i]).toBeCloseTo(col(d, "churned_mrr")[i] + col(d, "contraction_mrr")[i], 4);
+      expect(col(d, "gross_new_mrr")[i] - col(d, "lost_mrr")[i]).toBeCloseTo(col(d, "net_new_mrr")[i], 4);
+    }
   });
-  it("a cumulative metric runs along the months; a trailing window sums the last three", async () => {
+  it("a cumulative metric runs along the months; a trailing window sums three consecutive months", async () => {
     const r = await run({ metrics: ["cumulative_net_new_mrr", "trailing_3_period_net_new_mrr", "net_new_mrr"], dimensions: ["month:movement_date"] });
     const net = col(r, "net_new_mrr"), cum = col(r, "cumulative_net_new_mrr"), tr = col(r, "trailing_3_period_net_new_mrr");
     let sum = 0;
     for (let i = 0; i < net.length; i++) { sum += net[i]; expect(cum[i]).toBeCloseTo(sum, 4); expect(tr[i]).toBeCloseTo(net.slice(Math.max(0, i - 2), i + 1).reduce((a, b) => a + b, 0), 4); }
   });
   it("a ratio across two fact tables aligns each side on its own month and divides", async () => {
-    const r = await run({ metrics: ["new_customers_per_session"], dimensions: ["month:movement_date"] });
+    const r = splitPartialPeriods(await run({ metrics: ["new_customers_per_session"], dimensions: ["month:movement_date"] }));
     expect(r.columns).toEqual(["movement_date_month", "new_customers_per_session"]);
     expect(r.rows.length).toBeGreaterThan(3);
     const n = await run({ metrics: ["new_paying_customers"], dimensions: ["month:movement_date"] }), s = await run({ metrics: ["web_sessions"], dimensions: ["month:session_date"] });

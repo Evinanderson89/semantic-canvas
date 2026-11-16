@@ -50,7 +50,7 @@ test("review follows accepted edits and remembers dismissed ideas", async ({ pag
   await expect(panel.getByRole("button", { name: "Add this tile", exact: true })).toHaveCount(0);
 
   await panel.getByRole("checkbox", { name: "Keep reviewing while this panel is open" }).uncheck();
-  await page.locator(".node").filter({ has: page.getByRole("heading", { name: "Ending MRR (USD) over time", exact: true }) }).press("Alt+ArrowLeft");
+  await page.locator(".node").filter({ has: page.getByRole("heading", { name: "Recurring revenue · monthly closing balance", exact: true }) }).press("Alt+ArrowLeft");
   await page.waitForTimeout(1000); // Exceeds the review debounce; paused reviews must not request AI.
   expect(requests).toHaveLength(2);
   await panel.getByRole("button", { name: "Review this goal", exact: true }).click();
@@ -62,12 +62,12 @@ test("a structured canvas can be refined again without closing review", async ({
   await page.goto("/"); await openStarter(page, "SaaS overview");
   const headings = await page.locator(".heading-text").allTextContents();
   await page.getByRole("button", { name: "Design review", exact: true }).click();
-  const chart = page.locator(".node").filter({ has: page.getByRole("heading", { name: "Ending MRR (USD) over time", exact: true }) });
+  const chart = page.locator(".node").filter({ has: page.getByRole("heading", { name: "Recurring revenue · monthly closing balance", exact: true }) });
   await chart.press("Alt+ArrowLeft");
   const panel = page.getByRole("dialog", { name: "Design review" });
   await panel.getByRole("button", { name: "Preview story structure", exact: true }).click();
   await panel.getByRole("button", { name: "Apply story structure", exact: true }).click();
   await expect(panel).toBeVisible();
   await expect(page.locator(".heading-text")).toHaveText(headings);
-  await expect(panel.locator(".review-coverage")).toContainText("6 charts reviewed");
+  await expect(panel.locator(".review-coverage")).toContainText("7 charts reviewed");
 });

@@ -1,16 +1,18 @@
 /**
  * Time-grain drill-down: click a bucket on a time-series chart to zoom into
  * it at the next finer grain, scoped to that bucket's exact date range.
- * Pure date math, UTC throughout -- rows come from the warehouse as UTC
- * dates and the compiler's date_trunc runs UTC, so this must too or a
- * clicked bucket's boundary would drift a day depending on the viewer's
- * timezone.
+ * Pure date math over the compiler's reporting-calendar bucket labels.
+ * Use the model's week/fiscal boundaries, independent of the viewer's zone.
  *
  * Deliberately skips "week" in the drill chain: a week does not nest inside
  * a month, so month -> week -> [back to month] would show a different set of
  * days than the month it came from. Month drills straight to day; week (when
  * it's the tile's own starting grain) also drills to day.
  */
+import { DEFAULT_CALENDAR, type Calendar } from "../semantic/model.ts";
+import { nextPeriod, periodStart } from "../semantic/calendar.ts";
+import type { TileSpec } from "../compiler/spec.ts";
+
 export type DrillGrain = "day" | "week" | "month" | "quarter" | "year";
 
 export const NEXT_GRAIN: Record<DrillGrain, DrillGrain | null> = {
@@ -27,6 +29,18 @@ export interface DrillEntry {
   label: string;
 }
 
+export type DrillSessions = Record<string, { query: string; entries: DrillEntry[] }>;
+/** Exploration belongs to the metric, grouping and authored filters that were
+ * clicked. Layout, titles and formatting can change without losing that view. */
+export const drillQueryKey = (tile: TileSpec) => JSON.stringify([tile.kind ?? "metric", tile.metrics, tile.dimensions, tile.where ?? []]);
+export function retainDrillSessions(tiles: TileSpec[], sessions: DrillSessions): DrillSessions {
+  const byId = new Map(tiles.map(tile => [tile.id, tile]));
+  const entries = Object.entries(sessions).filter(([id, session]) => {
+    const tile = byId.get(id); return tile && session.query === drillQueryKey(tile);
+  });
+  return entries.length === Object.keys(sessions).length ? sessions : Object.fromEntries(entries);
+}
+
 const pad = (n: number) => String(n).padStart(2, "0");
 const iso = (y: number, m: number, d: number) => `${y}-${pad(m)}-${pad(d)}`;
 const isoOf = (d: Date) => iso(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
@@ -36,47 +50,25 @@ const MONTH_LABEL = new Intl.DateTimeFormat(undefined, { month: "short", year: "
 /** The [min, max) range and a display label for the bucket `date` falls in
  *  at the given grain -- e.g. bucketRange("month", <2026-03-17>) covers all
  *  of March 2026. */
-export function bucketRange(grain: DrillGrain, date: Date): { min: string; max: string; label: string } {
-  const y = date.getUTCFullYear();
+export function bucketRange(grain: DrillGrain, date: Date, calendar: Calendar = DEFAULT_CALENDAR): { min: string; max: string; label: string } {
+  const start = periodStart(date, grain, calendar), end = nextPeriod(start, grain);
+  const range = { min: isoOf(start), max: isoOf(end) };
+  const fiscal = calendar.fiscalYearStartMonth !== 1;
   switch (grain) {
     case "year":
-      return { min: iso(y, 1, 1), max: iso(y + 1, 1, 1), label: String(y) };
-    case "quarter": {
-      const q = Math.floor(date.getUTCMonth() / 3);
-      const startMonth = q * 3 + 1;
-      const wraps = startMonth + 3 > 12;
-      return {
-        min: iso(y, startMonth, 1),
-        max: iso(wraps ? y + 1 : y, wraps ? startMonth + 3 - 12 : startMonth + 3, 1),
-        label: `Q${q + 1} ${y}`,
-      };
-    }
-    case "month": {
-      const m = date.getUTCMonth() + 1;
-      const wraps = m === 12;
-      return {
-        min: iso(y, m, 1), max: iso(wraps ? y + 1 : y, wraps ? 1 : m + 1, 1),
-        label: MONTH_LABEL.format(date),
-      };
-    }
-    case "week": {
-      // Monday-start, matching DuckDB's date_trunc('week', ...) (ISO weeks).
-      const dow = (date.getUTCDay() + 6) % 7; // 0=Mon .. 6=Sun
-      const start = new Date(Date.UTC(y, date.getUTCMonth(), date.getUTCDate() - dow));
-      const end = new Date(start.getTime() + 7 * 86400000);
-      return { min: isoOf(start), max: isoOf(end), label: `Week of ${isoOf(start)}` };
-    }
-    case "day": {
-      const next = new Date(date.getTime() + 86400000);
-      return { min: isoOf(date), max: isoOf(next), label: isoOf(date) };
-    }
+      return { ...range, label: fiscal ? `Fiscal year from ${MONTH_LABEL.format(start)}` : String(start.getUTCFullYear()) };
+    case "quarter":
+      return { ...range, label: fiscal ? `Fiscal quarter from ${MONTH_LABEL.format(start)}` : `Q${Math.floor(start.getUTCMonth() / 3) + 1} ${start.getUTCFullYear()}` };
+    case "month": return { ...range, label: MONTH_LABEL.format(start) };
+    case "week": return { ...range, label: `Week of ${range.min}` };
+    case "day": return { ...range, label: range.min };
   }
 }
 
 /** Builds the next drill-stack entry for a click on a bucket at `grain`,
  *  or null if there's nowhere finer to go (already at day). */
-export function drillInto(grain: DrillGrain, column: string, clicked: Date): DrillEntry | null {
+export function drillInto(grain: DrillGrain, column: string, clicked: Date, calendar: Calendar = DEFAULT_CALENDAR): DrillEntry | null {
   const next = NEXT_GRAIN[grain];
   if (!next) return null;
-  return { grain: next, column, ...bucketRange(grain, clicked) };
+  return { grain: next, column, ...bucketRange(grain, clicked, calendar) };
 }

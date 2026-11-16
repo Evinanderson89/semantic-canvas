@@ -48,7 +48,12 @@ test("new canvases remain readable in a compact window and appearance persists",
   const zoom = Number(await page.getByLabel("Canvas zoom", { exact: true }).inputValue());
   expect(zoom).toBeGreaterThanOrEqual(.85);
   const canvasTop = (await page.locator(".canvas-scroll").boundingBox())!.y;
-  expect(canvasTop).toBeLessThan(230);
+    // The explicit mode/version bar occupies one additional row.
+  expect(canvasTop).toBeLessThan(290);
+  expect((await page.locator(".canvas-scroll").boundingBox())!.height).toBeGreaterThan(400);
+  const mode = page.getByLabel("Dashboard mode", { exact:true });
+  await expect(mode).toContainText("EDIT MODE");
+  expect(await mode.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   await page.locator(".node").first().click();
   const inspector = (await page.locator(".inspector").boundingBox())!;
   const save = (await page.getByRole("button", { name: "Save dashboard", exact: true }).boundingBox())!;

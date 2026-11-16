@@ -119,3 +119,21 @@ describe("applyLayout stretch option", () => {
     expect(chartOut(stretched)).toBeGreaterThan(chartOut(unstretched));
   });
 });
+
+it("reserves multi-series plot space in every arrangement without moving pinned content or overlapping notes", () => {
+  const pin = { ...chart("pinned"), pinned: true, layout: { x: 24, y: 24, w: 468, h: 280 } };
+  const stack: TileSpec = { ...chart("stack"), chart: "barStacked", limit: 12, layout: { x: 24, y: 500, w: 468, h: 80 } };
+  const categorical: TileSpec = { ...chart("categories"), metrics: ["revenue"], dimensions: ["month:d", "country"], layout: { x: 520, y: 500, w: 468, h: 80 } };
+  const note: TileSpec = { ...heading("note"), kind: "text", text: "The two charts have distinct reporting populations.", layout: { x: 24, y: 600, w: 952, h: 48 } };
+  const original = [pin, stack, categorical, note], before = structuredClone(original);
+  for (const name of ["grid", "exec-summary", "executive", "story"] as const) {
+    const out = applyLayout(name, original, 1000);
+    expect(out.find(t => t.id === pin.id)).toEqual(pin);
+    expect(out.filter(t => ["stack", "categories"].includes(t.id)).every(t => t.layout.h >= 360)).toBe(true);
+    for (let i = 0; i < out.length; i++) for (const b of out.slice(i + 1)) {
+      const a = out[i].layout, c = b.layout;
+      expect(a.x < c.x + c.w && c.x < a.x + a.w && a.y < c.y + c.h && c.y < a.y + a.h).toBe(false);
+    }
+  }
+  expect(original).toEqual(before);
+});

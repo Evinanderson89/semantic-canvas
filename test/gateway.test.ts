@@ -28,7 +28,25 @@ it('denies spoofed gateway identity headers without a verified JWT',async()=>{ex
 it('accepts the same Gateway token as a bearer for non-browser clients, cookie winning when both are present',async()=>{const jwt=await token();const asBearer=await (await fetch(url+'/api/auth/session',{headers:{authorization:`Bearer ${jwt}`}})).json();expect(asBearer.authenticated).toBe(true);expect(asBearer.user.role).toBe('viewer');expect((await fetch(url+'/api/identity',{headers:{authorization:'Bearer not-a-jwt'}})).status).toBe(401);const bad=await token(['other']);const both=await (await fetch(url+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,authorization:`Bearer ${bad}`}})).json();expect(both.authenticated).toBe(true);});
 it('sends sign-in through the portal refresh with a return address, and names the portal when signed out',async()=>{const r=await fetch(url+'/api/auth/login',{redirect:'manual'});expect(r.status).toBe(302);const to=new URL(r.headers.get('location')!);expect(to.origin).toBe('http://apps.localhost:10000');expect(to.pathname).toBe('/auth/refresh');expect(to.searchParams.get('next')).toBe('http://semantic-canvas.apps.localhost:10000');const out=await (await fetch(url+'/api/auth/session')).json();expect(out.authenticated).toBe(false);expect(out.gatewayUrl).toBe('http://apps.localhost:10000');});
 it.each(['wrong-audience','expired','unassigned'])('rejects %s tokens',async(kind)=>{const jwt=await token(kind==='unassigned'?['other']:['data-users'],kind==='wrong-audience'?'another-app':'gateway-portal',kind==='expired'?'-1s':'5m');expect((await fetch(url+'/api/identity',{headers:{cookie:`gw_session=${jwt}`}})).status).toBe(401);});
-it('enforces CSRF and viewer restrictions even with valid Gateway identity',async()=>{const cookie=`gw_session=${await token()}`;const s=await(await fetch(url+'/api/auth/session',{headers:{cookie}})).json();expect((await fetch(url+'/api/dashboards',{method:'POST',headers:{cookie}})).status).toBe(403);expect((await fetch(url+'/api/dashboards',{method:'POST',headers:{cookie,'x-sc-csrf':s.csrf}})).status).toBe(403);});
+it('distinguishes CSRF rejection from viewer restrictions with an otherwise-authorized editor', async () => {
+ const cookie = `gw_session=${await token(['self-service'])}`;
+ const session = await (await fetch(urlWithDefault + '/api/auth/session', {headers:{cookie}})).json();
+ expect(session).toMatchObject({authenticated:true,canEdit:true,user:{role:'editor'}});
+ for (const csrf of [undefined,'invalid-token']) {
+  const headers: Record<string,string> = {cookie};
+  if (csrf) headers['x-sc-csrf'] = csrf;
+  const rejected = await fetch(urlWithDefault + '/api/dashboards', {method:'POST',headers});
+  expect(rejected.status).toBe(403);
+  expect(await rejected.json()).toEqual({error:'Your session needs a fresh page. Reload and try again.'});
+ }
+ const allowed = await fetch(urlWithDefault + '/api/dashboards', {method:'POST',headers:{cookie,'x-sc-csrf':session.csrf}});
+ expect(allowed.status).toBe(200); expect(await allowed.json()).toEqual({ok:true});
+ const viewerCookie = `gw_session=${await token()}`;
+ const viewer = await (await fetch(url + '/api/auth/session',{headers:{cookie:viewerCookie}})).json();
+ const forbidden = await fetch(url + '/api/dashboards',{method:'POST',headers:{cookie:viewerCookie,'x-sc-csrf':viewer.csrf}});
+ expect(forbidden.status).toBe(403);
+ expect(await forbidden.json()).toEqual({error:'Your workspace role does not allow this action'});
+});
 it('reports a current identity only for owners who presented a valid token since start',async()=>{const cookie=`gw_session=${await token()}`;const body=await(await fetch(url+'/api/identity',{headers:{cookie}})).json();expect(auth.currentIdentity(body.identity.id)).toMatchObject({id:body.identity.id,principal:'emea',sources:['sample']});expect(auth.currentIdentity('someone-else')).toBeNull();const team=new CompanyAuth({mode:'team',scopes:'openid',sessionSeconds:300});const session=team.issue({id:'t',name:'T',role:'viewer',principal:'emea',sources:['sample']},{cookie(){}} as any);expect(team.currentIdentity('t')).toMatchObject({id:'t'});session.expires=Date.now()-1;expect(team.currentIdentity('t')).toBeNull();expect(new CompanyAuth({mode:'local',scopes:'openid',sessionSeconds:300}).currentIdentity('t')).toBeNull();});
 it('hands sign-out to the portal, which holds the refresh cookie, and still demands the anti-forgery token',async()=>{const cookie=`gw_session=${await token()}`;const s=await(await fetch(url+'/api/auth/session',{headers:{cookie}})).json();expect((await fetch(url+'/api/auth/logout',{method:'POST',headers:{cookie}})).status).toBe(403);const r=await fetch(url+'/api/auth/logout',{method:'POST',headers:{cookie,'x-sc-csrf':s.csrf}});expect(r.status).toBe(200);expect(await r.json()).toEqual({ok:true,redirect:'http://apps.localhost:10000/auth/logout'});expect(r.headers.get('set-cookie')).toMatch(/gw_session=;/);});
 it('uses Gateway as the login entry point',async()=>{const r=await fetch(url+'/api/auth/login',{redirect:'manual'});expect(r.headers.get('location')).toMatch(/^http:\/\/apps\.localhost:10000\/auth\/refresh\?next=/);});
@@ -63,7 +81,7 @@ it('refuses to start when the access default names an unknown RLS principal',asy
   expect(code,output).toBe(1);expect(output).toContain('access default references an unknown RLS principal');expect(output).toContain('"event":"server.start_failed"');
  }finally{await rm(root,{recursive:true,force:true});}
 },60_000);
-it('reads the signed data policy the gateway adds, ignores a forged or foreign one, and reports it on the session',async()=>{
+it('reports valid gateway policies and refuses supplied policies that fail verification',async()=>{
  const {createHmac}=await import('node:crypto');
  const secret='policy-secret';
  const {auth:a,server:s,url:u}=await serve({groupsClaim:'groups',bindings});
@@ -78,13 +96,13 @@ it('reads the signed data policy the gateway adds, ignores a forged or foreign o
  const identity=await(await fetch(u+'/api/identity',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':good.body,'x-gateway-policy-sig':good.sig}})).json();
  expect(identity.identity.policy).toEqual(rules);
  const forged=Buffer.from(JSON.stringify({v:1,sub:'casey',app:'semantic-canvas',iat:now,exp:now+120,rules:[]})).toString('base64url');
- expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':forged,'x-gateway-policy-sig':good.sig}})).json()).policy).toBeUndefined();
+ expect((await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':forged,'x-gateway-policy-sig':good.sig}})).status).toBe(403);
  const foreign=sign({v:1,sub:'someone-else',app:'semantic-canvas',iat:now,exp:now+120,rules});
- expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':foreign.body,'x-gateway-policy-sig':foreign.sig}})).json()).policy).toBeUndefined();
+ expect((await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':foreign.body,'x-gateway-policy-sig':foreign.sig}})).status).toBe(403);
  const otherApp=sign({v:1,sub:'casey',app:'ingest',iat:now,exp:now+120,rules});
- expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':otherApp.body,'x-gateway-policy-sig':otherApp.sig}})).json()).policy).toBeUndefined();
+ expect((await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':otherApp.body,'x-gateway-policy-sig':otherApp.sig}})).status).toBe(403);
  const expired=sign({v:1,sub:'casey',app:'semantic-canvas',iat:now-300,exp:now-100,rules});
- expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':expired.body,'x-gateway-policy-sig':expired.sig}})).json()).policy).toBeUndefined();
+ expect((await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`,'x-gateway-policy':expired.body,'x-gateway-policy-sig':expired.sig}})).status).toBe(403);
  expect((await(await fetch(u+'/api/auth/session',{headers:{cookie:`gw_session=${jwt}`}})).json()).policy).toBeUndefined();
  await new Promise<void>(r=>s.close(()=>r()));
 });

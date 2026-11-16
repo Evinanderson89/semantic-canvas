@@ -1,10 +1,14 @@
 import { useSession } from "./Session.tsx";
 import { WorkspaceSetup } from "./WorkspaceSetup.tsx";
+import { ClaudeConnection } from "./ClaudeConnection.tsx";
+import { ChatgptConnection } from "./ChatgptConnection.tsx";
 import { useEffect, useState, type FormEvent } from "react";
+import { z } from "zod";
 import { readResponse } from "./http.ts";
 import type { ConnectedProvenance } from "../semantic/model.ts";
 import { UnreviewedBadge, dataAsOf } from "./connected.tsx";
 import { PublishDialog } from "./PublishDialog.tsx";
+import { PrivateKeyInput } from "./PrivateKeyInput.tsx";
 
 export interface SourceInfo {
   id: string; label: string; adapter: string;
@@ -33,8 +37,7 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
     setRemoveError(null);
     try {
       const r = await fetch(`/api/sources/${encodeURIComponent(id)}`, { method: "DELETE" });
-      const d = await r.json();
-      if (!r.ok) { setRemoveError(d.error ?? "Could not remove."); return; }
+      await readResponse(r);
       setConfirmRemove(null);
       onRefresh();
     } catch (e: any) {
@@ -49,6 +52,8 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
       <h1>Connections</h1>
       <p className="lede">Connect your semantic layer, check your workspace, and bring your team’s metrics together.</p>
       {canAdmin && <WorkspaceSetup refreshKey={sources} />}
+      {canAdmin && <ClaudeConnection key={`claude:${activeId}`} source={activeId} label={sources.find(s => s.id === activeId)?.label ?? "your source"} />}
+      {canAdmin && <ChatgptConnection key={`chatgpt:${activeId}`} source={activeId} label={sources.find(s => s.id === activeId)?.label ?? "your source"} principals={principals} />}
 
       <div className="ex-head-row">
         <h4 className="ex-h" style={{ margin: 0 }}>Sources</h4>
@@ -79,7 +84,7 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
             </div>
             {s.status === "ready" ? (
               <p className="mono conn-meta">
-                {s.tables} tables · {s.metrics} metrics{s.connected ? ` · ${s.connected} connected by Ingest${s.unreviewed ? ` (${s.unreviewed} unreviewed)` : ""}` : ""} · connected in {s.connectMs}ms
+                {s.tables} tables · {s.metrics} metrics{s.connected ? ` · ${s.connected} connected by Ingest${s.unreviewed ? ` (${s.unreviewed} unreviewed)` : ""}` : ""}{s.connectMs != null && Number.isFinite(s.connectMs) ? ` · connected in ${s.connectMs}ms` : ""}
               </p>
             ) : (
               <p className="conn-err">{s.error}</p>
@@ -158,7 +163,8 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
   );
 }
 
-interface AiStatus { configured: boolean; provider: string; model: string }
+const aiStatusSchema = z.object({ configured: z.boolean(), provider: z.string().optional(), model: z.string().optional(), issue: z.string().nullable().optional(), canSetKey: z.boolean().optional() });
+type AiStatus = z.infer<typeof aiStatusSchema>;
 
 /**
  * Tables Ingest registered on this source (docs/connected-canvas.md): each is a
@@ -210,12 +216,21 @@ function AiAgentSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
-
-  const refresh = () => fetch("/api/agent/status").then((r) => r.json()).then(setStatus).catch(() => {});
-  useEffect(() => { refresh(); }, []);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusAttempt, setStatusAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setStatus(null); setStatusError(null);
+    fetch("/api/agent/status", { signal: controller.signal }).then(readResponse).then(value => {
+      const parsed = aiStatusSchema.safeParse(value);
+      if (!parsed.success) throw new Error("The server returned an invalid AI status. Try loading it again.");
+      if (!controller.signal.aborted) setStatus(parsed.data);
+    }).catch(e => { if (!controller.signal.aborted) setStatusError(String(e?.message ?? e)); });
+    return () => controller.abort();
+  }, [statusAttempt]);
 
   const save = async (e: FormEvent) => {
-    e.preventDefault();
+    e.preventDefault(); if (busy) return;
     setError(null);
     setBusy(true);
     try {
@@ -223,11 +238,10 @@ function AiAgentSection() {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ apiKey: key }),
       });
-      const d = await r.json();
-      if (!r.ok) { setError(d.error ?? "Could not validate that key."); return; }
+      await readResponse(r);
       setKey("");
       setEditing(false);
-      refresh();
+      setStatusAttempt(attempt => attempt + 1);
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -236,44 +250,51 @@ function AiAgentSection() {
   };
 
   const remove = async () => {
-    setBusy(true);
+    if (busy) return;
+    setBusy(true); setError(null);
     try {
-      await fetch("/api/agent/key", { method: "DELETE" });
+      await fetch("/api/agent/key", { method: "DELETE" }).then(readResponse);
       setConfirmRemove(false);
-      refresh();
+      setStatusAttempt(attempt => attempt + 1);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
     } finally {
       setBusy(false);
     }
   };
 
-  if (!status) return null;
+  if (!status) return <section className="cform" aria-label="Embedded agent connection">
+    {statusError ? <><p className="cform-err" role="alert">Could not load AI connection status. {statusError}</p>
+      <div className="cform-actions"><button onClick={() => setStatusAttempt(attempt => attempt + 1)}>Retry AI status</button></div></>
+      : <p className="conn-meta" role="status">Loading AI connection status…</p>}
+  </section>;
 
   return (
-    <>
+    <section aria-label="Embedded agent connection">
       <div className="mlist">
         <div className="mrow">
           <div className="mrow-top">
             <span className={"dot " + (status.configured ? "ready" : "error")} />
             <b>Embedded agent</b>
-            <span className="base mono">{status.provider}/{status.model}</span>
+            <span className="base mono">{[status.provider, status.model].filter(Boolean).join(" / ")}</span>
             {status.configured
               ? <span className="active-badge">Configured</span>
               : <span className="active-badge err">Not configured</span>}
             {!editing && !confirmRemove && (
               <>
-                <button className="link conn-action" onClick={() => setEditing(true)}>
+                <button className="link conn-action" disabled={status.canSetKey === false} onClick={() => { setError(null); setEditing(true); }}>
                   {status.configured ? "Replace key" : "Add key"}
                 </button>
                 {status.configured && (
-                  <button className="link conn-action" onClick={() => setConfirmRemove(true)}>Remove</button>
+                  <button className="link conn-action" onClick={() => { setError(null); setConfirmRemove(true); }}>Remove</button>
                 )}
               </>
             )}
           </div>
           <p className="mono conn-meta">
             {status.configured
-              ? "Chat panel is live on the canvas."
-              : "The chat panel on the canvas stays hidden until a key is added."}
+              ? "An AI credential is configured. Availability is checked when you use an AI feature."
+              : status.issue ?? "The chat panel on the canvas stays hidden until a key is added."}
           </p>
           {confirmRemove && (
             <div className="conn-confirm">
@@ -281,7 +302,7 @@ function AiAgentSection() {
               <button className="link" disabled={busy} onClick={remove}>
                 {busy ? "Removing…" : "Confirm remove"}
               </button>
-              <button className="link" disabled={busy} onClick={() => setConfirmRemove(false)}>Cancel</button>
+              <button className="link" disabled={busy} onClick={() => { setConfirmRemove(false); setError(null); }}>Cancel</button>
             </div>
           )}
         </div>
@@ -291,7 +312,7 @@ function AiAgentSection() {
           <div className="cform-grid">
             <label className="ctl span2">
               <span>Anthropic API key</span>
-              <input required type="password" value={key} placeholder="sk-ant-…" autoFocus
+              <input required type="password" disabled={busy} value={key} placeholder="sk-ant-…" autoFocus
                      onChange={(e) => setKey(e.target.value)} />
             </label>
           </div>
@@ -302,10 +323,10 @@ function AiAgentSection() {
             <button type="button" className="ghost" disabled={busy}
                     onClick={() => { setEditing(false); setKey(""); setError(null); }}>Cancel</button>
           </div>
-          {error && <div className="cform-err">{error}</div>}
         </form>
       )}
-    </>
+      {error && <div className="cform-err" role="alert">{error}</div>}
+    </section>
   );
 }
 
@@ -329,6 +350,17 @@ const BLANK_FORM: FormState = {
   privateKey: "", privateKeyPass: "", password: "",
   role: "", warehouse: "COMPUTE_WH", database: "", schema: "PUBLIC",
 };
+const sourceConfigSchema = z.object({
+  id: z.string().min(1), label: z.string().optional(), model: z.string().min(1),
+  adapter: z.enum(["duckglue", "dbt", "snowflake-semantic"]),
+  connector: z.object({
+    type: z.enum(["duckdb", "snowflake"]).default("duckdb"),
+    poolSize: z.union([z.number(), z.string().trim().min(1)]).transform(Number).pipe(z.number().int().positive()).optional(),
+    lakeRoot: z.string().optional(), awsProfile: z.string().optional(), awsRegion: z.string().optional(),
+    account: z.string().optional(), username: z.string().optional(), role: z.string().optional(),
+    warehouse: z.string().optional(), database: z.string().optional(), schema: z.string().optional(),
+  }),
+});
 
 /**
  * Tests before it saves: the server connects with these exact values first,
@@ -349,17 +381,24 @@ function SourceForm({ editId, onCancel, onSaved }: {
   const [idTouched, setIdTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(isEdit);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
 
   useEffect(() => {
     if (!editId) return;
-    fetch(`/api/sources/${encodeURIComponent(editId)}/config`).then((r) => r.json()).then((d) => {
-      const c = d.connector ?? {};
+    const controller = new AbortController();
+    setLoading(true); setLoadError(null);
+    fetch(`/api/sources/${encodeURIComponent(editId)}/config`, { signal: controller.signal }).then(readResponse).then((value) => {
+      const parsed = sourceConfigSchema.safeParse(value);
+      if (!parsed.success || parsed.data.id !== editId) throw new Error("The server returned incomplete or mismatched source settings. Reload them before editing.");
+      if (controller.signal.aborted) return;
+      const d = parsed.data, c = d.connector;
       setForm((f) => ({
-        ...f, id: d.id ?? editId, label: d.label ?? "", adapter: d.adapter ?? f.adapter,
-        model: d.model ?? "", connectorType: c.type ?? f.connectorType,
+        ...BLANK_FORM, id: d.id, label: d.label ?? d.id, adapter: d.adapter,
+        model: d.model, connectorType: c.type,
         lakeRoot: c.lakeRoot ?? "", poolSize: c.poolSize != null ? String(c.poolSize) : f.poolSize,
         awsProfile: c.awsProfile ?? "", awsRegion: c.awsRegion ?? "",
         account: c.account ?? "", username: c.username ?? "",
@@ -367,11 +406,13 @@ function SourceForm({ editId, onCancel, onSaved }: {
         schema: c.schema ?? f.schema,
       }));
       setIdTouched(true);
-    }).catch((e) => setError(String(e?.message ?? e))).finally(() => setLoading(false));
-  }, [editId]);
+    }).catch((e) => { if (!controller.signal.aborted) setLoadError(String(e?.message ?? e)); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [editId, loadAttempt]);
 
   const submit = async (e: FormEvent) => {
-    e.preventDefault();
+    e.preventDefault(); if (busy || loading || loadError) return;
     setError(null);
     setBusy(true);
     const connector: Record<string, any> = { type: form.connectorType, poolSize: Number(form.poolSize) };
@@ -399,8 +440,7 @@ function SourceForm({ editId, onCancel, onSaved }: {
           adapter: form.adapter, model: form.model, connector,
         }),
       });
-      const d = await r.json();
-      if (!r.ok) { setError(d.error ?? "Could not connect."); return; }
+      await readResponse(r);
       onSaved();
     } catch (e: any) {
       setError(String(e?.message ?? e));
@@ -409,11 +449,18 @@ function SourceForm({ editId, onCancel, onSaved }: {
     }
   };
 
-  if (loading) return <div className="cform"><span className="conn-meta">Loading…</span></div>;
+  if (loading || loadError) return <section className="cform" aria-label="Source settings">
+    {loading ? <p className="conn-meta" role="status">Loading saved source settings…</p>
+      : <p className="cform-err" role="alert">Could not load saved source settings. {loadError}</p>}
+    <div className="cform-actions">
+      {loadError && <button onClick={() => setLoadAttempt(attempt => attempt + 1)}>Retry loading source</button>}
+      <button onClick={onCancel}>Cancel</button>
+    </div>
+  </section>;
 
   return (
-    <form className="cform" onSubmit={submit}>
-      <div className="cform-grid">
+    <form className="cform" aria-label={isEdit ? "Edit source" : "Add source"} onSubmit={submit}>
+      <fieldset className="cform-grid" disabled={busy}>
         <label className="ctl">
           <span>Label</span>
           <input required value={form.label} placeholder="dbt on Snowflake"
@@ -431,7 +478,7 @@ function SourceForm({ editId, onCancel, onSaved }: {
 
         <label className="ctl">
           <span>Semantic adapter</span>
-          <select value={form.adapter}
+          <select aria-label="Semantic adapter" value={form.adapter}
                   onChange={(e) => {
                     const a = e.target.value as Adapter;
                     // The semantic model lives in Snowflake either way here,
@@ -447,7 +494,7 @@ function SourceForm({ editId, onCancel, onSaved }: {
         </label>
         <label className="ctl">
           <span>Connector</span>
-          <select value={form.connectorType}
+          <select aria-label="Connector" value={form.connectorType}
                   onChange={(e) => {
                     const t = e.target.value as ConnectorType;
                     setForm((f) => ({ ...f, connectorType: t, poolSize: t === "snowflake" ? "6" : "4" }));
@@ -467,12 +514,12 @@ function SourceForm({ editId, onCancel, onSaved }: {
         </label>
 
         {form.adapter !== "dbt" && <label className="ctl span2"><span>Or upload your semantic model</span><input type="file" accept=".yaml,.yml" disabled={busy} onChange={async e => {
-          const file = e.target.files?.[0]; e.target.value = ""; if (!file) return;
+          const file = e.target.files?.[0]; e.target.value = ""; if (!file || busy) return;
           setBusy(true); setError(null);
           try {
             if (file.size > 5 * 1024 * 1024) throw new Error("Semantic model exceeds 5 MB");
             const r = await fetch("/api/setup/model", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: await file.text(), adapter: form.adapter }) });
-            const d = await r.json(); if (!r.ok) throw new Error(d.error ?? "Upload failed"); set("model", d.path);
+            const d = await readResponse(r); set("model", d.path);
           } catch (error: any) { setError(error.message); } finally { setBusy(false); }
         }} /><small>The model stays on your server. The connection test validates it before the source is saved.</small></label>}
         {form.adapter === "dbt" && <p className="span2">Mount your dbt target folder on the server, including manifest.json and semantic_manifest.json.</p>}
@@ -516,22 +563,19 @@ function SourceForm({ editId, onCancel, onSaved }: {
             </label>
             <label className="ctl">
               <span>Auth method</span>
-              <select value={form.authMethod} onChange={(e) => set("authMethod", e.target.value as any)}>
+              <select aria-label="Auth method" value={form.authMethod} onChange={(e) => set("authMethod", e.target.value as any)}>
                 <option value="key">Key pair (recommended for a service account)</option>
                 <option value="password">Password</option>
               </select>
             </label>
             {form.authMethod === "key" ? (
               <>
-                <label className="ctl">
-                  <span>Private key</span>
-                  <input required={!isEdit} value={form.privateKey}
-                         placeholder={isEdit ? "unchanged if left blank" : "-----BEGIN PRIVATE KEY-----"}
-                         onChange={(e) => set("privateKey", e.target.value)} />
-                </label>
+                <PrivateKeyInput required={!isEdit} value={form.privateKey}
+                  placeholder={isEdit ? "unchanged if left blank" : "Paste your PEM private key"}
+                  onChange={value => set("privateKey", value)} />
                 <label className="ctl">
                   <span>Private key passphrase (optional)</span>
-                  <input value={form.privateKeyPass}
+                  <input type="password" value={form.privateKeyPass}
                          placeholder={isEdit ? "unchanged if left blank" : undefined}
                          onChange={(e) => set("privateKeyPass", e.target.value)} />
                 </label>
@@ -569,7 +613,7 @@ function SourceForm({ editId, onCancel, onSaved }: {
             </label>
           </>
         )}
-      </div>
+      </fieldset>
 
       <div className="cform-actions">
         <button type="submit" className="primary" disabled={busy}>
@@ -577,7 +621,7 @@ function SourceForm({ editId, onCancel, onSaved }: {
         </button>
         <button type="button" className="ghost" disabled={busy} onClick={onCancel}>Cancel</button>
       </div>
-      {error && <div className="cform-err">{error}</div>}
+      {error && <div className="cform-err" role="alert">{error}</div>}
     </form>
   );
 }

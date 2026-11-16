@@ -12,22 +12,20 @@ import type { Metric, Model, Table } from "../semantic/model.ts";
 
 const STOP = new Set(("a an and are as at be by for from how i in is it me my of on or our " +
   "show see want like need dashboard chart graph over the to us we with what which do does " +
-  "give build make please can you").split(" "));
+  "give build make please can you where").split(" "));
 
+const normalizeToken = (word: string) => ({ losing: "lose", lost: "lose", losses: "lose", customers: "customer", revenues: "revenue", churned: "churn", churning: "churn" }[word] ?? word);
 export function tokens(s: string): string[] {
   return (s.toLowerCase().match(/[a-z0-9]+/g) ?? [])
-    .filter((t) => t.length > 2 && !STOP.has(t));
+    .filter((t) => t.length > 2 && !STOP.has(t)).map(normalizeToken);
 }
 
 function score(needle: string[], haystacks: { text: string; weight: number }[]): number {
   let total = 0;
   for (const { text, weight } of haystacks) {
-    const hay = text.toLowerCase();
-    for (const t of needle) {
-      if (!hay.includes(t)) continue;
-      // Whole-word hits count for more than substring hits.
-      total += new RegExp(`\\b${t}\\b`).test(hay) ? weight : weight * 0.4;
-    }
+    const hay = new Set(tokens(text));
+    for (const t of new Set(needle)) if (hay.has(t)) total += weight;
+
   }
   return total;
 }

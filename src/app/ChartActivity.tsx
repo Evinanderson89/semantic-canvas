@@ -59,7 +59,7 @@ export function ChartActivityProvider({ dashboardId, document: book, revision, d
       initialPanel={selection.panel} close={close} refreshSummary={() => refresh().catch(() => {})} />, document.body)}
   </Context.Provider>;
 }
-const dateLabel = (date: string) => new Date(date).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const dateLabel = (date: string) => new Date(date).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, initialPanel, close, refreshSummary, preferences }: {
   tile: TileSpec; model: Model; dashboardId: string | null; revision: number; dirty: boolean; onSave: () => Promise<void>;
   initialPanel: Panel; close: () => void; refreshSummary: () => Promise<void>; preferences: ChartPreferences;
@@ -70,7 +70,10 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
   const [alert, setAlert] = useState<AlertRule | null>(null), [ownerId, setOwnerId] = useState("");
   const [loading, setLoading] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [body, setBody] = useState(""), [replyTo, setReplyTo] = useState<string | null>(null), [reply, setReply] = useState("");
-  const [showResolved, setShowResolved] = useState(false), [editing, setEditing] = useState(false);
+  const [showResolved, setShowResolved] = useState(false);
+  // The concurrency token belongs to the draft, never to a later polling response.
+  const [draftBase, setDraftBase] = useState<{ id: string | null; version: number; revision: number } | null>(null);
+  const loadSequence = useRef(0);
   const [metric, setMetric] = useState(tile.metrics[0]), [mode, setMode] = useState<AlertInput["mode"]>(tile.dimensions.some(d => d.includes(":")) ? "anomaly" : "threshold");
   const [operator, setOperator] = useState<AlertInput["operator"]>("above"), [threshold, setThreshold] = useState("");
   const [sensitivity, setSensitivity] = useState<AlertInput["sensitivity"]>("balanced"), [direction, setDirection] = useState<AlertInput["direction"]>("both");
@@ -83,10 +86,12 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
   useEffect(() => { const d = dialog.current!; d.showModal(); return () => d.close(); }, []);
   const load = useCallback(async (signal?: AbortSignal) => {
     if (!url) return;
+    const sequence = ++loadSequence.current;
     const data = await fetch(url, { signal }).then(readResponse);
-    if (signal?.aborted) return;
+    if (signal?.aborted || sequence !== loadSequence.current) return;
     setThreads(data.threads); setAlert(data.alert); setOwnerId(data.ownerId);
-  }, [url]);
+    if (!data.alert) setDraftBase(base => base ?? { id: null, version: 0, revision });
+  }, [url, revision]);
   useEffect(() => {
     const ac = new AbortController(); setLoading(Boolean(url));
     void load(ac.signal).catch(e => { if (!ac.signal.aborted) setError(e.message); }).finally(() => { if (!ac.signal.aborted) setLoading(false); });
@@ -103,12 +108,15 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
   const rule = (): AlertInput => ({ metric, mode, operator, ...(mode === "threshold" ? { threshold: Number(threshold) / (percent ? 100 : 1) } : {}), sensitivity, direction, intervalMinutes: interval });
   const invalid = mode === "threshold" && (!threshold.trim() || !Number.isFinite(Number(threshold)));
   const edit = () => {
-    if (!alert) return;
+    setDraftBase({ id: alert?.id ?? null, version: alert?.version ?? 0, revision });
+    setPreview(null); setError("");
+    if (!alert) { setMetric(tile.metrics[0]); setMode(tile.dimensions.some(d => d.includes(":")) ? "anomaly" : "threshold"); setOperator("above"); setThreshold(""); setSensitivity("balanced"); setDirection("both"); setIntervalMinutes(60); return; }
     setMetric(alert.metric); setMode(alert.mode); setOperator(alert.operator);
     const isPercent = resolveFormat(model, { ...tile, metrics: [alert.metric] }).number === "percent";
     setThreshold(alert.threshold === undefined ? "" : String(alert.threshold * (isPercent ? 100 : 1)));
-    setSensitivity(alert.sensitivity); setDirection(alert.direction); setIntervalMinutes(alert.intervalMinutes); setEditing(true); setPreview(null);
+    setSensitivity(alert.sensitivity); setDirection(alert.direction); setIntervalMinutes(alert.intervalMinutes);
   };
+  const draftChanged = !!draftBase && (draftBase.id !== (alert?.id ?? null) || draftBase.version !== (alert?.version ?? 0) || draftBase.revision !== revision);
   const shown = threads.filter(t => showResolved || !t.resolved);
   const alertFormat = makeFormatter(resolveFormat(model, { ...tile, metrics: [alert?.metric ?? metric] }));
   return <dialog className="activity-drawer" ref={dialog} aria-labelledby="activity-heading" onCancel={e => { e.preventDefault(); close(); }} onClick={e => { if (e.target === dialog.current) { const r = dialog.current.getBoundingClientRect(); if (e.clientX < r.left) close(); } }}>
@@ -148,17 +156,18 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
         {panel === "alerts" && <section role="tabpanel" id="chart-alerts" aria-labelledby="alerts-tab">
           <div className="activity-section-intro"><h3>A quiet eye on what matters.</h3><p>Watch a threshold or an unusual change. We’ll leave an update on this chart when it needs your attention.</p></div>
           {!supported && <div className="activity-save-note"><strong>This chart needs a single series</strong><p>Remove the category breakdown, or use a total, to watch a metric without mixing different groups.</p></div>}
-          {alert && !editing ? <>
+          {alert && !draftBase ? <>
             <div className="watch-heading"><span className={`watch-status${alert.enabled ? " enabled" : ""}`}><i />{alert.enabled ? "Watching for you" : "Paused"}</span><button className="activity-text-button" disabled={busy || blocked} onClick={edit}>Edit alert</button></div>
             <h4 className="watch-rule-name">{metricOf(model, alert.metric)?.label ?? alert.metric}</h4>
             <p className="activity-muted">{alert.mode === "anomaly" ? `Unusual changes · ${alert.sensitivity} sensitivity` : `${alert.operator === "above" ? "Above" : "Below"} ${alertFormat(alert.threshold!)}`} · {alert.intervalMinutes === 1440 ? "Daily" : alert.intervalMinutes === 60 ? "Hourly" : "Every 15 minutes"}</p>
             {alert.evaluation ? <EvaluationCard evaluation={alert.evaluation} format={alertFormat} /> : <div className="activity-empty compact"><ActivityIcon kind="alerts" /><p>Ready for its first check.</p></div>}
-            <div className="watch-actions"><button disabled={busy || blocked || !alert.enabled} onClick={() => void action(() => request("/alerts/check", "POST"))}>{busy ? "Working…" : "Check now"}</button><button disabled={busy || blocked} onClick={() => void action(() => request("/alert", "PATCH", { version: alert.version, enabled: !alert.enabled }))}>{alert.enabled ? "Pause" : "Resume"}</button><button className="activity-text-button" disabled={busy || blocked} onClick={() => void action(() => request("/alert", "DELETE", { version: alert.version }))}>Remove</button></div>
-            <div className="watch-history-heading"><h4>Recent updates</h4>{alert.events.some(e => !e.read) && <button className="activity-text-button" disabled={busy} onClick={() => void action(() => request("/alert", "PATCH", { version: alert.version, read: true }))}>Mark all read</button>}</div>
+            <div className="watch-actions"><button disabled={busy || blocked || !alert.enabled} onClick={() => void action(() => request("/alerts/check", "POST"))}>{busy ? "Working…" : "Check now"}</button><button disabled={busy || blocked} onClick={() => void action(() => request("/alert", "PATCH", { expectedId: alert.id, version: alert.version, enabled: !alert.enabled }))}>{alert.enabled ? "Pause" : "Resume"}</button><button className="activity-text-button" disabled={busy || blocked} onClick={() => void action(() => request("/alert", "DELETE", { expectedId: alert.id, version: alert.version }))}>Remove</button></div>
+            <div className="watch-history-heading"><h4>Recent updates</h4>{alert.events.some(e => !e.read) && <button className="activity-text-button" disabled={busy} onClick={() => void action(() => request("/alert", "PATCH", { expectedId: alert.id, version: alert.version, read: true }))}>Mark all read</button>}</div>
             {!alert.events.length && <p className="activity-muted">No alerts yet. Repeated checks of the same ongoing condition stay quiet.</p>}
             {alert.events.map(event => <article className={`watch-event${event.read ? "" : " unread"}`} key={event.id}><div><strong>{event.value === undefined ? "Unusual change" : alertFormat(event.value)}</strong><time>{dateLabel(event.checkedAt)}</time></div><p>{event.reason}</p><span>{event.period}</span></article>)}
-          </> : <form className="watch-form" onSubmit={e => { e.preventDefault(); void action(async () => { await request("/alert", "PUT", { rule: rule(), revision, version: alert?.version ?? 0 }); setEditing(false); setPreview(null); if (alert?.enabled !== false) await request("/alerts/check", "POST"); }); }}>
-            <fieldset disabled={busy || blocked || !supported}>
+          </> : <form className="watch-form" onSubmit={e => { e.preventDefault(); if (!draftBase || draftChanged || loading || blocked) return; void action(async () => { await request("/alert", "PUT", { rule: rule(), revision: draftBase.revision, version: draftBase.version, expectedId: draftBase.id }); setDraftBase(null); setPreview(null); if (alert?.enabled !== false) await request("/alerts/check", "POST"); }); }}>
+            {draftChanged && <div className="activity-save-note" role="alert"><strong>This watch changed while you were editing.</strong><p>Your draft is still here. Load the latest saved settings before updating it; this replaces your draft.</p><button type="button" className="save-button" disabled={busy} onClick={edit}>Load latest settings</button></div>}
+            <fieldset disabled={busy || blocked || loading || !draftBase || !supported}>
               <label>Metric<select value={metric} onChange={e => { setMetric(e.target.value); setThreshold(""); }}>{tile.metrics.map(m => <option key={m} value={m}>{metricOf(model, m)?.label ?? m}</option>)}</select></label>
               <div className="watch-type-options" role="group" aria-label="Alert type">
                 <button type="button" aria-pressed={mode === "anomaly"} disabled={!tile.dimensions.some(d => d.includes(":"))} onClick={() => setMode("anomaly")}><span>Unusual change</span><small>Learn the recent pattern</small></button>
@@ -169,10 +178,11 @@ function ActivityDrawer({ tile, model, dashboardId, revision, dirty, onSave, ini
               <label>Check frequency<select value={interval} onChange={e => setIntervalMinutes(Number(e.target.value) as typeof interval)}><option value={15}>Every 15 minutes</option><option value={60}>Every hour</option><option value={1440}>Once a day</option></select></label>
               <div className="watch-delivery"><ActivityIcon kind="alerts" /><div><strong>Notify me here</strong><p>A dot on the bell, with the details saved on this chart. Only you see your alerts.</p></div></div>
               {preview && <EvaluationCard evaluation={preview} format={format} preview />}
-              <div className="activity-form-actions"><button type="button" disabled={invalid} onClick={() => void action(async () => { const data = await request("/alerts/preview", "POST", { rule: rule(), revision }); setPreview(data.evaluation); })}>Preview check</button><button className="save-button" disabled={invalid}>{busy ? "Working…" : alert ? "Update alert" : "Create alert"}</button></div>
-            </fieldset>{editing && <button type="button" className="activity-text-button" onClick={() => setEditing(false)}>Cancel editing</button>}
+              {mode === "anomaly" && preview?.state === "waiting" && <p className="activity-muted">An unusual-change watch needs a usable history. You can wait for the missing periods or <button type="button" onClick={() => setMode("threshold")}>Use a threshold instead</button>.</p>}
+              <div className="activity-form-actions"><button type="button" disabled={invalid || draftChanged} onClick={() => void action(async () => { const data = await request("/alerts/preview", "POST", { rule: rule(), revision }); setPreview(data.evaluation); })}>Preview check</button><button className="save-button" disabled={invalid || draftChanged}>{busy ? "Working…" : draftBase?.id ? "Update alert" : "Create alert"}</button></div>
+            </fieldset>{draftBase && alert && <button type="button" disabled={busy} className="activity-text-button" onClick={() => { setDraftBase(null); setPreview(null); setError(""); }}>Cancel editing</button>}
           </form>}
-          <details className="watch-details"><summary>How checks work</summary><p>Uses the saved chart, saved filter defaults, and your data permissions. Live filtering and drilling don’t change your watch.</p><p>Time-series checks exclude the current calendar period in UTC and wait for the most recently closed period. Missing values and gaps never count as zero. Source completeness is not verified.</p><p>Anomaly checks need at least 14 closed periods. They use a robust range around recent changes, with weekday matching for daily series once four weeks of history are available. This is a signal to investigate, not proof of a business problem.</p><p>The server must be running. In company workspaces, checks pause when your sign-in expires.</p></details>
+          <details className="watch-details"><summary>How checks work</summary><p>Uses the saved chart, saved filter defaults, and your data permissions. Live filtering and drilling don’t change your watch.</p><p>Time-series checks use the model’s reporting calendar and timezone, including a fixed reporting date when configured. They exclude the current period and wait for the most recently closed period. Missing values and gaps never count as zero. Source completeness is not verified.</p><p>Anomaly checks need at least 14 closed periods. They use a robust range around recent changes, with weekday matching for daily series once four weeks of history are available. This is a signal to investigate, not proof of a business problem.</p><p>The server must be running. In company workspaces, checks pause when your sign-in expires.</p></details>
         </section>}
       </div>
       {panel === "comments" && <form className="activity-composer" onSubmit={e => { e.preventDefault(); void action(async () => { await request("/comments", "POST", { body }); setBody(""); }); }}><label htmlFor="chart-comment">Add to the conversation</label><textarea id="chart-comment" placeholder="What’s the story behind this number?" rows={3} maxLength={4000} value={body} onChange={e => setBody(e.target.value)} disabled={busy || blocked} /><div><span>{body.length ? `${body.length} / 4,000` : "A little context goes a long way."}</span><button className="save-button" disabled={busy || blocked || !body.trim()}>{busy ? "Posting…" : "Post comment"}</button></div></form>}

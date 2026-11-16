@@ -1,0 +1,21 @@
+.claude-connection { margin: 24px 0; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.claude-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.claude-heading > div { flex: 1 1 320px; }
+.claude-connection h2 { margin: 6px 0 10px; font-size: 23px; }
+.claude-connection p { line-height: 1.6; }
+.claude-connection h3 { margin-top: 28px; font-size: 17px; }
+.claude-connection button { min-height: var(--button-height); border: 1px solid var(--line-2); border-radius: var(--button-radius); padding: 5px 12px; font: inherit; font-size: var(--button-font-size); line-height: 20px; cursor: pointer; }
+.claude-connection button:not(.primary) { background: var(--surface); color: var(--ink-2); }
+.claude-connection button:not(.primary):hover:not(:disabled) { border-color: var(--accent); background: var(--surface-2); }
+.claude-connection button:disabled { cursor: wait; opacity: .6; }
+.claude-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.claude-actions button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.claude-connection pre { padding: 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+.claude-connection blockquote { margin: 16px 0; border-left: 3px solid var(--accent); padding: 8px 16px; line-height: 1.6; overflow-wrap: anywhere; }
+.claude-boundary { color: var(--ink-2); font-size: 13px; }
+.chatgpt-scope { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; margin: 16px 0; }
+.chatgpt-connection label { display: flex; flex-direction: column; gap: 8px; font-size: 13px; font-weight: 600; }
+.chatgpt-connection select, .chatgpt-connection input { box-sizing: border-box; min-width: 0; width: 100%; min-height: 40px; padding: 8px 12px; border: 1px solid var(--line-2); border-radius: var(--button-radius); background: var(--surface); color: var(--ink); font: inherit; }
+.chatgpt-tunnel { max-width: 460px; margin: 16px 0; }
+.chatgpt-connection details { margin: 14px 0; }
+.chatgpt-connection summary { cursor: pointer; color: var(--ink-2); }

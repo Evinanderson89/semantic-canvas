@@ -19,6 +19,42 @@ async function open(page: Page, d: DashboardSpec) {
 }
 const query = (page: Page, tile: string, match: (f: any) => boolean) => page.waitForResponse(r => r.url().endsWith("/api/query") && r.request().postDataJSON()?.id === tile && !!r.request().postDataJSON()?.where?.some(match));
 
+test("NUMBER metadata offers a numeric range and sends numeric bounds to the chart", async ({ page }) => {
+  await page.route("**/api/model*", async route => {
+    const response = await route.fetch(), model = await response.json();
+    model.tables.fct_mrr_movements.columns.find((c: { name: string }) => c.name === "mrr_delta_usd").type = "NUMBER(18,2)";
+    await route.fulfill({ response, json: model });
+  });
+  const d: DashboardSpec = { title: `Decimal amount filter ${crypto.randomUUID()}`, tiles: [{
+    id: "amount", title: "New revenue", metrics: ["new_mrr"], dimensions: ["month:movement_date"], chart: "line",
+    layout: { x: 24, y: 190, w: 750, h: 350 },
+  }] };
+  const id = await open(page, d);
+  await page.getByRole("button", { name: "Filter", exact: true }).click();
+  await page.getByLabel("Catalogue field", { exact: true }).selectOption("fct_mrr_movements.mrr_delta_usd");
+  await page.getByLabel("Label", { exact: true }).fill("Movement amount");
+  await expect(page.getByRole("radiogroup", { name: "Show as" }).getByRole("radio")).toHaveText(["Range"]);
+  await page.getByRole("button", { name: "Save filter", exact: true }).click();
+  const input = page.getByLabel("Movement amount from", { exact: true });
+  await expect(input).toHaveAttribute("type", "number");
+  const ran = query(page, "amount", f => f.field === "fct_mrr_movements.mrr_delta_usd" && f.mode === "range" && f.min === 10.25);
+  await input.fill("10.25");
+  expect((await ran).ok()).toBe(true);
+  const exact = query(page, "amount", f => f.field === "fct_mrr_movements.mrr_delta_usd" && f.min === "9007199254740993");
+  await input.fill("9007199254740993");
+  expect((await exact).ok()).toBe(true);
+  await expect(input).toHaveValue("9007199254740993");
+  await page.getByRole("button", { name: "Save dashboard", exact: true }).click();
+  await expect(page.locator(".save-status")).toHaveText("Saved");
+  const persisted = await (await page.request.get(`/api/dashboards/${id}`)).json();
+  expect(persisted.spec.filters[0]).toMatchObject({ control: "number" });
+  // Range is the default presentation and need not be stored explicitly.
+  await page.reload();
+  await page.getByRole("button", { name: "Open saved dashboard", exact: true }).click();
+  await page.getByRole("dialog", { name: "Saved dashboards" }).getByRole("button", { name: new RegExp(d.title) }).click();
+  await expect(input).toHaveAttribute("type", "number");
+});
+
 test("authors a chips filter, toggles two chips and sends both values to the connected chart", async ({ page }) => {
   const d = spec(), id = await open(page, d);
   await page.getByRole("button", { name: "Filter", exact: true }).click();
@@ -91,4 +127,30 @@ test("the Filter styles starter shows chips, a segmented row and date presets", 
   await expect(page.getByRole("group", { name: "Active users" })).toContainText(/\d/);
   await expect(page.getByRole("radiogroup", { name: "Period period" }).locator(".filter-resolved")).toHaveText(/^\w{3} \d{1,2} to \w{3} \d{1,2}$/);
   await page.screenshot({ path: "test-results/filter-styles-starter.png" });
+});
+
+for (const timezoneId of ["UTC", "Pacific/Kiritimati"]) test.describe(`reporting presets in a ${timezoneId} browser`, () => {
+  test.use({ timezoneId });
+  for (const pinned of [false, true]) test(`${pinned ? "pinned" : "live"} reporting date drives the visible range and actual query`, async ({ page }) => {
+    await page.clock.setFixedTime(new Date("2026-02-01T00:30:00Z"));
+    await page.route("**/api/model", async route => {
+      const response = await route.fetch(), model = await response.json();
+      model.calendar = { weekStart: "monday", fiscalYearStartMonth: 2,
+        timezone: pinned ? "Pacific/Kiritimati" : "America/Los_Angeles", ...(pinned ? { today: "2026-08-31" } : {}) };
+      await route.fulfill({ json: model });
+    });
+    const d = spec();
+    d.filters = [{ id: "period", label: "Period", field: "fct_events.event_date", control: "date", presentation: "presets", scope: "report", defaultValue: { preset: "last-7-days" }, bindings: [{ tileId: "k", field: "fct_events.event_date" }] }];
+    d.tiles.push({ id: "f", kind: "filter", filterId: "period", title: "Period", metrics: [], dimensions: [], layout: { x: 24, y: 24, w: 700, h: 150 } });
+    const max = pinned ? "2026-09-01" : "2026-02-01";
+    const ran = query(page, "k", f => f.min === (pinned ? "2026-08-25" : "2026-01-25") && f.max === max && f.maxExclusive === true);
+    await open(page, d);
+    expect((await ran).ok()).toBe(true);
+    const control = page.getByRole("radiogroup", { name: "Period period" });
+    await expect(control.locator(".filter-resolved")).toHaveText(pinned ? "Aug 25 to Aug 31" : "Jan 25 to Jan 31");
+    const fiscal = query(page, "k", f => f.min === (pinned ? "2026-02-01" : "2025-02-01") && f.max === max && f.maxExclusive === true);
+    await control.getByRole("radio", { name: "Year to date", exact: true }).click();
+    expect((await fiscal).ok()).toBe(true);
+    await expect(control.locator(".filter-resolved")).toHaveText(pinned ? "Feb 1 to Aug 31" : "Feb 1, 2025 to Jan 31, 2026");
+  });
 });

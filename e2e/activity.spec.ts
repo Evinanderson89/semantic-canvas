@@ -13,7 +13,8 @@ test("chart comments survive reopening, replies resolve, and personal alerts kee
   // The rough draft intentionally overlaps. Arrange first so the controls are usable.
   await page.getByRole("button", { name: "Smart arrange", exact: true }).click();
   await page.getByRole("button", { name: "Apply layout", exact: true }).click();
-  const comments = page.getByRole("button", { name: /^Chart comments/ }).first();
+  const watchedChart = page.getByRole("group", { name: "Web sessions", exact: true });
+  const comments = watchedChart.getByRole("button", { name: /^Chart comments/ });
   await comments.click();
   const drawer = page.getByRole("dialog");
   await expect(drawer.getByText("Give this chart a home")).toBeVisible();
@@ -34,15 +35,26 @@ test("chart comments survive reopening, replies resolve, and personal alerts kee
   await page.keyboard.press("Escape");
   await expect(drawer).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Chart comments, 1 open" })).toBeFocused();
-  await page.getByRole("button", { name: /^Chart alerts/ }).first().click();
+  await watchedChart.getByRole("button", { name: /^Chart alerts/ }).click();
   await drawer.getByRole("button", { name: /Threshold Choose a clear boundary/ }).click();
   await drawer.getByLabel("Threshold (metric units)").fill("0");
   await drawer.getByRole("button", { name: "Preview check", exact: true }).click();
   await expect(drawer.getByText("Preview · nothing sent")).toBeVisible();
+  const initialCheck = page.waitForResponse(r => r.url().endsWith("/alerts/check") && r.request().method() === "POST");
   await drawer.getByRole("button", { name: "Create alert", exact: true }).click();
+  const initialResponse = await initialCheck; expect(initialResponse.ok()).toBe(true);
   await expect(drawer.getByText("Watching for you", { exact: true })).toBeVisible();
   await expect(drawer.locator(".watch-event")).toHaveCount(1);
+  const activityUrl = initialResponse.url().replace(/\/alerts\/check$/, "");
+  const beforeCheck = await (await page.request.get(activityUrl, { headers: { "x-sc-principal": "admin" } })).json();
+  expect(beforeCheck.alert.events).toHaveLength(1);
+  const repeatedCheck = page.waitForResponse(r => r.url() === initialResponse.url() && r.request().method() === "POST");
   await drawer.getByRole("button", { name: "Check now", exact: true }).click();
+  expect((await repeatedCheck).ok()).toBe(true);
+  const afterCheck = await (await page.request.get(activityUrl, { headers: { "x-sc-principal": "admin" } })).json();
+  expect(Date.parse(afterCheck.alert.evaluation.checkedAt)).toBeGreaterThan(Date.parse(beforeCheck.alert.evaluation.checkedAt));
+  expect(afterCheck.alert.evaluation.state).toBe("triggered");
+  expect(afterCheck.alert.events.map((event: { id: string }) => event.id)).toEqual(beforeCheck.alert.events.map((event: { id: string }) => event.id));
   await expect(drawer.locator(".watch-event")).toHaveCount(1);
   await drawer.getByRole("button", { name: "Mark all read" }).click();
   await expect(drawer.locator(".watch-event.unread")).toHaveCount(0);

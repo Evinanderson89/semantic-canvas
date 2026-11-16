@@ -5,6 +5,14 @@ import { DEFAULT_CANVAS } from "../canvas/presets.ts";
 export const DOCUMENT_VERSION = 1;
 export const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 const name = z.string().min(1).max(256);
+// Profiling is advisory, but still executes warehouse queries. Match the chart
+// dimension budget and validate before starting any of those queries.
+export const profileFieldsSchema = z.array(name).min(1).max(12);
+export const profileRequestSchema = z.object({
+  base: z.string().max(256).default(""),
+  fields: z.string().max(12 * 257).transform(value => value.split(",").map(field => field.trim()))
+    .pipe(profileFieldsSchema).transform(fields => [...new Set(fields)]),
+});
 const finite = z.number().finite();
 const value = z.union([z.string().max(10000), finite, z.boolean(), z.null()]);
 export const filterSchema = z.object({
@@ -18,6 +26,7 @@ const formatSchema = z.object({
   decimals: finite.int().min(0).max(20).nullable(),
   xTitle: z.string().max(1000).nullable(), yTitle: z.string().max(1000).nullable(),
   showX: z.boolean(), showY: z.boolean(), grid: z.boolean(), legend: z.enum(["auto", "hide"]),
+  lineScale: z.enum(["zero", "fit"]),
   palette: name, padding: finite.min(0).max(200), background: z.boolean(), border: z.boolean(),
   backgroundColor: z.string().max(128).nullable(), backgroundOpacity: finite.min(0).max(100),
   textSize: z.preprocess((v) => typeof v === "string" ? ({ s: 13, m: 19, l: 26, xl: 34 }[v]) : v,
@@ -31,10 +40,11 @@ export const querySchema = z.object({
   limit: finite.int().min(1).max(5000).optional(), compare: z.enum(["none", "prior", "yoy"]).optional(),
 }).strict();
 export const tileSchema = querySchema.extend({
-  id: name, metrics: z.array(name).max(50), section: name.optional(), pinned: z.boolean().optional(),
+  id: name, metrics: z.array(name).max(50), section: name.nullable().optional(), pinned: z.boolean().optional(),
   tabId: name.optional(), filterId: name.optional(),
   kind: z.enum(["metric", "heading", "text", "divider", "image", "filter"]).optional(),
   title: z.string().max(1000).optional(), text: z.string().max(100000).optional(),
+  evidence: z.object({ sourceTileId: name, sourceTitle: z.string().max(1000), question: z.string().max(1000), period: z.string().max(1000), capturedAt: z.string().datetime() }).strict().optional(),
   imageData: z.string().max(6 * 1024 * 1024).regex(/^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/).optional(),
   chart: z.enum(["line", "area", "areaStacked", "bar", "barGrouped", "barStacked", "barH", "barHorizontal", "scatter", "heatmap", "map", "donut", "waterfall", "funnel", "smallMultiples", "combo", "stat", "kpi", "table"]).optional(),
   compareShow: z.enum(["value", "delta", "percent"]).optional(), format: formatSchema.optional(),
@@ -61,10 +71,15 @@ export const dashboardFilterSchema = z.object({
   const allowed: readonly string[] = FILTER_PRESENTATIONS[f.control];
   if (f.presentation && !allowed.includes(f.presentation)) ctx.addIssue({ code: "custom", path: ["presentation"], message: `A ${f.control} filter cannot be shown as ${f.presentation}; choose ${allowed.join(", ")}` });
 });
+export const presentationBriefSchema = z.object({
+  review: z.object({ version: z.literal(1), reviewedAt: z.string().datetime(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+  question: z.string().max(1000), takeaway: z.string().max(4000), nextStep: z.string().max(2000),
+  evidenceIds: z.array(name).max(500).refine(ids => new Set(ids).size === ids.length, "Evidence IDs must be unique").optional(),
+}).strict();
 export const dashboardSchema = z.object({
   title: z.string().min(1).max(1000), description: z.string().max(100000).optional(),
   tiles: z.array(tileSchema).max(500), crossFilters: z.array(filterSchema).max(100).optional(),
-  tabs: z.array(z.object({ id: name, title: z.string().min(1).max(100) }).strict()).min(1).max(20).optional(),
+  tabs: z.array(z.object({ id: name, title: z.string().min(1).max(100), brief: presentationBriefSchema.optional() }).strict()).min(1).max(20).optional(),
   filters: z.array(dashboardFilterSchema).max(64).optional(),
 }).strict().refine((d) => new Set(d.tiles.map((t) => t.id)).size === d.tiles.length, "Tile IDs must be unique");
 export const canvasSchema = z.object({

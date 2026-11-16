@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Model } from "../semantic/model.ts";
 import type { AiConfig } from "../sources/registry.ts";
 import { blueprintSchema } from "./blueprint.ts";
+import { requireAiConfiguration } from "../agent/configuration.ts";
 
 export const referenceUploadSchema = z.object({ mime: z.enum(["image/png", "image/jpeg", "image/webp", "application/pdf"]), data: z.string().min(1).max(7_000_000).regex(/^[A-Za-z0-9+/]+={0,2}$/) }).strict();
 export async function validateReferenceUpload(input: unknown) {
@@ -23,6 +24,7 @@ export async function validateReferenceUpload(input: unknown) {
   return { ...file, pages };
 }
 export async function analyzeReference(input: unknown, model: Model, cfg: AiConfig, signal?: AbortSignal) {
+  requireAiConfiguration(cfg);
   const file = await validateReferenceUpload(input);
   const client = new Anthropic({ apiKey: cfg.apiKey, timeout: 90_000, maxRetries: 0 });
   const catalogue = Object.values(model.metrics).map(m => ({ name: m.name, label: m.label, synonyms: m.synonyms, description: m.description, timeGrains: m.timeGrains }));

@@ -9,7 +9,7 @@
 - Use **＋** next to the tab strip to add a tab. Tab actions rename, duplicate or delete the active tab. Deleting a tab participates in undo.
 - Choose **Filter** from the canvas palette. Pick a catalogue field and choose **Across dashboard tabs** or **Only this tab**. Review the connected-chart list. Fields that are not reachable from a chart stay disconnected.
 - A shared filter remains available in a compact shelf on tabs where its canvas control is absent. The control states how many charts on the current tab it affects. Changes to values are exploration state; they do not mark the authored dashboard unsaved.
-- Choose **••• → Copy charts to…** to copy selected charts (or choose from the active tab) into another tab or saved dashboard in the same source. Matching destination filters connect automatically. Each copy can be edited independently.
+- Choose **••• → Copy charts to…** to copy selected charts (or choose from the active tab) into another tab or saved dashboard in the same source. Matching destination filters connect automatically. Review **Scope after copying** before applying: it shows each chart's grouping, retained chart filters, effective destination filters and filter exceptions. Each copy can be edited independently.
 
 ## Show as
 
@@ -27,7 +27,9 @@ Tabs share one canvas size and one dashboard revision in this release. Save, bac
 
 Filters bind to specific tile IDs and fields. The designer suggests exact reachable fields; manual mappings should connect equivalent business meanings only. Select controls show up to 500 available values using the source’s existing row-restricted values endpoint. Ranges support numeric and date fields. Date “To” values include the full final calendar day using an exclusive next-day upper bound. Current selections reset when opening a document or changing role/source. The document contract supports authored defaults; the initial designer does not yet offer a default-value editor. Newly added charts should be explicitly connected in Edit filter; duplicated tabs and copied charts connect as described above.
 
-Chart distribution creates independent copies, not linked master components. Copies retain authored chart filters and settings; temporary selections and drill state are not copied. Saving into another saved dashboard writes immediately with the revision loaded by the chooser. A conflicting revision is rejected and the destination stays intact; reselect the destination to load its current revision. There is no cross-source metric remapping or automatic cross-document filter synchronization.
+Chart distribution creates independent copies, not linked master components. Copies retain authored chart filters and settings. Within the current dashboard, copies use its current destination-filter selections. Another saved dashboard uses its own filter defaults; the source's temporary selections and tab-local controls do not migrate with the chart. Drill state is not copied. The scope preview resolves filters using the same model calendar and query-scope functions as the chart renderer. It does not query the warehouse or promise that results will be equal; metric definitions and access rules still apply. A destination must finish loading before a copy is available.
+
+Saving into another saved dashboard writes immediately with the revision loaded by the chooser. A conflicting revision is rejected and the destination stays intact; reselect the destination to load its current revision. There is no cross-source metric remapping or automatic cross-document filter synchronization.
 
 ## Document contract
 

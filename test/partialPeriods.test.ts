@@ -45,6 +45,16 @@ describe("partial edge periods", () => {
     expect(partial).toEqual({ start: false, end: false });
     expect(String(rows[rows.length - 1][0])).toBe("2026-08-01");
   });
+  it("uses the monthly source declaration for CAC but excludes its unfinished quarter", async () => {
+    const t = { id: "cac", metrics: ["cac"], dimensions: ["month:fct_saas_monthly.month"], layout: { x: 0, y: 0, w: 1, h: 1 } };
+    const monthly = splitPartialPeriods(await conn.execute(compileTile(model, conn, t), 100));
+    expect(monthly.partial).toEqual({ start: false, end: false });
+    expect(String(monthly.rows.at(-1)![0])).toBe("2026-08-01");
+    const quarterly = splitPartialPeriods(await conn.execute(compileTile(model, conn, { ...t, dimensions: ["quarter:fct_saas_monthly.month"] }), 100));
+    expect(quarterly.partial).toEqual({ start: true, end: true });
+    expect(quarterly.rows).toHaveLength(7);
+    expect(String(quarterly.rows.at(-1)![0])).toBe("2026-04-01");
+  });
   it("judges the bucket, not each segment: a quiet segment does not make a complete month partial", async () => {
     // Every site has sessions on the first and last day of the data, except
     // one that is quiet for the first four days and the last three. The
@@ -72,5 +82,23 @@ describe("partial edge periods", () => {
   it("adds no flags to a daily series or a series without a time grain", async () => {
     expect((await run(tile("day:fct_web_sessions.session_date"))).partial).toEqual({ start: false, end: false });
     expect((await run(tile("dim_users.country"))).partial).toEqual({ start: false, end: false });
+  });
+  it("keeps a selected partial window but withholds comparisons involving its observed edges", async () => {
+    const t = tile("month:fct_web_sessions.session_date", { compare: "prior", where: [{ source: "dimension", field: "fct_web_sessions.session_date", mode: "range", min: "2025-10-15", max: "2025-12-15" }] });
+    const result = await run(t);
+    expect(result.partial).toEqual({ start: false, end: false, selected: { start: true, end: true } });
+    expect(result.rows.map(r => String(r[0]))).toEqual(["2025-10-01", "2025-11-01", "2025-12-01"]);
+    const prior = result.columns.indexOf(`${metric}__prev`);
+    expect(result.rows.map(r => r[prior])).toEqual([null, null, null]);
+    expect(result.rows.every(r => Number(r[1]) > 0)).toBe(true);
+    expect(result.columns.some(c => c.startsWith("__"))).toBe(false);
+  });
+  it("continues comparing complete buckets inside a selected window", async () => {
+    const result = await run(tile("month:fct_web_sessions.session_date", { compare: "prior", where: [{ source: "dimension", field: "session_date", mode: "range", min: "2025-09-15", max: "2025-12-31" }] }));
+    expect(result.partial).toEqual({ start: false, end: false, selected: { start: true, end: false } });
+    const prior = result.columns.indexOf(`${metric}__prev`);
+    expect(result.rows[1][prior]).toBeNull();
+    expect(result.rows[2][prior]).toBe(result.rows[1][1]);
+    expect(result.rows[3][prior]).toBe(result.rows[2][1]);
   });
 });

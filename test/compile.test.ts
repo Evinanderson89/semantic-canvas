@@ -50,7 +50,7 @@ describe("compileTile", () => {
   it("applies a time grain and groups by the alias", () => {
     const sql = compileTile(model, conn, tile({ dimensions: ["month:sold_on"] }) as TileSpec);
     expect(sql).toContain(`date_trunc('month', fct_sales."sold_on") AS "sold_on_month"`);
-    expect(sql).toContain(`GROUP BY "sold_on_month"`);
+    expect(sql).toContain(`GROUP BY date_trunc('month', fct_sales."sold_on")`);
   });
 
   it("applies a shared always-on filter as WHERE, never as FILTER", () => {

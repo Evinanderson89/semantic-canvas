@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { Model } from "../semantic/model.ts";
+import { equivalentStoryTile, type StoryTile } from "./storyAdditions.ts";
 
 export const reviewContextSchema = z.object({
   goal: z.string().max(600).default("Make this dashboard easier to understand."),
@@ -13,7 +15,8 @@ export function rememberDecision(history: ReviewDecision[], decision: ReviewDeci
 export function additionKey(addition: { metrics: string[]; breakdown: string }) {
   return `add:${[...new Set(addition.metrics)].sort().join(",")}:${addition.breakdown}`;
 }
-export function hasEquivalentTile(tiles: { kind?: string; metrics: string[]; dimensions: string[] }[], addition: { metrics: string[]; breakdown: string }) {
+export function hasEquivalentTile(tiles: StoryTile[], addition: { metrics: string[]; breakdown: string }, model?: Model) {
+  if (model) return equivalentStoryTile(model, tiles, { ...addition, title: "Context", breakdown: addition.breakdown === "time" ? "time" : "none" });
   const metrics = [...new Set(addition.metrics)].sort().join(",");
   return tiles.some(tile => !["text", "heading", "divider", "image", "filter"].includes(tile.kind ?? "metric") && [...new Set(tile.metrics)].sort().join(",") === metrics &&
     (addition.breakdown === "time" ? tile.dimensions.length === 1 && /^(day|week|month|quarter|year):/.test(tile.dimensions[0]) : tile.dimensions.length === 0));

@@ -1,6 +1,7 @@
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
-import { metricOf, timeColumnOf, metricsByTable, prettifyModelName, reviewedModel, isLineage, type Model, type Metric, type Table } from "../semantic/model.ts";
+import { metricOf, timeColumnOf, metricsByTable, prettifyModelName, reviewedModel, isLineage, joinedTableOptions, periodRollupAllowed, isCrossTableRatio, type Model, type Metric, type Table } from "../semantic/model.ts";
 import type { Brief } from "./match.ts";
+import { requiredDimensions } from "./prepareTile.ts";
 
 function categoricalDims(t: Table | undefined): string[] {
   return (t?.columns ?? []).filter(c => /^(string|varchar|text|bool)/i.test(c.type) && !/(_id$|^id$)/.test(c.name) && !isLineage(c)).map(c => c.name);
@@ -17,7 +18,7 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
   const metrics = [...byTable[subject]].sort((a,b) => (b.importance ?? 0) - (a.importance ?? 0));
   const selected = (opts.metrics ?? []).map(n => metricOf(model, n)).filter(Boolean);
   const cap = opts.audience === "analyst" ? 6 : opts.audience === "operator" ? 4 : 3;
-  const headline = (selected.length ? selected : metrics).slice(0, cap);
+  const headline = selected.length ? selected : metrics.slice(0, cap);
   const tiles: TileSpec[] = [];
   let y = 24, sequence = 0, section = "";
   const id = () => `t${++sequence}`;
@@ -28,9 +29,13 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
     y += 56;
   };
   const dimensions = (m: Metric) => {
-    const time = m.timeDimension ?? timeColumnOf(model, m.baseTable);
+    const time = m.timeDimension ?? (isCrossTableRatio(model, m) ? metricOf(model, m.numerator!)?.timeDimension : undefined) ?? timeColumnOf(model, m.baseTable);
     const requested = ["day", "week", "month", "quarter", "year"].includes(opts.grain ?? "") ? opts.grain! : "month";
-    const grain = m.timeGrains ? m.timeGrains.find(g => g === requested) ?? m.timeGrains[0] : requested;
+    const required = requiredDimensions(model, [m.name], [], requested);
+    if (required.length) return required;
+    let grain = m.timeGrains ? m.timeGrains.find(g => g === requested) ?? m.timeGrains[0] : requested;
+    const period = model.tables[m.baseTable]?.period;
+    if (period && time === `${m.baseTable}.${period.column}` && !periodRollupAllowed(period.grain, grain)) grain = period.grain;
     return time ? [`${grain}:${time}`] : [];
   };
   begin("At a glance");
@@ -63,10 +68,11 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
     y += Math.ceil(supporting.length / count) * 316 + 24;
   }
   // Snapshot metrics cannot be summed across all dates into a categorical total.
-  const breakdownMetric = headline.find(m => !m.timeGrains);
+  const breakdownMetric = headline.find(m => !requiredDimensions(model, [m.name], []).length);
   if (opts.includeBreakdowns !== false && breakdownMetric) {
     const base = breakdownMetric.baseTable;
-    const cats = [...categoricalDims(model.tables[base]), ...model.joins.filter(j => j.left === base).flatMap(j => categoricalDims(model.tables[j.right]).map(c => `${j.right}.${c}`))].slice(0, 2);
+    const cats = [...categoricalDims(model.tables[base]), ...joinedTableOptions(model, base).flatMap(({ table, path }) =>
+      "error" in path ? [] : categoricalDims(table).map(c => `${table.name}.${c}`))].slice(0, 2);
     if (cats.length) begin("A closer look");
     for (const dim of cats) {
       tiles.push({ id: id(), section, title: `${breakdownMetric.label} by ${dim.split(".").at(-1)?.replace(/_/g, " ")}`, metrics: [breakdownMetric.name], dimensions: [dim],
@@ -82,9 +88,16 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
       y += 316;
     }
   }
+  // Describe the generated headline queries, not the requested grain: metric
+  // restrictions may change it, and an undated metric has no reporting period.
+  const grainLabels: Record<string, string> = { day: "daily", week: "weekly", month: "monthly", quarter: "quarterly", year: "yearly" };
+  const scope = tiles.filter(t => t.chart === "kpi" || t.chart === "stat").map(t => {
+    const grain = t.dimensions.map(d => d.match(/^(day|week|month|quarter|year):/)?.[1]).find(Boolean);
+    return `${t.title}: ${grain ? grainLabels[grain] : "no time grouping"}`;
+  });
   return {
     title: opts.text?.trim() ? opts.text.trim().replace(/^\w/, c => c.toUpperCase()).slice(0, 70) : `${prettyTitle(subject)} Dashboard`,
-    description: `A view of ${headline.map(m => m.label).join(", ")}. Each metric uses a supported reporting period.`, tiles,
+    description: `${scope.join("; ")}. Reporting windows and filters can differ between charts.`, tiles,
   };
 }
 export function emptyDashboard(_model: Model): DashboardSpec { return { title: "Untitled dashboard", description: "", tiles: [] }; }

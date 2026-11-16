@@ -11,7 +11,7 @@ export function fitStarter(spec: DashboardSpec, canvas: CanvasSpec, width: numbe
     const original = tabView(spec, tab.id).tiles;
     const messy = original.some((a, i) => original.slice(i + 1).some(b => overlaps(a.layout, b.layout)));
     // Preserve the cleanup exercise's deliberate overlaps until the user arranges it.
-    if (messy) return original.map(t => ({ ...t, layout: { ...t.layout,
+    if (messy || width >= 850) return original.map(t => ({ ...t, layout: { ...t.layout,
       x: Math.round(t.layout.x * width / canvas.width), w: Math.max(100, Math.round(t.layout.w * width / canvas.width)) } }));
     return applyLayout("exec-summary", original, width);
   });

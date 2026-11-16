@@ -6,6 +6,12 @@ export interface QueryResult {
   cached?: boolean;
 }
 
+export interface ExecutionOptions {
+  signal?: AbortSignal;
+  /** Includes time waiting for a connection. No deadline when omitted. */
+  timeoutMs?: number;
+}
+
 /**
  * A connector is a SQL endpoint plus the dialect differences that actually
  * bite: how you truncate a date, how you quote an identifier, and how a table
@@ -25,7 +31,7 @@ export interface Connector {
   toTimezone?(expr: string, timezone: string): string;
   /** What to put in FROM for a catalog table. */
   relation(table: string, physical?: { database?: string; schema?: string; table: string }): string;
-  execute(sql: string, limit?: number, cacheKey?: string): Promise<QueryResult>;
+  execute(sql: string, limit?: number, cacheKey?: string, options?: ExecutionOptions): Promise<QueryResult>;
   /** The warehouse's own catalogue, for the Modeler: every scannable table with its columns and their native types. */
   catalog?(): Promise<CatalogTable[]>;
   close(): Promise<void>;

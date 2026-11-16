@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Popover } from "./Popover.tsx";
 import { PRESETS, presetById, type CanvasSpec } from "../canvas/presets.ts";
 import type { TileSpec } from "../compiler/spec.ts";
-import { boundsOf } from "../canvas/geometry.ts";
-import { applyBestLayout } from "../canvas/layouts.ts";
+import { boundsOf, reorderLayers } from "../canvas/geometry.ts";
+import { applyBestLayout, pinnedContent } from "../canvas/layouts.ts";
 import { arrangeForPurpose } from "../suggest/arrangement.ts";
 import type { Model } from "../semantic/model.ts";
 
@@ -12,6 +12,19 @@ const ARRANGEMENTS = [
   { id: "story", label: "Tell a story", description: "A spacious walkthrough: headline numbers, large charts, and room for commentary." },
   { id: "executive", label: "Build an executive dashboard", description: "Headline numbers first, one leading trend, then compact supporting charts." },
 ] as const;
+
+function CanvasDimension({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = (input: string) => {
+    const numeric = Number(input);
+    const next = input.trim() && Number.isFinite(numeric) ? Math.min(4000, Math.max(320, Math.round(numeric))) : value;
+    setDraft(String(next)); if (next !== value) onChange(next);
+  };
+  return <input aria-label={label} type="number" value={draft} min={320} max={4000} step={1}
+    onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); commit(event.currentTarget.value); } }}
+    onBlur={event => commit(event.currentTarget.value)} />;
+}
 
 export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify, onSettings, onRedesign }: {
   onRedesign: () => void;
@@ -62,19 +75,23 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
   };
 
   const layer = (dir: "front" | "back") => {
-    const zs = tiles.map((t) => (t.layout as any).z ?? 1);
-    const target = dir === "front" ? Math.max(...zs, 1) + 1 : Math.min(...zs, 1) - 1;
-    patch((t) => ({ ...t, layout: { ...t.layout, z: target } as any }));
+    onTiles(reorderLayers(tiles, selected, dir));
   };
 
   /** Picks the best-fitting named layout for the current tile set (Exec
    *  Summary if there's a real headline + support-chart mix, Grid otherwise)
    *  and packs into it. Grows the canvas if that needs more vertical room
    *  than it has -- never shrinks a preset/custom height that already fits. */
-  const proposal = arrangement === "auto" ? applyBestLayout(tiles, canvas.width)
+  const proposal = arrangement === "auto" ? applyBestLayout(tiles, canvas.width, model)
     : { name: arrangement, tiles: arrangeForPurpose(tiles, model, canvas.width, arrangement) };
   const intent = ARRANGEMENTS.find(option => option.id === arrangement)!;
   const addedSections = proposal.tiles.filter(t => t.kind === "heading" && !tiles.some(before => before.id === t.id)).length;
+  const changedTiles = proposal.tiles.filter(t => {
+    const before = tiles.find(b => b.id === t.id);
+    return !before || JSON.stringify(t.layout) !== JSON.stringify(before.layout);
+  }).length;
+  const protectedCount = pinnedContent(tiles).length;
+  const changesLayout = changedTiles > 0;
   const bottom = Math.max(100, ...proposal.tiles.map(t => t.layout.y + t.layout.h)) + 24;
   const applyComposition = () => onCompose(proposal.tiles, { ...canvas, height: Math.max(canvas.height, Math.round(bottom)) });
 
@@ -96,11 +113,11 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
             </select>
           </label>
           {canvas.preset === "custom" && <div className="pair">
-            <label className="ctl"><span>Width</span><input aria-label="Canvas width" type="number" value={canvas.width} min={320} max={4000}
-              onChange={(e) => onCanvas({ ...canvas, width: +e.target.value || 320 })} /></label>
+            <label className="ctl"><span>Width</span><CanvasDimension label="Canvas width" value={canvas.width}
+              onChange={width => onCanvas({ ...canvas, width })} /></label>
             <span aria-hidden="true">×</span>
-            <label className="ctl"><span>Height</span><input aria-label="Canvas height" type="number" value={canvas.height} min={320} max={4000}
-              onChange={(e) => onCanvas({ ...canvas, height: +e.target.value || 320 })} /></label>
+            <label className="ctl"><span>Height</span><CanvasDimension label="Canvas height" value={canvas.height}
+              onChange={height => onCanvas({ ...canvas, height })} /></label>
           </div>}
           <div className="settings-row">
             <label><input type="checkbox" checked={canvas.snap} onChange={(e) => onCanvas({ ...canvas, snap: e.target.checked })} /> Snap to grid</label>
@@ -130,16 +147,21 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
           <div className="arrangement-options" role="group" aria-label="Arrangement purpose">{ARRANGEMENTS.map(option => <button key={option.id} aria-label={option.label} aria-pressed={arrangement === option.id} onClick={() => setArrangement(option.id)}><b>{option.label}</b><span>{option.description}</span></button>)}</div>
           <p><b>{intent.label}</b>{addedSections > 0 ? ` · Adds ${addedSections} section headings.` : " · Keeps your existing sections."} Your notes and pinned sections stay intact.</p>
           {!tiles.length && <p>Add charts to the canvas, then choose how they should read together.</p>}
+          {tiles.length > 0 && <p role="status">{changesLayout
+            ? `${changedTiles} ${changedTiles === 1 ? "tile will move or resize" : "tiles will move or resize"}.${protectedCount ? ` ${protectedCount} ${protectedCount === 1 ? "tile stays" : "tiles stay"} in place because of pins.` : ""}`
+            : protectedCount === tiles.length ? "All content is held in place by pins. Unpin a tile or section to rearrange it."
+            : "This layout already fits. Choose another arrangement to explore a different presentation."}</p>}
           <svg viewBox={`0 0 ${canvas.width} ${bottom}`} role="img" aria-label="Proposed dashboard layout">
             {proposal.tiles.map(t => <g key={t.id}><title>{t.title ?? t.text ?? t.metrics.join(", ")}</title><rect x={t.layout.x} y={t.layout.y} width={t.layout.w} height={t.layout.h} rx={8}
               fill={t.pinned ? "var(--ink-3)" : t.kind === "heading" ? "var(--accent)" : "var(--surface-3, #dce5de)"} />{t.kind !== "heading" && <text x={t.layout.x + 12} y={t.layout.y + 28} fontSize="20" fill="var(--ink)">{(t.title ?? t.text ?? t.metrics.join(", ")).slice(0, Math.max(8, Math.floor(t.layout.w / 13)))}</text>}</g>)}
           </svg>
           </div>
-          <footer className="arrange-preview-actions"><div className="story-actions"><button className="primary" disabled={!tiles.length} onClick={() => { applyComposition(); close(); }}>Apply layout</button><button onClick={close}>Keep current</button></div>
+          <footer className="arrange-preview-actions"><div className="story-actions"><button className="primary" disabled={!changesLayout} onClick={() => { applyComposition(); close(); }}>Apply layout</button><button onClick={close}>Keep current</button></div>
           <small>One undo restores the entire previous layout.</small></footer>
         </div>}
       </Popover>
 
+      {tiles.length > 0 && <button className="primary" onClick={onRedesign}>Improve with AI</button>}
       {beautify}
       <span className="spacer" />
       <button className="lock" onClick={() => onCanvas({ ...canvas, locked: true })} title="View without editing controls">Preview</button>

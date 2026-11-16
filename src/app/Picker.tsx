@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { dimensionsOf, isRowCount, isUnreviewed, metricOf, rowCountName, semanticHints, type Model } from "../semantic/model.ts";
+import { dimensionsOf, isRowCount, isUnreviewed, unreviewedDependencies, joinedTableOptions, metricOf, rowCountName, semanticHints, type Model } from "../semantic/model.ts";
 import type { ChartKind, FilterSpec, TileSpec } from "../compiler/spec.ts";
 import { recommend, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
+
+import { requiredDimensions } from "../suggest/prepareTile.ts";
+import { validateTile } from "../compiler/compile.ts";
+import { useFieldProfiles } from "./useFieldProfiles.ts";
+import { filterValueLabels, useFilterMetadata } from "./useFilterMetadata.ts";
 
 type Draft = Omit<TileSpec, "id" | "layout">;
 type Field = { key: string; label: string; hint: string; numeric: boolean; temporal: boolean };
@@ -10,8 +15,8 @@ const uid = () => Math.random().toString(36).slice(2, 8);
 const isNum = (t: string) => /^(double|float|decimal|numeric|int|bigint|smallint|real)/i.test(t);
 const isTime = (t: string) => /date|timestamp/i.test(t);
 
-export function Picker({ model, onAdd, onClose }: {
-  model: Model; onAdd: (t: Draft) => void; onClose: () => void;
+export function Picker({ model, queryContext = "", onAdd, onClose }: {
+  model: Model; queryContext?: string; onAdd: (t: Draft) => void; onClose: () => void;
 }) {
   const [metrics, setMetrics] = useState<string[]>([]);
   const [dims, setDims] = useState<string[]>([]);
@@ -22,7 +27,8 @@ export function Picker({ model, onAdd, onClose }: {
   // need depends entirely on how many values a field has.
   const [drawerH, setDrawerH] = useState(150);
   const [stage, setStage] = useState<"fields" | "viz">("fields");
-  const [profiles, setProfiles] = useState<FieldProfile[] | null>(null);
+  const [profileAttempt, setProfileAttempt] = useState(0);
+  const [validationError, setValidationError] = useState("");
   const [chart, setChart] = useState<ChartKind | null>(null);
   const dragRef = React.useRef<{ y: number; h: number } | null>(null);
 
@@ -44,8 +50,11 @@ export function Picker({ model, onAdd, onClose }: {
   }, [where.length]);
 
   const base = metrics.length ? metricOf(model, metrics[0])?.baseTable ?? null : null;
+  const { profiles, error: profileError, retry: retryProfiles } = useFieldProfiles(model, base, dims, JSON.stringify([metrics, queryContext, profileAttempt]), stage === "viz");
   /** The tile counts rows rather than a declared metric: what a dimension picked first gives you. */
   const counting = metrics.length === 1 && isRowCount(metrics[0]);
+  const joinedTables = useMemo(() => base ? joinedTableOptions(model, base) : [], [base, model]);
+  const unavailable = joinedTables.flatMap(({ table, path }) => "error" in path ? [{ table: table.name, reason: path.error }] : []);
 
   const available: Field[] = useMemo(() => {
     if (!base) return [];
@@ -53,13 +62,14 @@ export function Picker({ model, onAdd, onClose }: {
       key: c.name, label: c.name, hint: c.type,
       numeric: isNum(c.type), temporal: isTime(c.type),
     }));
-    const joined = model.joins.filter((j) => j.left === base).flatMap((j) =>
-      (model.tables[j.right]?.columns ?? []).filter((c) => !/_id$/.test(c.name)).map((c) => ({
-        key: `${j.right}.${c.name}`, label: `${j.right}.${c.name}`, hint: c.type,
+    const joined = joinedTables.flatMap(({ table, path }) => "error" in path ? [] :
+      table.columns.filter((c) => !/(_id$|^id$)/.test(c.name)).map((c) => ({
+        key: `${table.name}.${c.name}`, label: `${table.name}.${c.name}`,
+        hint: `${c.type} · ${[base, ...path.joins.map(j => j.right)].join(" → ")}`,
         numeric: isNum(c.type), temporal: isTime(c.type),
       })));
     return [...own, ...joined];
-  }, [base, model]);
+  }, [base, model, joinedTables]);
 
   /** Before a table is chosen: every table's group-by columns, so a person can start from a dimension, the way Tableau lets you. */
   const byTable = useMemo(() => Object.values(model.tables).map((t) => ({
@@ -114,22 +124,21 @@ export function Picker({ model, onAdd, onClose }: {
 
   /** Profiling happens once, on the way to the visualization step. */
   const goViz = () => {
-    setStage("viz"); setProfiles(null); setChart(null);
-    const bare = dims.map((d) => (d.includes(":") ? d.split(":")[1] : d));
-    if (!bare.length || !base) { setProfiles([]); return; }
-    fetch(`/api/profile?base=${base}&fields=${encodeURIComponent(bare.join(","))}`)
-      .then((r) => r.json())
-      .then((d) => setProfiles((d.fields ?? []).map((f: FieldProfile, i: number) =>
-        // A time grain in the selection forces the temporal reading, whatever
-        // the raw column type profiles as.
-        dims[i]?.includes(":") ? { ...f, role: "temporal" } : f)));
+    let prepared: string[];
+    try {
+      prepared = requiredDimensions(model, metrics, dims);
+      const issues = validateTile(model, { id: "draft", metrics, dimensions: prepared, where, layout: { x: 0, y: 0, w: 400, h: 300 } });
+      if (issues.length) throw new Error(issues.map(i => i.problem).join("; "));
+    } catch (e: any) { setValidationError(e.message); return; }
+    setValidationError(""); setDims(prepared);
+    setStage("viz"); setProfileAttempt(n => n + 1); setChart(null);
   };
 
   const options: VizOption[] = useMemo(
     () => (profiles ? recommend(metrics, profiles, semanticHints(model, metrics)) : []),
     [profiles, metrics, model]);
 
-  useEffect(() => { if (options.length && !chart) setChart(options[0].kind); }, [options]);
+  useEffect(() => { if (options.length && !options.some(o => o.kind === chart)) setChart(options[0].kind); }, [options, chart]);
 
   return (
     <div className="picker" onClick={onClose}>
@@ -174,7 +183,7 @@ export function Picker({ model, onAdd, onClose }: {
                   className={"opt" + (metrics.includes(m.name) ? " on" : "")}
                   style={disabled ? { opacity: 0.35 } : undefined} disabled={disabled}
                   onClick={() => pickMetric(m.name)}>
-                  {m.label}<small>{m.name} · {m.baseTable}{isUnreviewed(model, m) ? " · Ingested, unreviewed" : ""}</small>
+                  {m.label}<small>{m.name} · {m.baseTable}{unreviewedDependencies(model, m).length ? " · Dependencies need review" : isUnreviewed(model, m) ? " · Ingested, unreviewed" : ""}</small>
                 </button>
               );
             })}
@@ -195,11 +204,17 @@ export function Picker({ model, onAdd, onClose }: {
               <button key={d.key} draggable
                 onDragStart={(e) => e.dataTransfer.setData("application/x-field",
                   JSON.stringify({ field: d.key, source: "dimension", numeric: d.numeric }))}
-                className={"opt" + (dims.some((x) => x.endsWith(d.key)) ? " on" : "")}
+                aria-pressed={dims.includes(d.temporal ? `month:${d.key}` : d.key)}
+                className={"opt" + (dims.includes(d.temporal ? `month:${d.key}` : d.key) ? " on" : "")}
                 onClick={() => toggle(dims, d.temporal ? `month:${d.key}` : d.key, setDims)}>
                 {d.label}{d.temporal ? " (by month)" : ""}<small>{d.hint}</small>
               </button>
             ))}
+            {unavailable.length > 0 && <details className="joined-unavailable">
+              <summary>Unavailable joined tables</summary>
+              <p>These paths cannot safely group or filter this metric. Use a metric on the related table, or review the join definitions.</p>
+              {unavailable.map(({ table, reason }) => <p key={table}><strong>{table}</strong><br />{reason}</p>)}
+            </details>}
           </div>
         </div>}
 
@@ -216,12 +231,12 @@ export function Picker({ model, onAdd, onClose }: {
           <div className="drawer-head">
             <h5>Filters</h5>
             <span className="muted">
-              {where.length ? `${where.length} applied` : "drag a metric or dimension here"}
+              {where.length ? `${where.length} ${where.length === 1 ? "filter" : "filters"}` : "drag a metric or dimension here"}
             </span>
           </div>
           <div className="pills">
             {where.map((f) => (
-              <FilterPill key={f.id} f={f} base={base!} model={model}
+              <FilterPill key={f.id} f={f} base={base!} model={model} queryContext={queryContext}
                           onPatch={(p) => patch(f.id, p)}
                           onRemove={() => setWhere((w) => w.filter((x) => x.id !== f.id))} />
             ))}
@@ -229,10 +244,13 @@ export function Picker({ model, onAdd, onClose }: {
         </div>}
 
         {stage === "viz" && (
-          <VizStep options={options} profiles={profiles} metrics={metrics}
+          profileError ? <div className="viz-step"><p role="alert">{profileError}</p><button className="review-action" onClick={retryProfiles}>Retry field profiles</button></div>
+          : <VizStep options={options} profiles={profiles} metrics={metrics}
                    model={model} chart={chart} onChart={setChart} />
         )}
 
+        {validationError && <p className="err" role="alert">{validationError}</p>}
+        {stage === "viz" && metrics.some(m => metricOf(model, m)?.timeGrains?.length) && <p role="status">Using the reporting period required by these metric definitions.</p>}
         <footer>
           <button onClick={stage === "viz" ? () => setStage("fields") : onClose}>
             {stage === "viz" ? "Back" : "Cancel"}
@@ -242,7 +260,7 @@ export function Picker({ model, onAdd, onClose }: {
             ? <button className="primary" disabled={!metrics.length} onClick={goViz}>
                 Choose visualization →
               </button>
-            : <button className="primary" disabled={!chart}
+            : <button className="primary" disabled={!profiles || !!profileError || !options.some(o => o.kind === chart)}
                 onClick={() => { onAdd({ metrics, dimensions: dims, where, chart: chart! }); onClose(); }}>
                 Add tile
               </button>}
@@ -252,29 +270,27 @@ export function Picker({ model, onAdd, onClose }: {
   );
 }
 
-function FilterPill({ f, base, model, onPatch, onRemove }: {
-  f: FilterSpec; base: string; model: Model;
+function FilterPill({ f, base, model, queryContext, onPatch, onRemove }: {
+  f: FilterSpec; base: string; model: Model; queryContext: string;
   onPatch: (p: Partial<FilterSpec>) => void; onRemove: () => void;
 }) {
   const [open, setOpen] = useState(true);
-  const [values, setValues] = useState<{ value: any; n: number }[] | null>(null);
-  const [extent, setExtent] = useState<{ min: number; max: number } | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const { data, error, retry } = useFilterMetadata(model, base, f, queryContext);
+  const values = data?.kind === "values" ? data.values : null;
+  const extent = data?.kind === "extent" ? data : null;
+  const [table, column] = f.field.includes(".") ? f.field.split(".", 2) : [base, f.field];
+  const temporal = f.source === "dimension" && isTime(model.tables[table]?.columns.find(c => c.name === column)?.type ?? "");
+  const bound = (value: number | string | null | undefined) => value == null ? "" : temporal ? String(value).slice(0, 10) : String(value);
+  const lastDate = temporal && f.maxExclusive && typeof f.max === "string" && Number.isFinite(Date.parse(f.max))
+    ? new Date(Date.parse(f.max) - 86400000).toISOString().slice(0, 10) : bound(f.max);
   const label = f.source === "metric" ? metricOf(model, f.field)?.label ?? f.field : f.field;
 
-  useEffect(() => {
-    if (f.source === "metric") return;
-    if (f.mode === "discrete" && !values)
-      fetch(`/api/values?base=${base}&field=${encodeURIComponent(f.field)}`)
-        .then((r) => r.json()).then((d) => setValues(d.values ?? []));
-    if (f.mode === "range" && !extent)
-      fetch(`/api/extent?base=${base}&field=${encodeURIComponent(f.field)}`)
-        .then((r) => r.json()).then(setExtent);
-  }, [f.mode, f.field, base]);
-
-  const chosen = new Set((f.values ?? []).map(String));
+  const chosen = new Set((f.values ?? []).map(v => JSON.stringify(v)));
+  const valueLabels = filterValueLabels([...(f.values ?? []), ...(values ?? []).map(v => v.value)]);
   const summary = f.mode === "discrete"
-    ? (f.values?.length ? `${f.exclude ? "not " : ""}${f.values.slice(0, 3).join(", ")}${f.values.length > 3 ? ` +${f.values.length - 3}` : ""}` : "any")
-    : `${f.min ?? "−∞"} … ${f.max ?? "∞"}`;
+    ? (f.values?.length ? `${f.exclude ? "not " : ""}${f.values.slice(0, 3).map(v => valueLabels.get(v)).join(", ")}${f.values.length > 3 ? ` +${f.values.length - 3}` : ""}` : "any")
+    : `${f.min ?? "−∞"} … ${temporal ? lastDate || "∞" : f.max ?? "∞"}`;
 
   return (
     <div className={"pill-f" + (open ? " open" : "")}>
@@ -297,35 +313,43 @@ function FilterPill({ f, base, model, onPatch, onRemove }: {
             </label>
             {f.source === "metric" && <span className="having">filters the aggregate (HAVING)</span>}
           </div>
+          {f.source === "dimension" && <p className="muted sm">Values reflect this source and role before chart filters.</p>}
+          {error && <div><p role="alert">{error}</p><button className="review-action" onClick={retry}>Retry filter values</button></div>}
 
           {f.mode === "discrete" ? (
             f.source === "metric" ? <div className="muted sm">
-              Discrete filtering on an aggregate isn't meaningful — use Range.</div>
-            : !values ? <div className="muted sm">Loading values…</div>
+              Use Range to filter an aggregate value.</div>
+            : error ? null : !values ? <div className="muted sm" role="status">Loading values…</div>
             : (
-              <div className="vals">
-                {values.slice(0, 60).map((v, i) => {
-                  const key = String(v.value);
+              <><div className="vals">
+                {values.slice(0, showAll ? values.length : 60).map((v, i) => {
+                  const key = JSON.stringify(v.value);
                   return (
                     <label key={i} className={"val" + (chosen.has(key) ? " on" : "")}>
                       <input type="checkbox" checked={chosen.has(key)}
                         onChange={() => onPatch({ values: chosen.has(key)
-                          ? (f.values ?? []).filter((x) => String(x) !== key)
+                          ? (f.values ?? []).filter((x) => JSON.stringify(x) !== key)
                           : [...(f.values ?? []), v.value] })} />
-                      <span>{key === "null" ? "(null)" : key}</span>
+                      <span>{valueLabels.get(v.value)}</span>
                       <em>{v.n.toLocaleString()}</em>
                     </label>
                   );
                 })}
               </div>
+              {!values.length && <p className="muted sm">No values returned for this source and role.</p>}
+              {values.length > 60 && <button className="link" onClick={() => setShowAll(v => !v)}>{showAll ? "Show fewer values" : `Show all ${values.length} returned values`}</button>}
+              {data?.kind === "values" && data.truncated && <p className="muted sm" role="status">Only the {values.length} most frequent values are available here. Other values may exist.</p>}
+              </>
             )
           ) : (
             <div className="range">
-              <label>min<input type="number" value={f.min ?? ""} placeholder={extent ? String(Math.floor(extent.min)) : ""}
-                onChange={(e) => onPatch({ min: e.target.value === "" ? null : +e.target.value })} /></label>
-              <label>max<input type="number" value={f.max ?? ""} placeholder={extent ? String(Math.ceil(extent.max)) : ""}
-                onChange={(e) => onPatch({ max: e.target.value === "" ? null : +e.target.value })} /></label>
-              {extent && <span className="muted sm">data range {Math.floor(extent.min)} … {Math.ceil(extent.max)}</span>}
+              <label>{temporal ? "from" : "min"}<input type={temporal ? "date" : "number"} value={bound(f.min)} placeholder={bound(extent?.min)}
+                onChange={(e) => onPatch({ min: e.target.value === "" ? null : temporal ? e.target.value : +e.target.value })} /></label>
+              <label>{temporal ? "through" : "max"}<input type={temporal ? "date" : "number"} value={temporal ? lastDate : bound(f.max)} placeholder={bound(extent?.max)}
+                onChange={(e) => onPatch(temporal ? { max: e.target.value === "" ? null : new Date(Date.parse(e.target.value) + 86400000).toISOString().slice(0, 10), maxExclusive: true }
+                  : { max: e.target.value === "" ? null : +e.target.value, maxExclusive: false })} /></label>
+              {f.source === "dimension" && !extent && !error && <span className="muted sm" role="status">Loading data range…</span>}
+              {extent && <span className="muted sm">{extent.min == null || extent.max == null ? "No data range is available for this source and role." : `data range ${bound(extent.min)} … ${bound(extent.max)}`}</span>}
             </div>
           )}
         </div>
@@ -365,6 +389,8 @@ function VizStep({ options, profiles, metrics, model, chart, onChart }: {
       )}
 
       <h5 className="viz-h">Recommended</h5>
+      {profiles.some(p => p.warning) && <p className="sm" role="status">Some field evidence is unavailable. These suggestions use the available evidence and field types. You can still choose a chart.</p>}
+      <p className="muted sm">Based on field profiles for this source and role, before chart filters. Check the resulting chart against your question.</p>
       <div className="viz-grid">
         {best.map((o) => (
           <VizCard key={o.kind} o={o} on={chart === o.kind} onPick={() => onChart(o.kind)} />

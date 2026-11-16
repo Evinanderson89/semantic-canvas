@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { z } from "zod";
 import { readResponse } from "./http.ts";
-import type { Proposal, ProposedJoin, ProposedMetric, ProposedTable } from "../modeler/propose.ts";
+import { PrivateKeyInput } from "./PrivateKeyInput.tsx";
+import { formatJoinResolution, type Proposal, type ProposedJoin, type ProposedMetric, type ProposedTable } from "../modeler/propose.ts";
 import type { DriftFinding } from "../modeler/extend.ts";
 import { DriftCheck, DriftPanel } from "./ModelerExtend.tsx";
 
@@ -13,9 +15,12 @@ import { DriftCheck, DriftPanel } from "./ModelerExtend.tsx";
 interface DraftSummary { id: string; label: string; createdAt: string; createdBy: string; updatedAt: string; publishedAt: string | null; sourceId: string | null; fromSource: string | null; connector: string | null; extends: string | null; drift: number; tables: number; joins: number; metrics: number; warnings: number }
 interface Draft { id: string; label: string; fromSource?: string; connector?: Record<string, unknown>; createdAt: string; createdBy: string; updatedAt: string; publishedAt: string | null; sourceId: string | null; proposal: Proposal; drift?: DriftFinding[] }
 type SourceRow = { id: string; label: string; status: "ready" | "error"; connector?: string | null };
+const publicationSchema = z.object({
+  draft: z.object({ id: z.string(), sourceId: z.string().min(1), publishedAt: z.string().datetime(), updatedAt: z.string().datetime() }),
+  source: z.object({ id: z.string().min(1), status: z.enum(["ready", "error"]), error: z.string().optional() }).nullable(),
+});
 
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^[^a-z]+/, "").slice(0, 40);
-const pct = (r: number | null) => r === null ? "not checked" : `${(r * 100).toFixed(r < 0.999 && r > 0.99 ? 1 : 0)}%`;
 
 export function Modeler({ sources, onPublished }: { sources: SourceRow[]; onPublished: (sourceId: string) => void }) {
   const [drafts, setDrafts] = useState<DraftSummary[] | null>(null);
@@ -96,7 +101,7 @@ function NewDraft({ sources, onCreated }: { sources: SourceRow[]; onCreated: (d:
           <label className="ctl"><span>Account</span><input required value={snow.account} onChange={(e) => setSnow({ ...snow, account: e.target.value })} /></label>
           <label className="ctl"><span>Username</span><input required value={snow.username} onChange={(e) => setSnow({ ...snow, username: e.target.value })} /></label>
           <label className="ctl"><span>Password</span><input type="password" value={snow.password} onChange={(e) => setSnow({ ...snow, password: e.target.value })} /></label>
-          <label className="ctl"><span>Private key (PEM), instead of a password</span><textarea value={snow.privateKey} rows={3} onChange={(e) => setSnow({ ...snow, privateKey: e.target.value })} /></label>
+          <PrivateKeyInput label="Private key (PEM), instead of a password" value={snow.privateKey} onChange={value => setSnow({ ...snow, privateKey: value })} />
           <label className="ctl"><span>Role</span><input value={snow.role} placeholder="ANALYTICS_READER" onChange={(e) => setSnow({ ...snow, role: e.target.value })} /></label>
           <label className="ctl"><span>Warehouse</span><input required value={snow.warehouse} onChange={(e) => setSnow({ ...snow, warehouse: e.target.value })} /></label>
           <label className="ctl"><span>Database</span><input required value={snow.database} onChange={(e) => setSnow({ ...snow, database: e.target.value })} /></label>
@@ -114,23 +119,31 @@ function NewDraft({ sources, onCreated }: { sources: SourceRow[]; onCreated: (d:
 function DraftReview({ draft: initial, onBack, onPublished }: { draft: Draft; onBack: () => void; onPublished: (id: string) => void }) {
   const [draft, setDraft] = useState(initial);
   const [dirty, setDirty] = useState(false), [busy, setBusy] = useState<"save" | "publish" | null>(null);
-  const [issues, setIssues] = useState<string[]>([]), [error, setError] = useState<string | null>(null), [done, setDone] = useState<string | null>(null);
+  const [issues, setIssues] = useState<string[]>([]), [error, setError] = useState<string | null>(null), [done, setDone] = useState<{ source: string; ready: boolean } | null>(null);
   const p = draft.proposal;
   const patch = (next: Partial<Proposal>) => { setDraft({ ...draft, proposal: { ...p, ...next } }); setDirty(true); setDone(null); };
   const table = (name: string, change: Partial<ProposedTable>) => patch({ tables: p.tables.map((t) => t.name === name ? { ...t, ...change } : t) });
   const join = (i: number, change: Partial<ProposedJoin>) => patch({ joins: p.joins.map((j, k) => k === i ? { ...j, ...change } : j) });
   const metric = (i: number, change: Partial<ProposedMetric>) => patch({ metrics: p.metrics.map((m, k) => k === i ? { ...m, ...change } : m) });
   const save = async () => {
-    setBusy("save"); setError(null);
+    if (busy) return false;
+    setBusy("save"); setError(null); setDone(null);
     try { const d = await fetch(`/api/modeler/drafts/${encodeURIComponent(draft.id)}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: draft.label, proposal: p }) }).then(readResponse); setIssues(d.issues ?? []); setDirty(false); return true; }
     catch (e: any) { setError(e.message); return false; } finally { setBusy(null); }
   };
   const publish = async () => {
+    if (busy) return;
     if (dirty && !(await save())) return;
-    setBusy("publish"); setError(null);
+    setBusy("publish"); setError(null); setDone(null);
     try {
       const r = await fetch(`/api/modeler/drafts/${encodeURIComponent(draft.id)}/publish`, { method: "POST" }).then(readResponse);
-      setDone(r.source?.id ?? draft.id); setDraft({ ...draft, publishedAt: new Date().toISOString(), sourceId: draft.id }); setIssues([]); onPublished(draft.id);
+      const parsed = publicationSchema.safeParse(r), target = p.extends ?? draft.id;
+      if (!parsed.success || parsed.data.draft.id !== draft.id || parsed.data.draft.sourceId !== target || parsed.data.source && parsed.data.source.id !== target)
+        throw new Error("Publication returned no matching source confirmation. Reopen the draft to check its published state before trying again.");
+      const result = parsed.data;
+      setDone({ source: result.draft.sourceId, ready: result.source?.status === "ready" }); setDraft(previous => ({ ...previous, ...result.draft })); setIssues([]);
+      if (result.source?.status !== "ready") setError("The definitions were published, but the source is unavailable. Check its connection before using the new metrics.");
+      onPublished(result.draft.sourceId);
     } catch (e: any) { setError(e.message); if (Array.isArray(e.body?.issues)) setIssues(e.body.issues); } finally { setBusy(null); }
   };
   const extending = p.extends;
@@ -138,12 +151,13 @@ function DraftReview({ draft: initial, onBack, onPublished }: { draft: Draft; on
   const badge = (s?: string) => s === "existing" ? <span className="active-badge modeler-status">in the model</span> : s === "gap" ? <span className="active-badge warn modeler-status">suggested</span> : extending ? <span className="active-badge modeler-status new">new</span> : null;
   return (
     <div className="explore modeler">
+      <fieldset className="modeler-fields" disabled={busy !== null}>
       <button className="link" onClick={onBack}>← All drafts</button>
       <span className="eyebrow">{draft.publishedAt ? (extending ? `Added to source ${draft.sourceId}` : `Published as source ${draft.sourceId}`) : "Draft"} · {extending ? `extends ${extending}` : `read from ${draft.fromSource ?? String(draft.connector?.type ?? "")}`}</span>
-      <h1><input className="modeler-title" value={draft.label} aria-label="Model label" onChange={(e) => { setDraft({ ...draft, label: e.target.value }); setDirty(true); }} /></h1>
+      <h1><input className="modeler-title" value={draft.label} aria-label="Model label" onChange={(e) => { setDraft({ ...draft, label: e.target.value }); setDirty(true); setDone(null); }} /></h1>
       <p className="lede">{p.model.description}</p>
       {p.warnings.length > 0 && <div className="beautify-suggestion modeler-warnings"><div className="eyebrow">To check</div><ul>{p.warnings.map((w) => <li key={w}>{w}</li>)}</ul></div>}
-      {extending && <><h4 className="ex-h">Drift</h4><DriftPanel drift={draft.drift ?? []} /></>}
+      {extending && <><h4 className="ex-h">Drift</h4><DriftPanel drift={draft.drift} /></>}
 
       <h4 className="ex-h">Tables</h4>
       {p.tables.map((t) => (
@@ -173,13 +187,14 @@ function DraftReview({ draft: initial, onBack, onPublished }: { draft: Draft; on
       ))}
 
       <h4 className="ex-h">Joins</h4>
+      {!!p.joins.length && <p className="conn-meta">Match rates count non-null left key rows, not distinct customers or all source rows. A left join keeps unmatched rows with missing right-side values; an inner join removes them. A match does not establish that the relationship is correct for your business.</p>}
       {p.joins.length === 0 ? <p className="conn-meta">No join candidates: no column of one table is named like another table's key.</p> : (
         <div className="joins">{p.joins.map((j, i) => (
-          <div key={i} className={"join mono" + (!included.has(j.left) || !included.has(j.right) ? " dim" : "")}>
+          <div key={i} className={"join mono modeler-join" + (!included.has(j.left) || !included.has(j.right) ? " dim" : "")}>
             {j.status !== "existing" && <input type="checkbox" checked={j.include} aria-label={`Include join ${j.left}.${j.leftOn} to ${j.right}.${j.rightOn}`} onChange={(e) => join(i, { include: e.target.checked })} />}
-            <span>{j.left}</span><em>.{j.leftOn}</em><span className="arrow">→</span><span>{j.right}</span><em>.{j.rightOn}</em>{badge(j.status)}
-            <span className="modeler-evidence">{j.evidence}</span>
-            <i className={j.resolution !== null && j.resolution < 0.95 ? "warn" : ""}>{pct(j.resolution)}</i>
+            <span className="modeler-join-path"><span>{j.left}<em>.{j.leftOn}</em></span><span className="arrow">→</span><span>{j.right}<em>.{j.rightOn}</em></span>{badge(j.status)}</span>
+            <i className={j.resolution === null || j.resolution < 1 ? "warn" : ""}>{formatJoinResolution(j.resolution)}</i>
+            <p className="modeler-evidence">{j.evidence}</p>
           </div>
         ))}</div>
       )}
@@ -200,13 +215,14 @@ function DraftReview({ draft: initial, onBack, onPublished }: { draft: Draft; on
 
       {issues.length > 0 && <div className="beautify-suggestion modeler-warnings"><div className="eyebrow">Before publishing</div><ul>{issues.map((w) => <li key={w}>{w}</li>)}</ul></div>}
       {error && <p className="conn-err" role="alert">{error}</p>}
-      {done && <p className="conn-meta" role="status">{extending ? <>Added to <b>{done}</b>. The base model file was not touched; the additions live in an extension merged over it.</> : <>Published. <b>{done}</b> is a source now: open Metric Registry to chart against it, or Connections to see it listed.</>}</p>}
+      {done && <p className="conn-meta" role="status">{!done.ready ? <>Definitions published to <b>{done.source}</b>. Open Connections to check source availability.</> : extending ? <>Added to <b>{done.source}</b>. The base model file was not touched; the additions live in an extension merged over it.</> : <>Published. <b>{done.source}</b> is a source now: open Metric Registry to chart against it, or Connections to see it listed.</>}</p>}
       <div className="story-actions">
         <button className="tgl" onClick={save} disabled={busy !== null || !dirty}>{busy === "save" ? "Saving…" : dirty ? "Save draft" : "Saved"}</button>
         <button className="primary small" onClick={publish} disabled={busy !== null}>{busy === "publish" ? "Publishing…" : extending ? (draft.publishedAt ? `Update ${extending}` : `Add to ${extending}`) : draft.publishedAt ? "Publish again" : "Publish as a source"}</button>
         <a className="link" href={`/api/modeler/drafts/${encodeURIComponent(draft.id)}/yaml`} target="_blank" rel="noreferrer">View as YAML</a>
       </div>
       <small className="conn-meta">{extending ? "Publishing writes an extension file beside the base model: only what you include here, and a reporting lag on modelled tables. The base model is never edited." : "Publishing writes the model file under the server's data directory and adds the source. Tables you leave out, and joins or metrics that name them, are not written."}</small>
+      </fieldset>
     </div>
   );
 }

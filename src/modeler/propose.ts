@@ -9,6 +9,8 @@
  * docs/modeler.md explains the rules to people; this file is the rules.
  */
 
+import { numericType } from "../semantic/numericType.ts";
+
 /** One column, as profiled. */
 export interface ColumnProfile {
   name: string;
@@ -31,7 +33,30 @@ export interface TableProfile {
 }
 
 /** A join the profiler checked: of the left column's non-null values, how many resolve on the right. */
-export interface JoinProbe { left: string; leftOn: string; right: string; rightOn: string; leftRows: number; matched: number }
+export interface JoinProbe {
+  left: string; leftOn: string; right: string; rightOn: string;
+  leftRows: number | null; matched: number | null;
+  failure?: "query-failed" | "invalid-result";
+}
+
+/** Aggregate counts must be exact, nonnegative integers, never coerced nulls. */
+export function joinCounts(n: unknown, m: unknown): { leftRows: number; matched: number } | null {
+  const count = (v: unknown) => {
+    if (!(typeof v === "number" || typeof v === "bigint" || typeof v === "string" && v.trim() !== "")) return null;
+    const value = Number(v);
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  };
+  const leftRows = count(n), matched = count(m);
+  return leftRows !== null && matched !== null && matched <= leftRows ? { leftRows, matched } : null;
+}
+
+/** Only an exact complete/empty match can be labelled 100%/0%. */
+export function formatJoinResolution(r: number | null): string {
+  if (r === null || !Number.isFinite(r) || r < 0 || r > 1) return "not measured";
+  if (r === 0 || r === 1) return `${r * 100}%`;
+  const rounded = Number((r * 100).toFixed(2));
+  return rounded === 100 ? "<100%" : rounded === 0 ? ">0%" : `${rounded}%`;
+}
 
 /** In an extension draft: what the base model already has (`existing`, never written), what it lacks (`new`), a metric the data suggests for a modelled table (`gap`). */
 export type ItemStatus = "new" | "existing" | "gap";
@@ -107,8 +132,8 @@ export function normalizeType(raw: string): string {
   if (/bool/.test(t)) return "boolean";
   if (/timestamp|datetime/.test(t)) return "timestamp";
   if (/^date$|date\b/.test(t) && !/timestamp/.test(t)) return "date";
-  if (/int|serial/.test(t) && !/interval/.test(t)) return "integer";
-  if (/decimal|numeric|number|double|float|real/.test(t)) return /number\(\d+,\s*0\)|numeric\(\d+,\s*0\)/.test(t) ? "integer" : "double";
+  const numeric = numericType(raw);
+  if (numeric) return numeric;
   if (/char|text|string|varchar|uuid|enum/.test(t)) return "string";
   return "other";
 }
@@ -174,12 +199,19 @@ export function propose(input: { id: string; label: string; tables: TableProfile
       if (!target) continue;
       const targetKey = keys.get(target.name)!;
       const probe = probes.get(`${t.name}.${c.name}>${target.name}.${targetKey.name}`);
-      const resolution = probe && probe.leftRows > 0 ? probe.matched / probe.leftRows : null;
+      const counts = probe && !probe.failure ? joinCounts(probe.leftRows, probe.matched) : null;
+      const failed = !!probe && !counts;
+      const resolution = counts && counts.leftRows > 0 ? counts.matched / counts.leftRows : null;
       const why = targetKey.name === c.name ? `${c.name} is ${target.name}'s key` : `${c.name} names ${target.name} (${targetKey.name} is its key)`;
-      const measured = resolution === null ? "not checked" : `${(resolution * 100).toFixed(resolution < 0.999 && resolution > 0.99 ? 1 : 0)}% of ${t.name}.${c.name} values resolve`;
-      const include = resolution === null ? true : resolution >= 0.5;
-      if (resolution !== null && resolution < 0.95) warnings.push(`${t.name}.${c.name} → ${target.name}: only ${measured}; ${include ? "included, check it" : "left out"}.`);
-      joins.push({ left: t.name, leftOn: c.name, right: target.name, rightOn: targetKey.name, type: "left", include, evidence: `${why}; ${measured}.`, resolution });
+      const measured = failed
+        ? `Join check failed${probe?.failure === "invalid-result" ? ": the warehouse returned invalid counts" : ""}. Match rate is not measured. Check warehouse access and key types, then profile again`
+        : counts?.leftRows === 0 ? `No non-null ${t.name}.${c.name} key rows were available; match rate is not measured`
+        : counts ? `${formatJoinResolution(resolution)} of ${counts.leftRows.toLocaleString("en-US")} non-null ${t.name}.${c.name} key rows resolve (${counts.matched.toLocaleString("en-US")} matched; ${(counts.leftRows - counts.matched).toLocaleString("en-US")} unmatched)`
+        : "not checked";
+      const include = failed || counts?.leftRows === 0 ? false : resolution === null || resolution >= 0.5;
+      if (failed || counts?.leftRows === 0) warnings.push(`${t.name}.${c.name} → ${target.name}: ${measured}. Left out; review before including.`);
+      else if (resolution !== null && resolution < 1) warnings.push(`${t.name}.${c.name} → ${target.name}: ${measured}. ${include ? "Included as a left join; inspect unmatched keys before using its breakdowns" : "Left out; review unmatched keys before including"}.`);
+      joins.push({ left: t.name, leftOn: c.name, right: target.name, rightOn: targetKey.name, type: "left", include, evidence: `${why}; ${measured}. Null left keys are excluded from this check.`, resolution });
       if (include) referenced.add(target.name);
     }
   }

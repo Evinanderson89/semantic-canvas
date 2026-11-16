@@ -15,6 +15,22 @@ describe("document tabs", () => {
   });
   it("keeps legacy tiles on the first tab", () => { const d = document(); delete d.tiles[0].tabId; expect(tabView(d, "one").tiles.map(t => t.id)).toEqual(["a"]); expect(tabView(d, "missing").tiles.map(t => t.id)).toEqual(["a"]); });
   it("prunes deleted chart bindings without removing other tabs", () => { const d = document(); const next = mergeTab(d, { ...tabView(d, "one"), tiles: [] }, "one"); expect(next.filters![0].bindings.map(b => b.tileId)).toEqual(["b"]); });
+  it("remaps colliding chart bindings while retaining other tabs and local filter scope", () => {
+    const d = document();
+    d.filters![0].defaultValue = { values: ["US"] };
+    d.filters!.push({ ...d.filters![0], id: "local", scope: "tab", tabId: "one", bindings: [{ tileId: "a", field: "dim_users.country" }] });
+    const view = tabView(d, "one");
+    view.tiles = [tile({ id: "b", tabId: "one", title: "Replacement" })];
+    view.filters = view.filters!.map(f => ({ ...f, bindings: [{ tileId: "b", field: "dim_users.country" }] }));
+    const next = mergeTab(d, view, "one"), replacement = tabView(next, "one").tiles[0];
+    expect(replacement.id).not.toBe("b");
+    expect(tabView(next, "two").tiles).toEqual([d.tiles[1]]);
+    expect(next.filters![0].bindings.map(b => b.tileId).sort()).toEqual(["b", replacement.id].sort());
+    expect(next.filters![1].bindings).toEqual([{ tileId: replacement.id, field: "dim_users.country" }]);
+    expect(filtersForTile(next, replacement, {}).map(f => f.id)).toEqual(["control:country", "control:local"]);
+    expect(filtersForTile(next, d.tiles[1], {}).map(f => f.id)).toEqual(["control:country"]);
+    expect(validateDashboard(model, next)).toEqual([]);
+  });
   it("duplicates local controls and extends shared controls using fresh IDs", () => {
     const d = document(); d.filters!.push({ ...d.filters![0], id: "local", scope: "tab", tabId: "one", bindings: [d.filters![0].bindings[0]] }); d.tiles.push(tile({ id: "control", kind: "filter", tabId: "one", filterId: "local", metrics: [] }));
     const next = duplicateTab(d, "one"), copied = tabView(next, next.tabs!.at(-1)!.id);

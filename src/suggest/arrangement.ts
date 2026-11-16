@@ -11,5 +11,5 @@ export function arrangeForPurpose(tiles: TileSpec[], model: Model, width: number
   const structured = (structure?.spec.tiles ?? tiles)
     .filter(t => purpose !== "executive" || original.has(t.id) || t.kind !== "text")
     .map(t => original.has(t.id) ? { ...t, title: original.get(t.id)!.title } : t);
-  return applyLayout(purpose, structured, width);
+  return applyLayout(purpose, structured, width, true, model);
 }

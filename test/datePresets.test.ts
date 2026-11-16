@@ -4,9 +4,9 @@ import { dashboardFilterSchema, filterValueSchema } from "../src/compiler/schema
 import { filtersForTile, hasFilterValue, validateDashboard } from "../src/app/filters.ts";
 import { model, tile } from "./fixtures.ts";
 import type { DashboardSpec } from "../src/compiler/spec.ts";
-const at = (iso: string) => new Date(`${iso}T12:00:00`);
+const at = (iso: string) => new Date(`${iso}T12:00:00Z`);
 describe("date presets", () => {
-  it("resolves every preset in the local calendar, inclusive of today", () => {
+  it("resolves every preset in the default UTC calendar, inclusive of today", () => {
     const cases: Record<string, Record<keyof typeof PRESETS, [string, string]>> = {
       "2024-02-29": { "last-7-days": ["2024-02-23", "2024-02-29"], "last-30-days": ["2024-01-31", "2024-02-29"], "last-90-days": ["2023-12-02", "2024-02-29"], "this-month": ["2024-02-01", "2024-02-29"], "this-quarter": ["2024-01-01", "2024-02-29"], "year-to-date": ["2024-01-01", "2024-02-29"] },
       "2026-12-31": { "last-7-days": ["2026-12-25", "2026-12-31"], "last-30-days": ["2026-12-02", "2026-12-31"], "last-90-days": ["2026-10-03", "2026-12-31"], "this-month": ["2026-12-01", "2026-12-31"], "this-quarter": ["2026-10-01", "2026-12-31"], "year-to-date": ["2026-01-01", "2026-12-31"] },
@@ -20,6 +20,25 @@ describe("date presets", () => {
     expect(resolvePreset({ preset: "this-month" }, at("2026-03-15"))).toEqual({ min: "2026-03-01", max: "2026-03-15" });
     expect(resolvePreset({ min: "2026-01-01" }, at("2026-03-15"))).toEqual({ min: "2026-01-01" });
     expect(hasFilterValue({ preset: "last-7-days" })).toBe(true); expect(hasFilterValue({})).toBe(false);
+  });
+  it("uses the reporting zone at midnight and fiscal boundaries rather than the machine's date", () => {
+    const now = new Date("2026-02-01T00:30:00Z");
+    const west = { weekStart: "monday" as const, fiscalYearStartMonth: 2, timezone: "America/Los_Angeles" };
+    const east = { ...west, timezone: "Asia/Tokyo" };
+    expect(resolvePreset({ preset: "last-7-days" }, now, west)).toEqual({ min: "2026-01-25", max: "2026-01-31" });
+    expect(resolvePreset({ preset: "this-quarter" }, now, west)).toEqual({ min: "2025-11-01", max: "2026-01-31" });
+    expect(resolvePreset({ preset: "year-to-date" }, now, west)).toEqual({ min: "2025-02-01", max: "2026-01-31" });
+    expect(resolvePreset({ preset: "this-month" }, now, east)).toEqual({ min: "2026-02-01", max: "2026-02-01" });
+    expect(resolvePreset({ preset: "this-quarter" }, now, east)).toEqual({ min: "2026-02-01", max: "2026-02-01" });
+    expect(resolvePreset({ preset: "year-to-date" }, now, east)).toEqual({ min: "2026-02-01", max: "2026-02-01" });
+    expect(resolvePreset({ preset: "this-month" }, now)).toEqual({ min: "2026-02-01", max: "2026-02-01" });
+  });
+  it("keeps pinned dates literal and counts calendar days across DST", () => {
+    const calendar = { weekStart: "monday" as const, fiscalYearStartMonth: 1, timezone: "Pacific/Kiritimati", today: "2026-08-31" };
+    expect(resolvePreset({ preset: "last-7-days" }, new Date("2030-01-01T12:00:00Z"), calendar)).toEqual({ min: "2026-08-25", max: "2026-08-31" });
+    for (const [now, min, max] of [["2026-03-09T03:30:00Z", "2026-03-02", "2026-03-08"], ["2026-11-02T04:30:00Z", "2026-10-26", "2026-11-01"]]) {
+      expect(resolvePreset({ preset: "last-7-days" }, new Date(now), { ...calendar, today: undefined, timezone: "America/New_York" })).toEqual({ min, max });
+    }
   });
   it("is resolved before the compiler sees it, with the exclusive next-day bound", () => {
     const d: DashboardSpec = { title: "Presets", tiles: [tile({ id: "a" })], filters: [{ id: "when", label: "When", field: "fct_sales.sold_on", control: "date", presentation: "presets", scope: "report", defaultValue: { preset: "last-30-days" }, bindings: [{ tileId: "a", field: "fct_sales.sold_on" }] }] };

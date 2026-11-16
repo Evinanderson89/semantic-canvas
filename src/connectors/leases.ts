@@ -1,30 +1,47 @@
+/** Reject invalid operator settings before opening any database resources. */
+export function connectionPoolSize(size: number): number {
+  if (!Number.isSafeInteger(size) || size < 1) throw new Error("Connection pool size must be a positive integer.");
+  return size;
+}
+
 /** Retired pools reject new work, drain active leases, then release resources once. */
 export function leasePool<T>(resources: T[], dispose: (resource: T) => Promise<void> | void) {
   const free = [...resources];
-  const waiting: { resolve: (resource: T) => void; reject: (error: Error) => void }[] = [];
+  const waiting: { resolve: (resource: T) => void; reject: (error: Error) => void; cleanup: () => void }[] = [];
   let active = 0, closing = false;
   let drained: (() => void) | undefined;
   let closed: Promise<void> | undefined;
   return {
-    acquire(): Promise<T> {
+    acquire(signal?: AbortSignal): Promise<T> {
+      if (signal?.aborted) return Promise.reject(signal.reason);
       if (closing) return Promise.reject(new Error("This connection was replaced. Refresh to use the current source."));
       if (free.length) { active++; return Promise.resolve(free.pop()!); }
       if (waiting.length >= 100) return Promise.reject(new Error("The source is busy. Try again shortly."));
-      return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+      return new Promise((resolve, reject) => {
+        const cancel = () => {
+          const index = waiting.indexOf(waiter);
+          if (index >= 0) waiting.splice(index, 1);
+          waiter.cleanup();
+          reject(signal!.reason);
+        };
+        const waiter = { resolve, reject, cleanup: () => signal?.removeEventListener("abort", cancel) };
+        waiting.push(waiter);
+        signal?.addEventListener("abort", cancel, { once: true });
+      });
     },
     release(resource: T) {
       const next = waiting.shift();
-      if (next) next.resolve(resource);
+      if (next) { next.cleanup(); next.resolve(resource); }
       else { active--; free.push(resource); if (closing && active === 0) drained?.(); }
     },
     stats: () => ({ poolSize: resources.length, free: free.length, waiting: waiting.length }),
     close(): Promise<void> {
       if (closed) return closed;
       closing = true;
-      for (const waiter of waiting.splice(0)) waiter.reject(new Error("This connection was replaced. Refresh to use the current source."));
+      for (const waiter of waiting.splice(0)) { waiter.cleanup(); waiter.reject(new Error("This connection was replaced. Refresh to use the current source.")); }
       const drain = active === 0 ? Promise.resolve() : new Promise<void>(resolve => { drained = resolve; });
       closed = drain.then(async () => {
-        const results = await Promise.allSettled(resources.map(dispose));
+        const results = await Promise.allSettled(resources.map(resource => Promise.resolve().then(() => dispose(resource))));
         const failure = results.find(r => r.status === "rejected");
         if (failure?.status === "rejected") throw failure.reason;
       });

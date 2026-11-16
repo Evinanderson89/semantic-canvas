@@ -13,6 +13,8 @@ export interface FormatSpec {
   showX: boolean;
   showY: boolean;
   grid: boolean;
+  /** Line charts only. Fitted axes always disclose their displayed range. */
+  lineScale: "zero" | "fit";
   legend: "auto" | "hide";
   palette: string;
   padding: number;
@@ -43,7 +45,7 @@ export const PALETTES: Record<string, string[]> = {
 
 export const DEFAULT_FORMAT: FormatSpec = {
   number: "auto", decimals: null, xTitle: null, yTitle: null,
-  showX: true, showY: true, grid: true, legend: "auto",
+  showX: true, showY: true, grid: true, lineScale: "zero", legend: "auto",
   palette: "default", padding: 12, background: true, border: true,
   backgroundColor: null, backgroundOpacity: 100,
   textSize: 16, textAlign: "left", fontFamily: "sans",
@@ -133,6 +135,7 @@ export function inferNumberStyle(model: Model, tile: TileSpec): NumberStyle {
   // itself that thing; a synonym is curated to BE another name for the
   // metric, not a sentence about it, so it doesn't carry that risk.
   const ms0 = ms[0];
+  if (ms0.unit) return ms0.unit === "currency" || ms0.unit === "percent" ? ms0.unit : "plain";
   const text = [ms0.name, ms0.label, ...ms0.synonyms].join(" ").toLowerCase();
   // Checked before either regex below: a metric literally named/labeled as
   // a ratio is a unitless multiple (LTV/CAC, SaaS quick ratio -- read as
@@ -146,8 +149,11 @@ export function inferNumberStyle(model: Model, tile: TileSpec): NumberStyle {
   // unbounded substring match is too loose the other way: it fires inside
   // an unrelated word sharing those five letters, like "new_signups"'s own
   // synonym "regisTRATIOns".
+  if (/(?:^|[^a-z])(months?|days?|seconds?)(?:$|[^a-z])/.test(text)) return "plain";
   if (/(?:^|[^a-z])ratio(?:$|[^a-z])/.test(text)) return "compact";
-  if (/\brate\b|retention|\bnrr\b|\bgrr\b|percent|share|conversion/.test(text)) return "percent";
+  // Underscores separate semantic-name tokens just like spaces and hyphens;
+  // JavaScript's \b considers them word characters and misses attach_rate.
+  if (/(?:^|[^a-z])(?:rate|nrr|grr)(?:$|[^a-z])|retention|percent|share|conversion/.test(text)) return "percent";
   if (/usd|\$|revenue|mrr|arr|spend|cost|price|cac|ltv|arpa|arpu/.test(text)) return "currency";
   return "compact";
 }
@@ -162,7 +168,44 @@ export function resolveFormat(model: Model, tile: TileSpec): FormatSpec {
   return f;
 }
 
-export function makeFormatter(f: FormatSpec): (n: number) => string {
+/** Unit compatibility is semantic, not a choice of number formatting. */
+export function metricUnit(model: Model, name: string): string {
+  const metric = metricOf(model, name);
+  if (metric?.unit) return metric.unit;
+  const text = [metric?.name, metric?.label, ...(metric?.synonyms ?? [])].join(" ").toLowerCase();
+  for (const [pattern, unit] of [[/(?:^|[^a-z])months?(?:$|[^a-z])/, "months"], [/(?:^|[^a-z])days?(?:$|[^a-z])/, "days"], [/(?:^|[^a-z])seconds?(?:$|[^a-z])/, "seconds"], [/(?:^|[^a-z])ratio(?:$|[^a-z])/, "ratio"]] as const) if (pattern.test(text)) return unit;
+  const style = inferNumberStyle(model, { id: "units", metrics: [name], dimensions: [], layout: { x: 0, y: 0, w: 100, h: 100 } });
+  return style === "currency" || style === "percent" ? style : "number";
+}
+
+/** Precision changes retain the formatter's units instead of inferring them from text. */
+export type NumberFormatter = ((n: number) => string) & {
+  withPrecision?: (digits: number) => (n: number) => string;
+  exact?: (n: number) => string;
+};
+
+export function makeFormatter(f: FormatSpec): NumberFormatter {
+  return Object.assign(numberFormatter(f), {
+    withPrecision: (digits: number) => numberFormatter({ ...f, decimals: Math.max(1, digits) }),
+    exact: (n: number) => f.number === "percent" ? `${d3format(".17~g")(n * 100)}%`
+      : `${f.number === "currency" ? "$" : ""}${d3format(".17~g")(n)}`,
+  });
+}
+
+/** Default rounding must not turn a rate below/above parity into exactly 100%.
+ * Explicit user-selected precision is still respected by numberFormatter. */
+export function preservePercentBoundary(n: number, rounded: string): string {
+  const percent = n * 100;
+  if (n !== 1 && Number(percent.toFixed(1)) === 100) {
+    for (let decimals = 2; decimals <= 6; decimals++) {
+      if (Number(percent.toFixed(decimals)) !== 100) return d3format(`.${decimals}~%`)(n);
+    }
+    return `${n < 1 ? "<" : ">"}100%`;
+  }
+  return rounded;
+}
+
+function numberFormatter(f: FormatSpec): (n: number) => string {
   const d = f.decimals;
   switch (f.number) {
     case "currency":
@@ -170,13 +213,26 @@ export function makeFormatter(f: FormatSpec): (n: number) => string {
         ? "$" + d3format(".3~s")(n).replace("G", "B")
         : d3format(`$,.${d ?? 2}f`)(n);
     case "percent":
-      return d3format(`.${d ?? 1}%`);
+      return d == null ? n => preservePercentBoundary(n, d3format(".1%")(n)) : d3format(`.${d}%`);
     case "compact":
       return (n) => d3format(`.${d ?? 3}~s`)(n).replace("G", "B");
     case "plain":
       return d3format(`,.${d ?? 2}~f`);
     default:
-      return (n) => (Math.abs(n) >= 1000 ? d3format(".3~s")(n).replace("G", "B")
-                                         : d3format(",.3~f")(n));
+      return (n) => (Math.abs(n) >= 1000 ? d3format(`.${d ?? 3}~s`)(n).replace("G", "B")
+                                         : d3format(`,.${d ?? 3}~f`)(n));
   }
+}
+
+/** Decide scale once for an axis, not independently for each tick. */
+export function makeAxisFormatter(f: FormatSpec, values: unknown[]): NumberFormatter {
+  if (f.number !== "currency" || f.decimals != null) return makeFormatter(f);
+  const max = Math.max(0, ...values.filter((v): v is number => typeof v === "number" && Number.isFinite(v)).map(Math.abs));
+  const unit = max >= 1e9 ? 1e9 : max >= 1e6 ? 1e6 : max >= 1e4 ? 1e3 : 1;
+  const suffix = unit === 1e9 ? "B" : unit === 1e6 ? "M" : unit === 1e3 ? "k" : "";
+  const withPrecision = (digits: number) => {
+    const format = unit === 1 ? d3format(`$,.${digits}f`) : d3format(`,.${digits}~f`);
+    return (n: number) => unit === 1 ? format(n) : `$${format(n / unit)}${suffix}`;
+  };
+  return Object.assign(withPrecision(2), { withPrecision, exact: (n: number) => `$${d3format(".17~g")(n / unit)}${suffix}` });
 }

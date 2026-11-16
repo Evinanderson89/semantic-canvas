@@ -2,9 +2,13 @@ import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import YAML from "yaml";
+import { DuckDBInstance } from "@duckdb/node-api";
 import { snowflakeSemanticAdapter } from "../src/semantic/snowflakeSemantic.ts";
 import { compileTile, validateTile } from "../src/compiler/compile.ts";
 import type { Connector, QueryResult } from "../src/connectors/types.ts";
+import { fieldKind } from "../src/app/filters.ts";
+import { tileChartShape } from "../src/suggest/chartRules.ts";
 
 /**
  * Fixture built from Snowflake's published YAML field names (name, base_table,
@@ -97,6 +101,46 @@ const stubConn: Connector = {
 };
 
 describe("snowflake semantic model adapter", () => {
+  it("carries NUMBER fields through numeric filter controls and chart-shape checks", async () => {
+    const model = (await snowflakeSemanticAdapter.load(file))!;
+    expect(model.tables.FCT_ORDERS.columns.find(c => c.name === "amount")?.type).toBe("number");
+    expect(fieldKind(model, "FCT_ORDERS.amount")).toBe("number");
+    expect(fieldKind(model, "FCT_ORDERS.status")).toBe("select");
+    expect(tileChartShape(model, { id: "revenue", metrics: ["revenue"], dimensions: ["FCT_ORDERS.amount"],
+      layout: { x: 0, y: 0, w: 400, h: 300 } }).dimensions).toEqual([{ temporal: false, numeric: true }]);
+  });
+  it("retains every fact alias when dimensions and facts share a physical column", async () => {
+    const fixture = YAML.parse(YAML_FIXTURE);
+    fixture.tables[0].dimensions.push({ name: "amount_dimension", expr: "amount", data_type: "NUMBER" });
+    fixture.tables[0].facts.push({ name: "another_amount", expr: "amount", data_type: "NUMBER" });
+    fixture.tables[0].facts.push({ name: "amount", expr: "amount", data_type: "NUMBER" });
+    fixture.tables[0].metrics.push({ name: "revenue_again", expr: "SUM(another_amount)" });
+    fixture.tables[0].metrics.push({ name: "revenue_literal", expr: "SUM(CASE WHEN 'order_amount' = 'order_amount' THEN amount ELSE 0 END) /* order_amount */" });
+    const shared = join(dir, "shared.yaml");
+    writeFileSync(shared, YAML.stringify(fixture));
+    const model = (await snowflakeSemanticAdapter.load(shared))!;
+    expect(model.tables.FCT_ORDERS.columns.filter(c => c.name === "amount")).toHaveLength(1);
+    expect(model.metrics.revenue.expression).toBe("SUM(FCT_ORDERS.amount)");
+    expect(model.metrics.revenue_again.expression).toBe("SUM(FCT_ORDERS.amount)");
+    expect(model.metrics.revenue_literal.expression).toBe("SUM(CASE WHEN 'order_amount' = 'order_amount' THEN FCT_ORDERS.amount ELSE 0 END) /* order_amount */");
+    const db = await (await DuckDBInstance.create(":memory:")).connect();
+    try {
+      await db.run("CREATE TABLE FCT_ORDERS(amount DOUBLE); INSERT INTO FCT_ORDERS VALUES (10),(20),(NULL)");
+      const tile = { id: "shared", metrics: ["revenue", "revenue_again", "revenue_literal"], dimensions: [], layout: { x: 0, y: 0, w: 400, h: 300 } };
+      expect(validateTile(model, tile)).toEqual([]);
+      const result = await db.runAndReadAll(compileTile(model, { ...stubConn, relation: t => stubConn.quote(t) }, tile));
+      expect(result.getRows()).toEqual([[30, 30, 30]]);
+    } finally { db.closeSync(); }
+  });
+
+  for (const tableIndex of [0, 1]) it(`rejects duplicate metric identities ${tableIndex === 0 ? "within a table" : "across tables"}`, async () => {
+    const fixture = YAML.parse(YAML_FIXTURE);
+    (fixture.tables[tableIndex].metrics ??= []).push({ name: "revenue", expr: "COUNT(*)" });
+    const duplicate = join(dir, `duplicate-${tableIndex}.yaml`);
+    writeFileSync(duplicate, YAML.stringify(fixture));
+    await expect(snowflakeSemanticAdapter.load(duplicate)).rejects.toThrow(/duplicate metric name revenue.*unique across all tables/);
+  });
+
   it("returns null for a file it can't read or parse", async () => {
     expect(await snowflakeSemanticAdapter.load("/does/not/exist.yaml")).toBeNull();
   });

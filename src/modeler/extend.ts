@@ -1,7 +1,9 @@
 import type { CatalogTable } from "../connectors/types.ts";
 import type { Model } from "../semantic/model.ts";
 import { normalizeType, type Proposal, type ProposedMetric } from "./propose.ts";
-import { metricOf } from "../semantic/model.ts";
+import { metricOf, metricComponents, isCrossTableRatio, ratioSideDimensions, joinPath, joinPairs, fieldReachable } from "../semantic/model.ts";
+import type { DashboardSpec } from "../compiler/spec.ts";
+import { parseDimension } from "../compiler/compile.ts";
 
 /**
  * Extending a model that already exists (docs/modeler.md, "Extend"): the
@@ -25,22 +27,74 @@ export interface DriftFinding {
   kind: "table_missing" | "column_missing" | "type_changed";
   declared: string | null;
   actual: string | null;
-  /** Metrics whose expression or filter names the column (or any metric on a missing table). */
+  /** Metrics whose simple inputs reference the column or depend on the missing table. */
   metrics: string[];
   text: string;
 }
 
-const ident = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Catalogue-level dependency hints, not a SQL parser or a query-success check. */
+function sqlColumns(model: Model, base: string, expression: string): string[] {
+  const text = expression.replace(/'(?:''|\\[\s\S]|[^'\\])*'|--[^\n]*|\/\*[\s\S]*?\*\/|\$\$[\s\S]*?\$\$/g, " ");
+  const tokens = [...text.matchAll(/"(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*|[.()]/g)].map(m => m[0].replace(/^"|"$/g, "").replaceAll('""', '"').toLowerCase());
+  const fields = new Set<string>();
+  tokens.forEach((token, i) => {
+    if (tokens[i + 1] === "." || tokens[i + 1] === "(") return;
+    const owner = tokens[i - 1] === "." ? tokens[i - 2] : base.toLowerCase();
+    const table = Object.values(model.tables).find(t => t.name.toLowerCase() === owner);
+    const column = table?.columns.find(c => c.name.toLowerCase() === token);
+    if (table && column) fields.add(`${table.name}.${column.name}`);
+  });
+  return [...fields];
+}
 
-/** Metrics that touch `table.column`, or `column` unqualified on their own base table. */
+/** Include the physical inputs used by the compiler for supported computed metrics. */
 export function metricsUsing(model: Model, table: string, column: string | null): string[] {
-  return Object.values(model.metrics).filter((m) => {
-    if (column === null) return m.baseTable === table;
-    const text = `${m.expression} ${m.filter ?? ""}`;
-    const qualified = new RegExp(`\\b${ident(table)}\\.${ident(column)}\\b`);
-    const bare = new RegExp(`(^|[^.\\w])${ident(column)}\\b`);
-    return qualified.test(text) || (m.baseTable === table && bare.test(text));
-  }).map((m) => m.name).sort();
+  return Object.values(model.metrics).filter(m => metricComponents(model, m).some(input => {
+    const fields = sqlColumns(model, input.baseTable, `${input.expression} ${input.filter ?? ""}`);
+    return column === null ? input.baseTable === table || fields.some(f => f.startsWith(`${table}.`)) : fields.includes(`${table}.${column}`);
+  })).map(m => m.name).sort();
+}
+
+/** Saved chart dependencies include dimensions, controls and required join keys,
+ * even when no selected metric expression mentions the changed column. */
+export function dashboardDriftImpact(model: Model, spec: DashboardSpec, drift: DriftFinding[]) {
+  const charts = spec.tiles.flatMap(tile => {
+    if ((tile.kind ?? "metric") !== "metric") return [];
+    const metrics = tile.metrics.map(n => metricOf(model, n)).filter(Boolean);
+    const inputs = metrics.flatMap(m => metricComponents(model, m));
+    const bases = new Set(inputs.map(m => m.baseTable));
+    const tables = new Set(bases), fields = new Set(inputs.flatMap(m => sqlColumns(model, m.baseTable, `${m.expression} ${m.filter ?? ""}`)));
+    const across = metrics.find(m => isCrossTableRatio(model, m));
+    for (const dim of tile.dimensions) for (const base of bases) {
+      const { grain, table, column } = parseDimension(dim);
+      if (across && grain) {
+        const input = inputs.find(m => m.baseTable === base);
+        const aligned = input && ratioSideDimensions(model, across, input, [dim]);
+        if (aligned) fields.add(aligned[0].split(":")[1]);
+      } else fields.add(`${table ?? base}.${column}`);
+    }
+    for (const f of tile.where ?? []) if (f.source === "dimension") fields.add(f.field);
+    for (const f of spec.crossFilters ?? []) if (f.source === "dimension" && metrics[0] && fieldReachable(model, metrics[0].baseTable, f.field)) fields.add(f.field);
+    const tab = tile.tabId ?? spec.tabs?.[0]?.id ?? "main";
+    for (const f of spec.filters ?? []) if (f.scope === "report" || f.tabId === tab) {
+      for (const b of f.bindings) if (b.tileId === tile.id) fields.add(b.field);
+    }
+    for (const field of [...fields]) {
+      const target = field.split(".")[0]; tables.add(target);
+      for (const base of bases) {
+        const path = joinPath(model, base, target);
+        if ("error" in path) continue;
+        for (const j of path.joins) {
+          tables.add(j.left); tables.add(j.right);
+          for (const pair of joinPairs(j)) { fields.add(`${j.left}.${pair.left}`); fields.add(`${j.right}.${pair.right}`); }
+        }
+      }
+    }
+    const affected = drift.filter(f => f.metrics.some(n => tile.metrics.includes(n)) || (f.column === null ? tables.has(f.table) : fields.has(`${f.table}.${f.column}`)));
+    return affected.length ? [{ id: tile.id, title: tile.title ?? tile.metrics.join(", "), metrics: tile.metrics,
+      findings: affected.map(f => `${f.table}${f.column === null ? "" : `.${f.column}`} (${f.kind})`) }] : [];
+  });
+  return { metrics: [...new Set(charts.flatMap(c => c.metrics))].sort(), charts };
 }
 
 /** Compare what the model declares with what the warehouse has. Base-model and extension tables only; Ingest's connected tables have their own lifecycle. */

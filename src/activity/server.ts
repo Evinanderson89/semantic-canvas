@@ -23,7 +23,11 @@ export function mountChartActivity(app: Express, deps: {
   source: (req: Request) => Source; sources: () => Source[];
   principal: (req: Request) => Principal | null; rls: () => RlsConfig;
 }) {
-  const audience = (who: Principal | null) => hash({ principal: who, policies: deps.rls().policies });
+  // Version the audience: legacy rows did not record gateway scope and cannot
+  // safely be made visible under the new interpretation.
+  const audience = (who: Principal | null, model: string, policy: GatewayPolicyRule[] = []) => hash({ version: 2, model, principal: who, policies: deps.rls().policies,
+    gateway: [...new Set(policy.map(r => JSON.stringify({ field: r.field, mode: r.mode, values: [...new Set(r.values)].sort() })))].sort() });
+  const role = (req: Request) => deps.auth.config.mode === "local" ? "admin" : identityOf(req)?.role ?? "viewer";
   const owner = (req: Request) => identityOf(req)?.id ?? `local:${deps.principal(req)?.id ?? "anonymous"}`;
   const author = (req: Request) => ({ authorId: owner(req), authorName: identityOf(req)?.name ?? deps.principal(req)?.name ?? "Local user" });
   async function context(req: Request, needsTile = true) {
@@ -33,19 +37,20 @@ export function mountChartActivity(app: Express, deps: {
     if (!document) throw failure("Dashboard not found in this source", 404);
     const tileId = String(req.params.tileId ?? ""), tile = document.spec.tiles.find(t => t.id === tileId);
     if (needsTile && (!tile || tile.kind && tile.kind !== "metric")) throw failure("Save this chart before adding comments or alerts", 404);
+    if (tile && role(req) === "viewer" && validateTile(source.model!, tile, { role: "viewer" }).length) throw failure("This chart is not available under your current metric permissions.", 403);
     if (tile) requireScope(source.model!, source.model!.metrics[tile.metrics[0]]?.baseTable, deps.rls(), who, identityOf(req)?.policy);
-    return { source, who, document, tile: tile!, scope: { source: source.id, dashboardId, audience: audience(who) }, ownerId: owner(req) };
+    return { source, who, document, tile: tile!, scope: { source: source.id, dashboardId, audience: audience(who, source.model!.name, identityOf(req)?.policy) }, ownerId: owner(req) };
   }
   // A watch is evaluated later with no request, so it cannot carry the gateway's per-request data policy. Rather than
   // evaluate it unscoped, creating one is refused while a gateway policy applies to the chart's table.
-  function chartQuery(source: Source, document: DashboardSpec, tile: TileSpec, rule: AlertInput, who: Principal | null, policy: GatewayPolicyRule[] = []) {
+  function chartQuery(source: Source, document: DashboardSpec, tile: TileSpec, rule: AlertInput, who: Principal | null, policy: GatewayPolicyRule[] = [], role = "viewer") {
     if (!tile.metrics.includes(rule.metric)) throw failure("Choose a metric from this saved chart");
     if (tile.dimensions.length > 1 || tile.dimensions.length === 1 && !tile.dimensions[0].includes(":")) throw failure("Alerts need a total or a time series with no category breakdown");
     if (rule.mode === "anomaly" && tile.dimensions.length !== 1) throw failure("Anomaly checks need a time-series chart");
     const defaults = Object.fromEntries((document.filters ?? []).map(f => [f.id, f.defaultValue ?? {}]));
     const query = { ...visibleQuery(source.model!, { ...tile, metrics: [rule.metric] }, [...(document.crossFilters ?? []), ...filtersForTile(document, tile, defaults, todayOf(source.model), calendarOf(source.model!))]), compare: "none" as const, limit: 1000, layout: tile.layout };
-    const issues = validateTile(source.model!, query);
-    if (issues.length) throw failure("The saved chart needs valid semantic fields before it can be watched");
+    const issues = validateTile(source.model!, query, { role });
+    if (issues.length) throw failure("The saved chart needs valid, accessible semantic fields before it can be watched", role === "viewer" ? 403 : 400);
     const scoped = requireScope(source.model!, source.model!.metrics[rule.metric].baseTable, deps.rls(), who, policy);
     if (scoped.filters.some((f) => f.id.startsWith("gateway:"))) throw failure("A data policy set at the gateway applies to this chart. Watches run in the background without your session, so they cannot carry it yet; ask an administrator.", 403);
     return { ...query, where: [...(query.where ?? []), ...scoped.filters] };
@@ -58,18 +63,19 @@ export function mountChartActivity(app: Express, deps: {
     return scope.unenforceable.length > 0 || scope.filters.some((f) => f.id.startsWith("gateway:"));
   }
   const fingerprint = (query: ReturnType<typeof chartQuery>, source: Source) => hash({ query: { metrics: query.metrics, dimensions: query.dimensions, where: query.where }, model: source.model });
-  async function evaluate(source: Source, query: ReturnType<typeof chartQuery>, rule: AlertInput, who: Principal | null) {
-    const sql = compileTile(source.model!, source.conn!, query, { probe: true });
+  async function evaluate(source: Source, query: ReturnType<typeof chartQuery>, rule: AlertInput, who: Principal | null, role: string) {
+    const sql = compileTile(source.model!, source.conn!, query, { probe: true, role });
     const raw = await source.conn!.execute(sql, 1001, `alert:${who?.id ?? "anon"}:${randomUUID()}`);
     const result = splitPartialPeriods(raw);
-    return evaluateAlert(rule, result, query.dimensions[0]);
+    return evaluateAlert(rule, result, query.dimensions[0], new Date(), calendarOf(source.model));
   }
   const base = "/api/chart-activity/:dashboardId";
   app.get(base, deps.safe(async (req, res) => {
     const ctx = await context(req, false), rows = await listActivity(ctx.scope, ctx.ownerId);
     const summary: Record<string, any> = {};
     for (const row of rows) {
-      if (!ctx.document.spec.tiles.some(t => t.id === row.tileId)) continue;
+      const tile = ctx.document.spec.tiles.find(t => t.id === row.tileId);
+      if (!tile || role(req) === "viewer" && validateTile(ctx.source.model!, tile, { role: "viewer" }).length) continue;
       const entry = summary[row.tileId] ??= { comments: 0 };
       if (row.type === "thread" && !(row.body as CommentThread).resolved) entry.comments++;
       if (row.type === "alert") { const r = row.body as AlertRule; entry.alert = { enabled: r.enabled, state: r.evaluation?.state, unread: r.events.filter(e => !e.read).length }; }
@@ -108,37 +114,37 @@ export function mountChartActivity(app: Express, deps: {
   app.post(base + "/:tileId/alerts/preview", deps.safe(async (req, res) => {
     const ctx = await context(req), input = z.object({ rule: alertInputSchema, revision: versionSchema }).strict().parse(req.body);
     if (input.revision !== ctx.document.revision) throw new StoreConflict("Save or reopen the latest dashboard before testing an alert");
-    const query = chartQuery(ctx.source, ctx.document.spec, ctx.tile, input.rule, ctx.who, identityOf(req)?.policy);
-    res.json({ evaluation: await evaluate(ctx.source, query, input.rule, ctx.who) });
+    const query = chartQuery(ctx.source, ctx.document.spec, ctx.tile, input.rule, ctx.who, identityOf(req)?.policy, role(req));
+    res.json({ evaluation: await evaluate(ctx.source, query, input.rule, ctx.who, role(req)) });
   }));
   app.put(base + "/:tileId/alert", deps.safe(async (req, res) => {
-    const ctx = await context(req), input = z.object({ rule: alertInputSchema, revision: versionSchema, version: versionSchema }).strict().parse(req.body);
+    const ctx = await context(req), input = z.object({ rule: alertInputSchema, revision: versionSchema, version: versionSchema, expectedId: z.string().min(1).max(256).nullable().optional() }).strict().parse(req.body);
     if (input.revision !== ctx.document.revision) throw new StoreConflict("Save or reopen the latest dashboard before creating an alert");
-    const query = chartQuery(ctx.source, ctx.document.spec, ctx.tile, input.rule, ctx.who, identityOf(req)?.policy);
+    const query = chartQuery(ctx.source, ctx.document.spec, ctx.tile, input.rule, ctx.who, identityOf(req)?.policy, role(req));
     await mutateActivity(ctx.scope, ctx.tile.id, rows => {
       const current = rows.find(r => r.type === "alert" && r.ownerId === ctx.ownerId), old = current?.body as AlertRule | undefined;
-      if ((old?.version ?? 0) !== input.version) throw new StoreConflict("This alert changed. Close and reopen it before editing");
+      if ((old?.version ?? 0) !== input.version || (input.expectedId !== undefined && input.expectedId !== (old?.id ?? null))) throw new StoreConflict("This alert changed. Close and reopen it before editing");
       const id = old?.id ?? randomUUID(), now = new Date().toISOString();
       return { ...ctx.scope, id, tileId: ctx.tile.id, type: "alert", ownerId: ctx.ownerId,
         body: { ...input.rule, id, version: input.version + 1, enabled: old?.enabled ?? true, ownerId: ctx.ownerId, principalId: ctx.who?.id ?? "", queryFingerprint: fingerprint(query, ctx.source), nextCheckAt: now, createdAt: old?.createdAt ?? now, events: old?.events ?? [] } };
     }); res.json({ ok: true });
   }));
   app.patch(base + "/:tileId/alert", deps.safe(async (req, res) => {
-    const ctx = await context(req), input = z.object({ enabled: z.boolean().optional(), read: z.literal(true).optional(), version: versionSchema }).strict().parse(req.body);
+    const ctx = await context(req), input = z.object({ enabled: z.boolean().optional(), read: z.literal(true).optional(), version: versionSchema, expectedId: z.string().min(1).max(256).nullable().optional() }).strict().parse(req.body);
     await mutateActivity(ctx.scope, ctx.tile.id, rows => {
       const row = rows.find(r => r.type === "alert" && r.ownerId === ctx.ownerId); if (!row) throw failure("Alert not found", 404);
       const rule = row.body as AlertRule;
-      if (rule.version !== input.version) throw new StoreConflict("This alert changed. Reopen it before editing");
+      if (rule.version !== input.version || (input.expectedId !== undefined && input.expectedId !== rule.id)) throw new StoreConflict("This alert changed. Reopen it before editing");
       if (input.enabled !== undefined) { rule.enabled = input.enabled; rule.version++; rule.nextCheckAt = new Date().toISOString(); }
       if (input.read) rule.events.forEach(e => e.read = true);
       return row;
     }); res.json({ ok: true });
   }));
   app.delete(base + "/:tileId/alert", deps.safe(async (req, res) => {
-    const ctx = await context(req), input = z.object({ version: versionSchema }).strict().parse(req.body);
+    const ctx = await context(req), input = z.object({ version: versionSchema, expectedId: z.string().min(1).max(256).nullable().optional() }).strict().parse(req.body);
     await mutateActivity(ctx.scope, ctx.tile.id, rows => {
       const row = rows.find(r => r.type === "alert" && r.ownerId === ctx.ownerId); if (!row) throw failure("Alert not found", 404);
-      if ((row.body as AlertRule).version !== input.version) throw new StoreConflict("This alert changed. Reopen it before deleting");
+      if ((row.body as AlertRule).version !== input.version || (input.expectedId !== undefined && input.expectedId !== row.id)) throw new StoreConflict("This alert changed. Reopen it before deleting");
       return { deleteId: row.id };
     }); res.json({ ok: true });
   }));
@@ -155,7 +161,7 @@ export function mountChartActivity(app: Express, deps: {
         // Company modes: the owner must still hold access (team session, or a Gateway token verified since start) and the source under the current access policy.
         const identity = deps.auth.currentIdentity(row.ownerId);
         if (deps.auth.config.mode !== "local" && (!identity || identity.principal !== rule.principalId || !canUseSource(identity, row.source))) evaluation = { state: "waiting", reason: "Sign in to resume checks with your current data permissions.", checkedAt };
-        else if (audience(who) !== row.audience) evaluation = { state: "needs_review", reason: "Data permissions changed. Recreate this alert with your current access.", checkedAt };
+        else if (source && audience(who, source.model!.name, identity?.policy) !== row.audience) evaluation = { state: "needs_review", reason: "Data permissions changed. Recreate this alert with your current access.", checkedAt };
         else if (!source) evaluation = { state: "error", reason: "The data source is unavailable. No alert was inferred.", checkedAt };
         // A gateway data policy seen on the owner's latest request governs this chart: the watch would run without it, so it waits instead.
         else if (identity?.policy?.length && governedByGateway(source, rule, who, identity.policy)) evaluation = { state: "waiting", reason: "A data policy set at the gateway now applies to this chart. Watches run without your session and cannot carry it, so this one is paused; delete it, or ask an administrator.", checkedAt };
@@ -163,12 +169,12 @@ export function mountChartActivity(app: Express, deps: {
           const document = await loadDashboard(row.dashboardId, { source: row.source, model: source.model!.name });
           const tile = document?.spec.tiles.find(t => t.id === row.tileId);
           if (!document || !tile) return;
-          const query = chartQuery(source, document.spec, tile, rule, who);
+          const query = chartQuery(source, document.spec, tile, rule, who, identity?.policy, deps.auth.config.mode === "local" ? "admin" : identity?.role ?? "viewer");
           evaluation = fingerprint(query, source) !== rule.queryFingerprint
             ? { state: "needs_review", reason: "The saved metric, filters, or semantic model changed. Review and update this alert.", checkedAt }
-            : await evaluate(source, query, rule, who);
+            : await evaluate(source, query, rule, who, deps.auth.config.mode === "local" ? "admin" : identity?.role ?? "viewer");
         }
-      } catch { evaluation = { state: "error", reason: "The check could not finish. Check the source connection and saved metric, then try again.", checkedAt }; }
+      } catch (error: any) { evaluation = error?.status === 403 ? { state: "needs_review", reason: "Current permissions no longer allow this metric. Ask an administrator to review its publication and your access.", checkedAt } : { state: "error", reason: "The check could not finish. Check the source connection and saved metric, then try again.", checkedAt }; }
       await mutateActivity(row, row.tileId, (rows, document) => {
         const current = rows.find(r => r.id === row.id); if (!current) return null;
         const latest = current.body as AlertRule;
@@ -179,7 +185,9 @@ export function mountChartActivity(app: Express, deps: {
           const who = deps.rls().principals[rule.principalId] ?? null;
           const tile = document.tiles.find(t => t.id === row.tileId);
           try {
-            if (!source || !tile || audience(who) !== row.audience || fingerprint(chartQuery(source, document, tile, rule, who), source) !== latest.queryFingerprint)
+            const identity = deps.auth.currentIdentity(row.ownerId);
+            const lostAccess = deps.auth.config.mode !== "local" && (!identity || identity.principal !== rule.principalId || !canUseSource(identity, row.source));
+            if (lostAccess || !source || !tile || audience(who, source.model!.name, identity?.policy) !== row.audience || fingerprint(chartQuery(source, document, tile, rule, who, identity?.policy, deps.auth.config.mode === "local" ? "admin" : identity?.role ?? "viewer"), source) !== latest.queryFingerprint)
               evaluation = { state: "needs_review", reason: "The saved chart or data permissions changed during this check. Review your watch.", checkedAt };
           } catch { evaluation = { state: "needs_review", reason: "The saved chart changed during this check. Review your watch.", checkedAt }; }
         }

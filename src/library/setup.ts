@@ -1,3 +1,4 @@
+import { showcaseStarters } from "./showcase.ts";
 import type { DashboardSpec } from "../compiler/spec.ts";
 import { DEFAULT_CANVAS } from "../canvas/presets.ts";
 import type { Model } from "../semantic/model.ts";
@@ -38,7 +39,7 @@ export function filterStylesStarter(): DashboardSpec {
       { id: "f-platform", kind: "filter", filterId: "platform", title: "Platform", metrics: [], dimensions: [], layout: { x: 24, y: 24, w: 520, h: 120 } },
       { id: "f-period", kind: "filter", filterId: "period", title: "Period", metrics: [], dimensions: [], layout: { x: 24, y: 160, w: 520, h: 184 } },
       { id: "f-plan", kind: "filter", filterId: "plan", title: "Plan", metrics: [], dimensions: [], layout: { x: 576, y: 24, w: 520, h: 196 } },
-      { id: "actives", kind: "metric", title: "Active users", metrics: ["active_users"], dimensions: [], chart: "kpi", layout: { x: 576, y: 236, w: 520, h: 80 } },
+      { id: "actives", kind: "metric", title: "Active users", metrics: ["active_users"], dimensions: [], chart: "kpi", layout: { x: 576, y: 236, w: 520, h: 108 } },
       { id: "events", kind: "metric", title: "Events by platform", metrics: ["event_count"], dimensions: ["dim_users.device_platform"], chart: "bar", layout: { x: 24, y: 368, w: 520, h: 320 } },
       { id: "signups", kind: "metric", title: "New signups", metrics: ["new_signups"], dimensions: ["month:dim_users.signup_date"], chart: "line", layout: { x: 576, y: 368, w: 520, h: 320 } },
     ] };
@@ -50,8 +51,9 @@ export function folderForDashboard(model: Model, spec: { tiles: { metrics: strin
 /** Only offer the bundled business examples when their catalogue is present. No queries or result rows are stored. */
 export function libraryStarters(model: Model) {
   if (!demoDashboardAvailable(model)) return [];
+  const curated = showcaseStarters();
   const definitions: { folder: string; name: string; spec: DashboardSpec }[] = TOPICS.filter(([table]) => Object.values(model.metrics).some(m => m.baseTable === table))
-    .map(([table, folder, name]) => ({ folder: String(folder), name, spec: { ...suggestDashboard(model, { table, width: 1120, grain: "month" }), title: name } }));
+    .map(([table, folder, name]) => ({ folder: String(folder), name, spec: curated[name] ?? { ...suggestDashboard(model, { table, width: 1120, grain: "month" }), title: name } }));
   definitions.push({ folder: "shared", name: "Filter styles", spec: filterStylesStarter() });
   definitions.push({ folder: "examples", name: "Dashboard cleanup demo", spec: demoDashboard(1120) });
   return definitions.filter(d => !validateDashboard(model, d.spec).length).map(d => ({ ...d, canvas: { ...DEFAULT_CANVAS, preset: "custom", width: 1120,

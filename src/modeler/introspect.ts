@@ -1,5 +1,5 @@
 import type { Connector } from "../connectors/types.ts";
-import { normalizeType, pairJoins, type ColumnProfile, type JoinProbe, type TableProfile } from "./propose.ts";
+import { joinCounts, normalizeType, pairJoins, type ColumnProfile, type JoinProbe, type TableProfile } from "./propose.ts";
 
 /**
  * Reading the warehouse for the Modeler: the catalogue (tables and their
@@ -7,7 +7,9 @@ import { normalizeType, pairJoins, type ColumnProfile, type JoinProbe, type Tabl
  * count, null counts, distinct counts and date/number ranges, then one
  * query per candidate join for how many keys resolve. Read-only, bounded
  * (columns and tables are capped), and every query goes through the same
- * connector a dashboard uses, so it sees exactly what a chart would.
+ * configured connector a dashboard uses. These are source-profile counts,
+ * not chart results: interactive chart filters and chart row policies are
+ * not applied to this administrator's profiling operation.
  */
 export const LIMITS = { tables: 200, columns: 80, probes: 60 };
 
@@ -44,7 +46,7 @@ export async function profileTables(conn: Connector, tables: { name: string; col
 }
 
 /** Candidate joins by name, exactly as propose() pairs them, so each can be probed. */
-export function joinCandidates(profiles: TableProfile[]): Omit<JoinProbe, "leftRows" | "matched">[] {
+export function joinCandidates(profiles: TableProfile[]): Pick<JoinProbe, "left" | "leftOn" | "right" | "rightOn">[] {
   return pairJoins(profiles).slice(0, LIMITS.probes);
 }
 
@@ -57,10 +59,12 @@ export async function probeJoins(conn: Connector, profiles: TableProfile[], cand
     try {
       const r = await conn.execute(sql, 1);
       const row = r.rows[0] ?? [];
-      out.push({ ...c, leftRows: Number(row[r.columns.indexOf("n")] ?? 0), matched: Number(row[r.columns.indexOf("matched")] ?? 0) });
+      const counts = r.rows.length === 1 && r.columns.filter(name => name === "n").length === 1 && r.columns.filter(name => name === "matched").length === 1
+        ? joinCounts(row[r.columns.indexOf("n")], row[r.columns.indexOf("matched")]) : null;
+      out.push(counts ? { ...c, ...counts } : { ...c, leftRows: null, matched: null, failure: "invalid-result" });
     } catch {
-      // A type mismatch across the two columns is itself an answer: nothing resolves.
-      out.push({ ...c, leftRows: 1, matched: 0 });
+      // A timeout, permissions error or incompatible key type is not a count.
+      out.push({ ...c, leftRows: null, matched: null, failure: "query-failed" });
     }
   }
   return out;

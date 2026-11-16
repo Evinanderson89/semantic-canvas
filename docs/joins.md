@@ -24,6 +24,14 @@ joins:
 
 Row-level policies (`security/policies.yaml`, and the gateway's) reach their column through the same paths, so a policy on `dim_regions.region` constrains `fct_sales` through `dim_users`; a policy on a table the base cannot reach makes the query refused rather than run unscoped, as before.
 
+## Discovering breakdowns
+
+The tile picker follows the same directed join paths as the compiler, including multiple hops. Joined fields show the path from the metric's table. They can be selected as breakdowns or dragged into Filters. A field's selected state uses its full qualified name, so selecting `dim_regions.region` does not also select a local `region` field.
+
+**Unavailable joined tables** explains declared paths that would multiply rows or have ambiguous shortest routes. It does not offer those fields as usable breakdowns or filters. Use a metric on the related table for a one-to-many relationship, or resolve an ambiguous path in the model; do not change cardinality merely to bypass the check. Suggested dashboards also use valid forward paths, including multi-hop breakdowns.
+
+Availability follows the model's declared cardinality. It does not prove that warehouse keys are unique or complete. The Modeler's join evidence remains a separate check, and queries still validate metric-specific reporting requirements.
+
 ## The Modeler
 
 Joins the Modeler proposes are foreign key to key (`fct_orders.customer_id → dim_customers.customer_id`) and are written as `many_to_one`. A join it did not propose, or one the other way round, is declared by hand with its cardinality.

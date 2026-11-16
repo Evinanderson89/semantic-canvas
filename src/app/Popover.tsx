@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { FloatingPanel } from "./FloatingPanel.tsx";
 
 /** Small, keyboard-accessible disclosures for occasional studio controls. */
 export function Popover({ label, trigger, children, align = "start", className = "" }: {
@@ -17,10 +18,10 @@ export function Popover({ label, trigger, children, align = "start", className =
     const escape = (e: KeyboardEvent) => {
       if (e.key === "Escape") { setOpen(false); button.current?.focus(); }
     };
-    document.addEventListener("pointerdown", outside);
+    document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", escape);
     return () => {
-      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("pointerdown", outside, true);
       document.removeEventListener("keydown", escape);
     };
   }, [open]);
@@ -28,8 +29,8 @@ export function Popover({ label, trigger, children, align = "start", className =
     onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false); }}>
     <button className="studio-trigger" ref={button} aria-label={label}
       aria-expanded={open} aria-controls={id} onClick={() => setOpen(!open)}>{trigger}</button>
-    {open && <div id={id} className={`studio-popover-panel ${align}`} role="group" aria-label={label}>
+    {open && <FloatingPanel anchor={button} align={align} id={id} className={`studio-popover-panel ${align}`} role="group" aria-label={label}>
       {children(() => { setOpen(false); button.current?.focus(); })}
-    </div>}
+    </FloatingPanel>}
   </div>;
 }

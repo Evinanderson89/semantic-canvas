@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { definedRows, magnitudeSplit, preciseTickFormat } from "../src/charts/Chart.tsx";
+import { DEFAULT_FORMAT, makeAxisFormatter, makeFormatter } from "../src/format/format.ts";
 
 const row = (spend: number, cpc: number) => ({ month: "x", marketing_spend: spend, cost_per_click: cpc });
 
 describe("magnitudeSplit", () => {
+  it("uses numeric strings but never expands an axis to include a coerced boolean or blank zero", () => {
+    const data = [{ volume: "100000", rate: "0.84" }, { volume: "200000", rate: "0.86" },
+      { volume: "", rate: false }, { volume: true, rate: " " }];
+    const before = structuredClone(data), plan = magnitudeSplit(data, ["volume", "rate"]);
+    expect(plan!.secondaryDomain).toEqual({ min: .84, max: .86 });
+    expect(data).toEqual(before);
+  });
   it("splits two measures of the same unit class when magnitudes differ by more than the threshold", () => {
     // The reported bug: spend in the hundreds of thousands, CPC around a
     // couple of dollars -- both "currency," 50,000x apart.
@@ -19,6 +27,14 @@ describe("magnitudeSplit", () => {
     expect(magnitudeSplit(data, ["marketing_spend", "cost_per_click"])).toBeNull();
   });
 
+  for (const [ratio, split] of [[5.999, false], [6, false], [6.001, true]] as const) {
+    it(`keeps the strict 6x magnitude boundary at ${ratio}x`, () => {
+      const plan = magnitudeSplit([{ large: ratio * 100, small: 100 }], ["small", "large"]);
+      if (split) expect(plan).toMatchObject({ primary: ["large"], secondary: ["small"] });
+      else expect(plan).toBeNull();
+    });
+  }
+
   it("does nothing for a single measure", () => {
     expect(magnitudeSplit([{ x: "a", m: 5 }], ["m"])).toBeNull();
   });
@@ -31,6 +47,14 @@ describe("magnitudeSplit", () => {
     expect(plan.remap(2)).toBeCloseTo(100000, 0);
     expect(plan.remap(0)).toBeCloseTo(0, 0);
     expect(plan.remap(4)).toBeCloseTo(200000, 0);
+  });
+
+  it("uses full zero baselines for combo charts instead of exaggerating nearly flat rates", () => {
+    const plan = magnitudeSplit([row(180000, .0351254), row(230000, .035126)], ["marketing_spend", "cost_per_click"], true, true)!;
+    expect(plan.secondaryDomain).toEqual({ min: 0, max: .035126 });
+    expect(plan.remap(0)).toBe(0);
+    expect(plan.remap(.035126)).toBe(230000);
+    expect(plan.remap(.035126) - plan.remap(.0351254)).toBeLessThan(4);
   });
 
   it("handles negative values (a contraction/decline series) without breaking the domain", () => {
@@ -88,7 +112,7 @@ describe("magnitudeSplit", () => {
 
   it("three measures: only the ones far enough from the top get split off", () => {
     const data = [{ x: "a", big: 200000, mid: 8000, tiny: 3 }];
-    // 200000/8000 = 25x and 200000/3 = 66,666x -- both over the 20x
+    // 200000/8000 = 25x and 200000/3 = 66,666x -- both over the 6x
     // threshold, so both join the secondary axis alongside "big" alone.
     const plan = magnitudeSplit(data, ["big", "mid", "tiny"]);
     expect(plan).not.toBeNull();
@@ -127,6 +151,44 @@ describe("definedRows", () => {
 });
 
 describe("preciseTickFormat", () => {
+  for (const [top, divisor, suffix] of [[500000, 1e3, "k"], [5000000, 1e6, "M"], [5000000000, 1e9, "B"]] as const) {
+    it(`preserves the ${suffix} multiplier when increasing precision`, () => {
+      const ticks = [-0.844, -0.842, -0.84, 0, 0.84, 0.842, 0.844];
+      const base = makeAxisFormatter({ ...DEFAULT_FORMAT, number: "currency" }, [top]);
+      const labels = ticks.map(preciseTickFormat(ticks, base));
+      expect(new Set(labels).size).toBe(ticks.length);
+      for (let i = 0; i < ticks.length; i++) {
+        expect(labels[i]).toContain(suffix);
+        const value = Number(labels[i].replaceAll(",", "").replace("−", "-").replace("$", "").replace(suffix, "")) * divisor;
+        expect(value).toBeCloseTo(ticks[i], 8);
+      }
+    });
+  }
+
+  it("preserves compact, percent and plain units across small deltas and negative values", () => {
+    for (const scenario of [
+      { number: "compact" as const, ticks: [1e6 + 1, 1e6 + 2], multiplier: 1e6 },
+      { number: "compact" as const, ticks: [-0.000001002, -0.000001001], multiplier: 1e-6 },
+      { number: "percent" as const, ticks: [-0.10002, -0.10001], multiplier: .01 },
+      { number: "plain" as const, ticks: [-0.84004, -0.84003], multiplier: 1 },
+    ]) {
+      const format = preciseTickFormat(scenario.ticks, makeFormatter({ ...DEFAULT_FORMAT, number: scenario.number }));
+      expect(new Set(scenario.ticks.map(format)).size).toBe(2);
+      scenario.ticks.forEach(n => {
+        const decoded = Number(format(n).replace("−", "-").replaceAll(",", "").replace(/[Mµ%]/g, "")) * scenario.multiplier;
+        expect(Math.abs(decoded - n)).toBeLessThanOrEqual(Math.max(Math.abs(n) * 1e-14, 1e-20));
+      });
+    }
+  });
+
+  it("retains the scale when very small ticks need scientific notation", () => {
+    const ticks = [1e-25, 2e-25];
+    const base = makeAxisFormatter({ ...DEFAULT_FORMAT, number: "currency" }, [1e9]);
+    const labels = ticks.map(preciseTickFormat(ticks, base));
+    expect(new Set(labels).size).toBe(2);
+    labels.forEach((label, i) => expect(Number(label.replace("$", "").replace("B", "")) * 1e9 / ticks[i]).toBeCloseTo(1, 12));
+  });
+
   const currency2dp = (v: number) => `$${v.toFixed(2)}`;
 
   it("keeps the base formatter when its labels already distinguish every tick", () => {

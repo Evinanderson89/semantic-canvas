@@ -1,9 +1,17 @@
 import type { Connector } from "../connectors/types.ts";
-import { metricOf, joinPath, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, timeColumnOf, computedMetricIssue, calendarOf, type Metric, type Model } from "../semantic/model.ts";
+import { metricOf, joinPath, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, ratioSideDimensions, computedMetricIssue, calendarOf, nativePeriod, periodRollupAllowed, type Metric, type Model } from "../semantic/model.ts";
 import type { FilterSpec, TileSpec, ValidationIssue } from "./spec.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const GRAINS = new Set(["day", "week", "month", "quarter", "year"]);
+type PeriodEdge = { alias: string; ref: string; grain: string; owner: string; column: string };
+const RATIO_COVERAGE_COLUMNS = ["__ratio_coverage_issue", "__ratio_period", "__ratio_num_start", "__ratio_num_end", "__ratio_den_start", "__ratio_den_end"];
+
+function periodDimensionIssue(model: Model, owner: string, column: string, grain: string | null): string | null {
+  const period = model.tables[owner]?.period;
+  return grain && period?.column === column && !periodRollupAllowed(period.grain, grain)
+    ? `${owner}.${column} represents whole ${period.grain} periods; ${grain} reporting would split those periods. Use a compatible grain or a metric based on finer data.` : null;
+}
 
 /**
  * Validate a tile against the model before any SQL exists. This is what makes
@@ -24,12 +32,18 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
     if (!m) { issues.push({ tile: id, problem: `unknown metric "${name}"` }); continue; }
     const defect = computedMetricIssue(model, m);
     if (defect) { issues.push({ tile: id, problem: defect }); continue; }
+    if (metricType(m) !== "simple") {
+      const grainIssue = metricGrainIssue(m, tile.dimensions ?? []);
+      if (grainIssue) issues.push({ tile: id, problem: grainIssue });
+    }
     // A computed metric is checked through the simple metrics it is made of.
     for (const c of metricComponents(model, m)) {
       // Ingested tables stay out of viewers' reach until an admin publishes them (docs/connected-canvas.md).
       if (options.role === "viewer" && (c.reviewed === false || m.reviewed === false || model.tables[c.baseTable]?.connected?.status === "unreviewed"))
         issues.push({ tile: id, problem: `"${name}" is ingested but not yet published; an administrator must review ${c.baseTable} before viewers can query it` });
-      const grainIssue = metricGrainIssue(c, tile.dimensions ?? []);
+      const aligned = isCrossTableRatio(model, m) ? ratioSideDimensions(model, m, c, tile.dimensions ?? []) : tile.dimensions ?? [];
+      if (!aligned) { issues.push({ tile: id, problem: `${c.baseTable} has no date column to align ${m.label} on` }); continue; }
+      const grainIssue = metricGrainIssue(c, aligned);
       if (grainIssue) issues.push({ tile: id, problem: grainIssue });
     }
     bases.add(m.baseTable);
@@ -37,10 +51,19 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
     if (isCrossTableRatio(model, m)) {
       const den = metricOf(model, m.denominator!);
       if ((tile.metrics ?? []).length > 1) issues.push({ tile: id, problem: `${m.label} divides ${m.baseTable} by ${den.baseTable}; a ratio across two tables is charted on its own tile` });
-      if (timeDims.length && !timeColumnOf(model, den.baseTable)) issues.push({ tile: id, problem: `${den.baseTable} has no date column to align ${m.label}'s denominator on` });
-      for (const dim of tile.dimensions ?? []) {
+      const denDims = ratioSideDimensions(model, m, den, tile.dimensions ?? []);
+      for (const [i, dim] of (tile.dimensions ?? []).entries()) {
         const { grain, table } = parseDimension(dim);
-        if (grain) continue;
+        if (grain) {
+          if (table && table !== m.baseTable) issues.push({ tile: id, problem: `${m.label} needs its time axis on ${m.baseTable}; each input then uses its own reporting date.` });
+          const aligned = denDims && parseDimension(denDims[i]);
+          const own = aligned && aligned.column;
+          const col = own && model.tables[den.baseTable]?.columns.find(c => c.name === own);
+          if (own && (aligned.table !== den.baseTable || !col || !isTemporal(col))) issues.push({ tile: id, problem: `${aligned.table ?? den.baseTable}.${own} is not a date column on ${den.baseTable} for ${m.label}'s denominator` });
+          const problem = own && periodDimensionIssue(model, den.baseTable, own, grain);
+          if (problem) issues.push({ tile: id, problem });
+          continue;
+        }
         if (!table) issues.push({ tile: id, problem: `${m.label} crosses two tables: name the dimension's table (${dim} → table.${dim})` });
         else if (table !== den.baseTable && "error" in joinPath(model, den.baseTable, table)) issues.push({ tile: id, problem: `${(joinPath(model, den.baseTable, table) as { error: string }).error}, which ${m.label}'s denominator needs` });
       }
@@ -68,6 +91,8 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
     const d = parseDimension(dim);
     const col = model.tables[d.table ?? base]?.columns.find((c) => c.name === d.column);
     if (d.grain && col && !isTemporal(col)) issues.push({ tile: id, problem: `time grain requires a date column: ${dim}` });
+    const problem = periodDimensionIssue(model, d.table ?? base, d.column, d.grain);
+    if (problem) issues.push({ tile: id, problem });
   }
   for (const f of tile.where ?? []) {
     if (f.source === "dimension" && (f.field.includes(":") || !fieldReachable(model, base, f.field)))
@@ -77,8 +102,6 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
   }
   if (tile.compare && tile.compare !== "none" && !(tile.dimensions ?? []).some((d) => d.includes(":")))
     issues.push({ tile: id, problem: "period comparison requires a time dimension" });
-  if ((tile.where ?? []).some((f) => f.source === "metric") && new Set((tile.metrics ?? []).map((n) => metricOf(model, n)?.filter ?? null)).size > 1)
-    issues.push({ tile: id, problem: "aggregate filters across metrics with different always-on filters are not yet supported" });
   if ((tile.dimensions ?? []).filter((d) => d.includes(":")).length > 1 && tile.compare && tile.compare !== "none")
     issues.push({ tile: id, problem: "period comparison requires exactly one time dimension" });
   return issues;
@@ -108,6 +131,16 @@ export function parseDimension(dim: string) {
   return { grain, table: null as string | null, column: rest };
 }
 
+/** Share the reporting-zone expression between bucket grouping and calendar
+ * date filters. Discrete values and explicit timestamps keep raw semantics. */
+function reportingTimeRef(model: Model, conn: Connector, owner: string, column: string, raw: string): string {
+  const timezone = calendarOf(model).timezone;
+  const type = model.tables[owner]?.columns.find(c => c.name === column)?.type ?? "";
+  if (!timezone || !/timestamp|datetime/i.test(type)) return raw;
+  if (!conn.toTimezone) throw new Error(`The connector cannot apply the reporting time zone ${timezone} to ${owner}.${column}`);
+  return conn.toTimezone(raw, timezone);
+}
+
 export function compileTile(model: Model, conn: Connector, tile: TileSpec, options: { probe?: boolean; role?: string } = {}): string {
   const issues = validateTile(model, tile, options);
   if (issues.length) throw new Error(issues.map((i) => i.problem).join("; "));
@@ -124,10 +157,10 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
   const physical = new Map<string, { metric: Metric; alias: string }>();
   for (const m of tileMetrics) for (const c of metricComponents(model, m)) if (!physical.has(c.name)) physical.set(c.name, { metric: c, alias: tile.metrics.includes(c.name) ? c.name : `__m_${c.name}` });
 
-  let sql: string, groupCols: string[], edge: { alias: string; ref: string; grain: string } | null;
+  let sql: string, groupCols: string[], edge: PeriodEdge | null, ratioCoverage = false;
   if (across) {
-    ({ sql, groupCols } = compileAcross(model, conn, tile, across));
-    edge = null; // each side keeps its own edges; the ratio of two partially observed periods is left to the person's date filter
+    ({ sql, groupCols, coverage: ratioCoverage } = compileAcross(model, conn, tile, across));
+    edge = null; // Ratio inputs carry separate coverage; retain their values for inspection.
   } else {
     const core = compileCore(model, conn, tile, [...physical.values()]);
     ({ sql, groupCols, edge } = core);
@@ -141,7 +174,12 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
           case "derived": return m.expression.replace(/'(?:[^']|'')*'/g, (s) => s).replace(/(?<![A-Za-z0-9_."])([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_"]|\s*\()/g, (w) => (physical.has(w) ? col(w) : w));
           case "cumulative": {
             const others = groupCols.filter((c) => c !== timeAlias);
-            const frame = m.window ? `ROWS BETWEEN ${m.window - 1} PRECEDING AND CURRENT ROW` : "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW";
+            const [unit, step] = periodUnit(parseDimension(timeDim!).grain!);
+            // A trailing window counts reporting periods, not returned rows.
+            // Missing February must not pull January into April's 3-month sum.
+            const frame = m.window
+              ? `RANGE BETWEEN INTERVAL '${(m.window - 1) * step} ${unit}' PRECEDING AND CURRENT ROW`
+              : "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW";
             return `SUM(${col(m.metric!)}) OVER (${others.length ? `PARTITION BY ${others.join(", ")} ` : ""}ORDER BY ${timeAlias} ${frame})`;
           }
           default: return col(m.name);
@@ -152,11 +190,11 @@ export function compileTile(model: Model, conn: Connector, tile: TileSpec, optio
     }
   }
 
-  return finishTile(model, conn, tile, tileMetrics, sql, groupCols, edge, options);
+  return finishTile(model, conn, tile, tileMetrics, sql, groupCols, edge, { ...options, ratioCoverage });
 }
 
 /** The grouped SELECT for one base table: dimensions, the simple metrics given (each under its alias), and the hidden edge columns. */
-function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { metric: Metric; alias: string }[]): { sql: string; groupCols: string[]; edge: { alias: string; ref: string; grain: string } | null } {
+function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { metric: Metric; alias: string }[], coverage = false): { sql: string; groupCols: string[]; edge: PeriodEdge | null } {
   const metrics = physical.map((p) => p.metric);
   const aliasOf = new Map(physical.map((p) => [p.metric.name, p.alias]));
   const base = metrics[0].baseTable;
@@ -166,12 +204,13 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
   // ---- dimensions, and the joins they imply --------------------------------
   const dimSelect: string[] = [];
   const groupCols: string[] = [];
+  const groupExpressions: string[] = [];
   const needed = new Set<string>();
 
   // The coarsened time dimension, if any: its edge buckets are checked for
   // completeness below, so the raw min and max date inside each bucket ride
   // along as hidden aggregates.
-  let edge: { alias: string; ref: string; grain: string } | null = null;
+  let edge: PeriodEdge | null = null;
   for (const dim of tile.dimensions ?? []) {
     const { grain, table, column } = parseDimension(dim);
     const owner = table ?? base;
@@ -179,40 +218,41 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
     if (owner !== base) needed.add(owner);
     const raw = `${owner}.${q(column)}`;
     // Timestamps are read in the calendar's time zone before any period is cut; dates need no conversion.
-    const colType = model.tables[owner]?.columns.find((c) => c.name === column)?.type ?? "";
-    const ref = grain && calendarOf(model).timezone && /timestamp|datetime/i.test(colType) && conn.toTimezone ? conn.toTimezone(raw, calendarOf(model).timezone!) : raw;
+    const ref = grain ? reportingTimeRef(model, conn, owner, column, raw) : raw;
     const alias = grain ? `${column}_${grain}` : column;
-    dimSelect.push(`${grain ? truncOnCalendar(model, conn, grain, ref) : ref} AS ${q(alias)}`);
+    const expression = grain ? truncOnCalendar(model, conn, grain, ref) : ref;
+    dimSelect.push(`${expression} AS ${q(alias)}`);
     groupCols.push(q(alias));
-    if (grain && grain !== "day" && !edge) edge = { alias: q(alias), ref, grain };
+    groupExpressions.push(expression);
+    if (grain && (grain !== "day" || coverage) && !edge) edge = { alias: q(alias), ref, grain, owner, column };
   }
-  // A snapshot table has nothing to be partial about at its own grain: one
-  // row per month dated the first IS the whole month. Two declarations say
-  // so, either is enough: a metric's time_grains naming this grain as its
-  // native reporting grain, or the table's date-typed primary key (one row
-  // per period). Only finer-grained data, events inside the bucket, can
-  // reveal an incomplete edge.
+  // An explicitly monthly row covers its month, not every coarser period.
+  // A date key alone establishes no coverage. Native metric declarations
+  // must agree and name the axis actually being grouped.
+  if (edge && !coverage && nativePeriod(model, edge.owner, edge.column, edge.grain, metrics)) edge = null;
+  let edgeStart = edge?.ref, edgeEnd = edge?.ref;
   if (edge) {
-    const native = metrics.some((m) => m.timeGrains?.includes(edge!.grain as any));
-    const table = model.tables[base];
-    const pk = table?.primaryKey ? table.columns.find((c) => c.name === table.primaryKey) : undefined;
-    const periodKeyed = !!pk && isTemporal(pk) && edge.ref.endsWith(q(pk.name));
-    if (native || periodKeyed) edge = null;
+    const period = model.tables[edge.owner]?.period;
+    const sourceGrain = period?.column === edge.column ? period.grain
+      : coverage && nativePeriod(model, edge.owner, edge.column, edge.grain, metrics) ? edge.grain : null;
+    if (sourceGrain) {
+      edgeStart = truncOnCalendar(model, conn, sourceGrain, edge.ref);
+      const [unit, count] = periodUnit(sourceGrain);
+      edgeEnd = conn.dateAdd("day", conn.dateAdd(unit, edgeStart, count), -1);
+    }
   }
-  const edgeSelect = edge ? [`MIN(${edge.ref}) AS "__edge_min"`, `MAX(${edge.ref}) AS "__edge_max"`] : [];
+  const edgeSelect = edge ? [`MIN(${edgeStart}) AS "__edge_min"`, `MAX(${edgeEnd}) AS "__edge_max"`] : [];
 
   // ---- filters --------------------------------------------------------------
   const where: string[] = [];
-  const having: { sql: string; metric: string }[] = [];
   for (const f of tile.where ?? []) {
-    if (f.source === "dimension") {
-      const { table } = parseDimension(f.field);
-      if (table && table !== base) needed.add(table);
-    }
+    // Metric predicates select finished results, after groups have been
+    // recombined and derived/ratio/window values computed (finishTile).
+    if (f.source === "metric") continue;
+    const { table } = parseDimension(f.field);
+    if (table && table !== base) needed.add(table);
     const p = buildPredicate(model, conn, base, f);
-    if (!p) continue;
-    if (p.having) having.push({ sql: p.sql, metric: f.field });
-    else where.push(`(${p.sql})`);
+    if (p) where.push(`(${p.sql})`);
   }
 
   const from = compileFrom(model, conn, base, needed);
@@ -242,20 +282,16 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
     const only = [...groups.keys()][0] ?? null;
     sql = `SELECT ${[...dimSelect, ...sel(metrics), ...edgeSelect].join(",\n       ")}\nFROM ${from}` +
           clause("WHERE", only ? [...where, `(${only})`] : where) +
-          (groupCols.length ? `\nGROUP BY ${groupCols.join(", ")}` : "") +
-          clause("HAVING", having.map((h) => `(${h.sql})`));
+      (groupCols.length ? `\nGROUP BY ${groupExpressions.join(", ")}` : "");
   } else {
     const names: string[] = [];
     const ctes = [...groups.entries()].map(([filter, ms], i) => {
       const name = `g${i}`;
       names.push(name);
-      // A HAVING belongs only in the CTE that actually computes its metric.
-      const h = having.filter((x) => ms.some((m) => m.name === x.metric)).map((x) => `(${x.sql})`);
       const body =
         `SELECT ${[...dimSelect, ...sel(ms), ...(i === 0 ? edgeSelect : [])].join(",\n         ")}\n  FROM ${from}` +
         clause("  WHERE", filter ? [...where, `(${filter})`] : where) +
-        (groupCols.length ? `\n  GROUP BY ${groupCols.join(", ")}` : "") +
-        clause("  HAVING", h);
+        (groupCols.length ? `\n  GROUP BY ${groupExpressions.join(", ")}` : "");
       return `${name} AS (\n  ${body}\n)`;
     });
     // Null dimension values represent the same cohort in every metric group.
@@ -280,47 +316,61 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
  * grouped query over its own table, joined on the dimension values. The time
  * axis is each side's own date column (sessions by session date, signups by
  * signup date); a categorical dimension must be reachable from both. Every
- * filter, the row-level ones included, has to apply on both sides, or the
- * ratio is refused rather than half-scoped.
+ * dimension filter, the row-level ones included, has to apply on both sides,
+ * or the ratio is refused rather than half-scoped. Metric filters apply to
+ * the resulting ratio, not separately to its numerator and denominator.
  */
-function compileAcross(model: Model, conn: Connector, tile: TileSpec, ratio: Metric): { sql: string; groupCols: string[] } {
+function compileAcross(model: Model, conn: Connector, tile: TileSpec, ratio: Metric): { sql: string; groupCols: string[]; coverage: boolean } {
   const q = conn.quote.bind(conn);
   const num = metricOf(model, ratio.numerator!), den = metricOf(model, ratio.denominator!);
-  const sideDims = (base: string) => (tile.dimensions ?? []).map((d) => {
-    const { grain, table, column } = parseDimension(d);
-    if (!grain) return d;
-    const own = table === base || (!table && model.tables[base].columns.some((c) => c.name === column)) ? column : timeColumnOf(model, base)?.split(".")[1];
-    if (!own) throw new Error(`${base} has no date column to align ${ratio.label} on`);
-    return `${grain}:${own}`;
-  });
+  const sideDims = (input: Metric) => {
+    const dimensions = ratioSideDimensions(model, ratio, input, tile.dimensions ?? []);
+    if (!dimensions) throw new Error(`${input.baseTable} has no date column to align ${ratio.label} on`);
+    return dimensions;
+  };
   for (const f of tile.where ?? []) {
-    if (f.source !== "dimension") throw new Error(`${ratio.label} crosses two tables; an aggregate filter cannot apply to both`);
+    if (f.source === "metric") continue;
     if (!fieldReachable(model, den.baseTable, f.field) || !fieldReachable(model, num.baseTable, f.field)) throw new Error(`the filter on ${f.field} cannot be applied to both ${num.baseTable} and ${den.baseTable}, which ${ratio.label} needs`);
   }
-  const side = (m: Metric, name: string) => compileCore(model, conn, { ...tile, metrics: [m.name], dimensions: sideDims(m.baseTable) }, [{ metric: m, alias: name }]);
+  const side = (m: Metric, name: string) => compileCore(model, conn, { ...tile, metrics: [m.name], dimensions: sideDims(m) }, [{ metric: m, alias: name }], true);
   const n = side(num, "__num"), d = side(den, "__den");
   // Both sides group by the same dimensions in the same order; only a time column's alias may differ.
   const dims = (tile.dimensions ?? []).map((dim, i) => {
     const { grain, column } = parseDimension(dim);
     return { out: q(grain ? `${column}_${grain}` : column), n: n.groupCols[i], d: d.groupCols[i] };
   });
+  const coverageColumns: string[] = [];
+  if (n.edge && d.edge) {
+    const start = `COALESCE(__n.${n.edge.alias}, __d.${d.edge.alias})`;
+    const [unit, count] = periodUnit(n.edge.grain);
+    const end = conn.dateAdd("day", conn.dateAdd(unit, start, count), -1);
+    const ns = 'CAST(__n."__edge_min" AS DATE)', ne = 'CAST(__n."__edge_max" AS DATE)';
+    const ds = 'CAST(__d."__edge_min" AS DATE)', de = 'CAST(__d."__edge_max" AS DATE)';
+    const issue = [ns, ne, ds, de].map(c => `${c} IS NULL`).concat(
+      `${ns} <> ${ds}`, `${ne} <> ${de}`, `${ns} > ${start}`, `${ds} > ${start}`, `${ne} < ${end}`, `${de} < ${end}`);
+    coverageColumns.push(`(${issue.join(" OR ")}) AS "__ratio_coverage_issue"`, `${start} AS "__ratio_period"`,
+      `${ns} AS "__ratio_num_start"`, `${ne} AS "__ratio_num_end"`, `${ds} AS "__ratio_den_start"`, `${de} AS "__ratio_den_end"`);
+  }
   const sql = `WITH __n AS (\n${n.sql}\n), __d AS (\n${d.sql}\n)\n` +
-    `SELECT ${[...dims.map((x) => `COALESCE(__n.${x.n}, __d.${x.d}) AS ${x.out}`), `CAST(__n."__num" AS DOUBLE) / NULLIF(__d."__den", 0) AS ${q(ratio.name)}`].join(", ")}\n` +
+    `SELECT ${[...dims.map((x) => `COALESCE(__n.${x.n}, __d.${x.d}) AS ${x.out}`), `CAST(__n."__num" AS DOUBLE) / NULLIF(__d."__den", 0) AS ${q(ratio.name)}`, ...coverageColumns].join(", ")}\n` +
     `FROM __n FULL OUTER JOIN __d ON ${dims.length ? dims.map((x) => `__n.${x.n} IS NOT DISTINCT FROM __d.${x.d}`).join(" AND ") : "TRUE"}`;
-  return { sql, groupCols: dims.map((x) => x.out) };
+  return { sql, groupCols: dims.map((x) => x.out), coverage: coverageColumns.length > 0 };
 }
 
 /** Edge flags, period-over-period, ordering and the limit: the same tail for every kind of metric. */
-function finishTile(model: Model, conn: Connector, tile: TileSpec, metrics: Metric[], sql: string, groupCols: string[], edge: { alias: string; ref: string; grain: string } | null, options: { probe?: boolean }): string {
+function periodUnit(grain: string): readonly ["day" | "month" | "year", number] {
+  return ({ week: ["day", 7], month: ["month", 1], quarter: ["month", 3], year: ["year", 1] } as const)[grain] ?? ["day", 1];
+}
+
+function finishTile(model: Model, conn: Connector, tile: TileSpec, metrics: Metric[], sql: string, groupCols: string[], edge: PeriodEdge | null, options: { probe?: boolean; ratioCoverage?: boolean }): string {
   const q = conn.quote.bind(conn);
 
-  // Edge completeness. Observed dates cannot prove a bucket is complete (a
-  // monthly snapshot legitimately has one row on the first), but they can
-  // prove one is incomplete: if the earliest bucket's first observed date
-  // is after the bucket's start, or the latest bucket's last observed date
-  // is before the bucket's end, that bucket does not cover its whole period
-  // and a chart that draws it as a full one lies at the edge. The flags are
-  // carried as columns and stripped by splitPartialPeriods(); rows are kept.
+  // Observed-edge treatment is conservative, not proof of warehouse
+  // completeness. If the first/last observed coverage falls inside a bucket,
+  // flag that edge so it is not silently compared with a full period. Quiet
+  // event days can also create such edges; an explicit source-period
+  // declaration supplies different coverage semantics for summary rows.
+  // Flags ride along and are handled by splitPartialPeriods().
   //
   // The judgement is about the bucket, not the row. With a second dimension
   // the grouped query holds one row per (bucket, segment), each with its own
@@ -330,26 +380,31 @@ function finishTile(model: Model, conn: Connector, tile: TileSpec, metrics: Metr
   // and latest dates are taken across the whole bucket (a window over the
   // bucket column), and every row of a partial bucket is flagged together.
   //
-  // A range filter on the same date column is the exception: the person
-  // asked for that window, so a bucket clipped by it is not incomplete, it
-  // is what they asked to see. Where the filter bounds the edge, the check
-  // is skipped on that side.
+  // An explicitly selected edge stays visible, but its observed coverage
+  // still matters: retain it with a separate scope flag and never compare
+  // it against a complete period as if both covered the same interval.
   if (edge) {
-    const unit: Record<string, ["day" | "month" | "year", number]> = { week: ["day", 7], month: ["month", 1], quarter: ["month", 3], year: ["year", 1] };
-    const [u, n] = unit[edge.grain] ?? ["day", 1];
+    const [u, n] = periodUnit(edge.grain);
     const bucketEnd = conn.dateAdd("day", conn.dateAdd(u, `__e.${edge.alias}`, n), -1);
-    const timeField = (tile.dimensions ?? []).find((d) => d.includes(":"))!.split(":")[1];
-    const timeRanges = (tile.where ?? []).filter((f) => f.source === "dimension" && f.mode === "range" && (f.field === timeField || f.field === timeField.split(".").pop()));
+    const timeRanges = (tile.where ?? []).filter(f => {
+      const field = parseDimension(f.field);
+      return f.source === "dimension" && f.mode === "range" && !f.exclude &&
+        (field.table ?? metrics[0].baseTable) === edge.owner && field.column === edge.column;
+    });
     const boundedMin = timeRanges.some((f) => f.min != null && f.min !== "");
     const boundedMax = timeRanges.some((f) => f.max != null && f.max !== "");
     const bucketMin = `MIN(CAST("__edge_min" AS DATE)) OVER (PARTITION BY ${edge.alias})`;
     const bucketMax = `MAX(CAST("__edge_max" AS DATE)) OVER (PARTITION BY ${edge.alias})`;
-    const startFlag = boundedMin ? "FALSE" : `(${edge.alias} = (SELECT MIN(${edge.alias}) FROM __e) AND ${bucketMin} > ${edge.alias})`;
-    const endFlag = boundedMax ? "FALSE" : `(${edge.alias} = (SELECT MAX(${edge.alias}) FROM __e) AND ${bucketMax} < ${bucketEnd})`;
+    const observedStart = `(${edge.alias} = (SELECT MIN(${edge.alias}) FROM __e) AND ${bucketMin} > ${edge.alias})`;
+    const observedEnd = `(${edge.alias} = (SELECT MAX(${edge.alias}) FROM __e) AND ${bucketMax} < ${bucketEnd})`;
+    const startFlag = boundedMin ? "FALSE" : observedStart;
+    const endFlag = boundedMax ? "FALSE" : observedEnd;
     sql = `WITH __e AS (\n${sql}\n)\n` +
       `SELECT * EXCLUDE ("__edge_min", "__edge_max"),\n` +
       `       ${startFlag} AS "__partial_start",\n` +
-      `       ${endFlag} AS "__partial_end"\n` +
+      `       ${endFlag} AS "__partial_end",\n` +
+      `       ${boundedMin ? observedStart : "FALSE"} AS "__selected_partial_start",\n` +
+      `       ${boundedMax ? observedEnd : "FALSE"} AS "__selected_partial_end"\n` +
       `FROM __e`;
   }
 
@@ -370,6 +425,12 @@ function finishTile(model: Model, conn: Connector, tile: TileSpec, metrics: Metr
     const partition = groupCols.filter((c) => c !== timeAlias);
     const on = [`prev.${timeAlias} = ${previousDate}`,
       ...partition.map((c) => `cur.${c} IS NOT DISTINCT FROM prev.${c}`)];
+    // A period omitted as a partial edge cannot be the baseline for a
+    // displayed change. Keep that comparison unknown instead of reporting
+    // growth against an incomplete bucket.
+    if (edge) on.push('NOT prev."__partial_start"', 'NOT prev."__partial_end"',
+      ...["cur", "prev"].flatMap(side => [`NOT ${side}."__selected_partial_start"`, `NOT ${side}."__selected_partial_end"`]));
+    if (options.ratioCoverage) on.push('NOT cur."__ratio_coverage_issue"', 'NOT prev."__ratio_coverage_issue"');
     const cols = metrics.flatMap((m) => {
       const cur = `cur.${q(m.name)}`, prev = `prev.${q(m.name)}`;
       return [`${prev} AS ${q(`${m.name}__prev`)}`,
@@ -377,9 +438,18 @@ function finishTile(model: Model, conn: Connector, tile: TileSpec, metrics: Metr
         `(${cur} - ${prev}) / NULLIF(ABS(${prev}), 0) AS ${q(`${m.name}__pct`)}`];
     });
     sql = `WITH __base AS (\n${sql}\n)\n` +
-      `SELECT ${[...groupCols, ...metrics.map((m) => q(m.name)), ...(edge ? ['"__partial_start"', '"__partial_end"'] : [])].map((c) => `cur.${c} AS ${c}`).concat(cols).join(",\n       ")}\n` +
+      `SELECT ${[...groupCols, ...metrics.map((m) => q(m.name)), ...(edge ? ['"__partial_start"', '"__partial_end"', '"__selected_partial_start"', '"__selected_partial_end"'] : []), ...(options.ratioCoverage ? RATIO_COVERAGE_COLUMNS.map(q) : [])].map((c) => `cur.${c} AS ${c}`).concat(cols).join(",\n       ")}\n` +
       `FROM __base cur LEFT JOIN __base prev ON ${on.join(" AND ")}`;
   }
+
+  // Select finished metric values only after windows and prior-period
+  // lookups. Removing an earlier period must not change a running total or
+  // hide the actual comparison value. Apply before the result limit so it
+  // returns the newest matching rows, not matches within an arbitrary cap.
+  const metricFilters = (tile.where ?? []).filter(f => f.source === "metric")
+    .map(f => buildPredicate(model, conn, metrics[0].baseTable, f, { metricReference: "result" }))
+    .filter(p => p !== null).map(p => `(${p.sql})`);
+  if (metricFilters.length) sql = `SELECT * FROM (\n${sql}\n) AS __metric_results\nWHERE ${metricFilters.join(" AND ")}`;
 
   const limit = Math.min(tile.limit ?? 500, 5000) + (options.probe ? 1 : 0);
   if (timeDim) {
@@ -396,12 +466,20 @@ function finishTile(model: Model, conn: Connector, tile: TileSpec, metrics: Metr
   return sql;
 }
 
-export interface PartialEdges { start: boolean; end: boolean }
+export interface PartialEdges {
+  /** Observed partial edges omitted from the result. */
+  start: boolean; end: boolean;
+  /** Explicitly bounded observed partial edges retained in the result. */
+  selected?: { start: boolean; end: boolean };
+  /** Retained ratio rows whose input windows are missing, different or partial. */
+  ratio?: { period: string | null; numeratorStart: string | null; numeratorEnd: string | null; denominatorStart: string | null; denominatorEnd: string | null; dimensions?: Record<string, unknown> }[];
+}
 
 /**
- * Strips the "__partial_start"/"__partial_end" columns compileTile() adds
+ * Strips the observed-edge columns compileTile() adds
  * for a coarsened time dimension, reporting what they said instead of
- * silently dropping them into the void along with the rows they flagged.
+ * silently dropping their scope information. Explicitly selected edges stay
+ * in the result; only unbounded partial-edge rows are omitted.
  * A no-op (both false) for any tile compileTile() didn't add them to.
  */
 export function splitPartialPeriods(
@@ -409,10 +487,13 @@ export function splitPartialPeriods(
 ): { columns: string[]; rows: unknown[][]; partial: PartialEdges } {
   const startIdx = result.columns.indexOf("__partial_start");
   const endIdx = result.columns.indexOf("__partial_end");
-  if (startIdx === -1 && endIdx === -1)
+  const selectedStartIdx = result.columns.indexOf("__selected_partial_start");
+  const selectedEndIdx = result.columns.indexOf("__selected_partial_end");
+  const ratioIndexes = RATIO_COVERAGE_COLUMNS.map(c => result.columns.indexOf(c));
+  if (startIdx === -1 && endIdx === -1 && ratioIndexes[0] === -1)
     return { columns: result.columns, rows: result.rows, partial: { start: false, end: false } };
 
-  const flagIdx = new Set([startIdx, endIdx].filter((i) => i !== -1));
+  const flagIdx = new Set([startIdx, endIdx, selectedStartIdx, selectedEndIdx, ...ratioIndexes].filter((i) => i !== -1));
   const columns = result.columns.filter((_, i) => !flagIdx.has(i));
   let partial: PartialEdges = { start: false, end: false };
   const rows: unknown[][] = [];
@@ -424,6 +505,16 @@ export function splitPartialPeriods(
     // full period it reads as a collapse, and as the newest period it would
     // feed a false period-over-period change. The flags report it instead.
     if (flaggedStart || flaggedEnd) continue;
+    if (ratioIndexes[0] !== -1 && Boolean(row[ratioIndexes[0]])) {
+      const date = (index: number) => { const v = row[index]; return v == null ? null : (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10); };
+      // A cross-table ratio has exactly one measure before these flags.
+      // Carry categorical group identities when several rows share a period.
+      const dimensions = ratioIndexes[0] > 2 ? Object.fromEntries(result.columns.slice(0, ratioIndexes[0] - 1).map((name, i) => [name, row[i]])) : undefined;
+      (partial.ratio ??= []).push({ period: date(ratioIndexes[1]), numeratorStart: date(ratioIndexes[2]), numeratorEnd: date(ratioIndexes[3]), denominatorStart: date(ratioIndexes[4]), denominatorEnd: date(ratioIndexes[5]), ...(dimensions ? { dimensions } : {}) });
+    }
+    const selectedStart = selectedStartIdx !== -1 && Boolean(row[selectedStartIdx]);
+    const selectedEnd = selectedEndIdx !== -1 && Boolean(row[selectedEndIdx]);
+    if (selectedStart || selectedEnd) partial.selected = { start: !!partial.selected?.start || selectedStart, end: !!partial.selected?.end || selectedEnd };
     const rest = row.filter((_, i) => !flagIdx.has(i));
     if (rest.some((v) => v !== null && v !== undefined)) rows.push(rest);
   }
@@ -443,28 +534,34 @@ const lit = (v: unknown): string => {
  */
 export function buildPredicate(
   model: Model, conn: Connector, base: string, f: FilterSpec,
+  options: { metricReference?: "expression" | "result" } = {},
 ): { sql: string; having: boolean } | null {
   const q = conn.quote.bind(conn);
   let ref: string;
   if (f.source === "metric") {
     const m = metricOf(model, f.field);
     if (!m || m.baseTable !== base) throw new Error(`unknown or incompatible filter metric: ${f.field}`);
-    // Filtering an aggregate is a HAVING, so the metric's own always-on filter
-    // is already applied by the surrounding query -- do not re-apply it here.
-    ref = m.expression;
+    // The tile compiler filters by the finished output alias. Expression
+    // mode remains available for callers building a single aggregate's
+    // HAVING predicate; neither mode reapplies the always-on row filter.
+    ref = options.metricReference === "result" ? q(m.name) : m.expression;
   } else {
     const { table, column } = parseDimension(f.field);
     const owner = table ?? base;
     if (!fieldReachable(model, base, f.field)) throw new Error(`unknown or unreachable filter field: ${f.field}`);
     assertIdent(owner);
     ref = `${owner}.${q(column)}`;
+    const bounds = [f.min, f.max].filter(v => v != null);
+    if (f.mode === "range" && bounds.length && bounds.every(v => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)))
+      ref = reportingTimeRef(model, conn, owner, column, ref);
   }
 
   if (f.mode === "discrete") {
     const vals = (f.values ?? []).filter((v) => v !== undefined);
     // A security filter with no permitted values denies everything. Only a
     // user-authored filter is allowed to no-op on an empty list.
-    if (!vals.length) return f.id.startsWith("rls:") ? { sql: "FALSE", having: false } : null;
+    if (!vals.length) return f.id.startsWith("rls:") || f.id.startsWith("gateway:")
+      ? { sql: f.exclude ? "TRUE" : "FALSE", having: f.source === "metric" } : null;
     const nulls = vals.some((v) => v === null);
     const rest = vals.filter((v) => v !== null);
     const parts: string[] = [];

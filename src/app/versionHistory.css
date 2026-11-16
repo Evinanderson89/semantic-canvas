@@ -1,0 +1,44 @@
+.document-state-bar { display:flex; flex-wrap:nowrap; align-items:center; gap:10px 18px; padding:10px 24px; background:var(--surface-2); border-bottom:1px solid var(--line); color:var(--ink-2); font-size:13px; }
+.document-state-bar > span:nth-child(2) { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.document-state-bar > span:nth-child(3), .document-state-bar .mode-label { white-space:nowrap; }
+.document-state-bar > .spacer { display:none; }
+.document-state-bar strong { color:var(--ink); }
+.document-state-bar .mode-label { padding:5px 10px; border:1px solid currentColor; border-radius:6px; color:var(--accent); font-weight:700; letter-spacing:.03em; }
+.document-state-bar.preview { background:color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+.document-state-bar .mode-switch { display:flex; gap:3px; padding:3px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+.document-state-bar button { min-height:32px; padding:5px 12px; white-space:nowrap; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink); font:inherit; cursor:pointer; }
+.document-state-bar button:disabled { opacity:.5; cursor:default; }
+.document-state-bar button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.document-state-bar .mode-switch button { border:0; background:transparent; transition:none; }
+.document-state-bar .mode-switch button[aria-pressed=true] { background:var(--accent); color:var(--on-accent, white); }
+.version-intro { padding-bottom:12px !important; }
+.version-browser { display:grid; grid-template-columns:250px minmax(0,1fr); min-height:350px; border-top:1px solid var(--line); }
+.version-browser nav { padding:16px; border-right:1px solid var(--line); overflow:auto; max-height:65vh; }
+.version-browser nav button { display:flex; flex-direction:column; width:100%; text-align:left; gap:7px; padding:14px; margin-bottom:8px; border:1px solid var(--line); background:var(--panel); }
+.version-browser nav button[aria-pressed=true] { border-color:var(--accent); background:var(--surface-2); box-shadow:inset 3px 0 var(--accent); }
+.version-browser nav span { font-size:12px; color:var(--ink-2); overflow-wrap:anywhere; }
+.version-preview { min-width:0; padding:22px; }
+.version-preview svg { display:block; width:100%; max-height:360px; background:var(--surface-2); border-radius:8px; }
+.version-preview rect { fill:var(--panel); stroke:var(--line); stroke-width:2; }
+.version-preview rect.version-text-tile { fill:none; stroke:none; }
+.version-preview text { fill:var(--ink); }
+.version-preview .version-kind { fill:var(--ink-2); }
+.version-changes { margin:20px 0; border-top:1px solid var(--line); }
+.version-changes h4 { margin:18px 0 8px; }
+.version-changes details { border:1px solid var(--line); border-radius:8px; margin:10px 0; padding:12px; }
+.version-changes summary { cursor:pointer; font-weight:600; }
+.version-changes ul { list-style:none; padding:0; margin:0; }
+.version-changes li { padding:14px 0 0; overflow-wrap:anywhere; }
+.version-changes dl { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:10px 0; }
+.version-changes dl>div { min-width:0; padding:10px; background:var(--surface-2); border-radius:6px; }
+.version-changes dt { color:var(--ink-2); font-size:11px; font-weight:600; margin-bottom:6px; }
+.version-changes dd { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:180px; overflow:auto; font-size:12px; line-height:1.5; }
+@media(max-width:760px) { .version-changes dl { grid-template-columns:1fr; } }
+@media(max-width:760px) { .version-browser { grid-template-columns:1fr; } .version-browser nav { max-height:180px; border-right:0; border-bottom:1px solid var(--line); } .document-state-bar { padding:10px 14px; flex-wrap:wrap; } .document-state-bar > span:nth-child(2) { flex-basis:100%; order:3; } }
+
+.shell.inspecting .document-state-bar { gap:8px; padding-left:14px; padding-right:14px; }
+@media(max-width:1100px) {
+  .document-state-bar { gap:8px; padding:8px 14px; font-size:12px; }
+  .document-state-bar > span:nth-child(2) { display:none; }
+  .document-state-bar > .spacer { display:block; }
+}

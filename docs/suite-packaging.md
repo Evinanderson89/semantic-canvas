@@ -32,11 +32,11 @@ See [self-hosting](self-hosting.md) for Canvas's standalone company mode and sto
 
 ## Imported data is not automatically a semantic model
 
-Ingest currently creates new tables in a per-user DuckDB warehouse or a configured Snowflake destination. Canvas requires a supported model plus a compatible connector. A reviewed Snowflake table can be configured and modeled manually. Canvas's local DuckDB connector currently reads Parquet; it does **not** attach Ingest's `warehouse.duckdb` directly. Shared navigation or a shared volume does not provide a working data handoff.
+Ingest can write to a per-user DuckDB warehouse, a configured Snowflake destination, or the explicit **Connected to Semantic Canvas** destination. Canvas requires a supported model plus a compatible connector. Its local DuckDB connector reads Parquet; it does **not** attach Ingest's private `warehouse.duckdb` directly.
 
-The intended **Use in Semantic Canvas** action would authorize a compatible connection, propose dimensions and metrics for review, register the approved source/model, and open Canvas on that source. The connection handoff, cross-app credential authorization and automatic model publication are not implemented. Neither the suite name nor a shared login implies that all users may see each other's imported records or credentials.
+The connected destination writes versioned Parquet to an operator-configured shared lake, then registers an **unreviewed** model entry using the caller's Gateway session. An administrator reviews metric meaning and publication in Canvas; registration does not grant viewer access or approve the metric definitions. The Snowflake variant writes immutable version tables behind a view in a dedicated landing schema and has simulated-driver tests; real warehouse acceptance remains open. See the [connected-data contract](connected-canvas.md) for permissions, drift, promotion and rollback.
 
-Until that workflow is built, keep the distinction clear in UI and product copy: loading records creates raw data; the reviewed semantic model defines their analytical meaning.
+This workflow does not transfer saved credentials between apps or automatically publish a semantic model. Each app needs its own compatible connection and permissions. Loading records creates raw data; reviewed metric definitions establish analytical meaning.
 
 ## Storage and orchestration
 
@@ -47,8 +47,8 @@ Ingest has no schedules, incremental sync or CDC yet. A durable worker and Postg
 ## Release gates
 
 1. Review the linked Gateway/Ingest and Canvas changes, including migrations and verified identity boundaries.
-2. Complete reproducible integrated builds, real sign-in/permission checks, fresh installation, existing-volume upgrade and backup/restore verification. The attempted local Docker build failed with a read-only storage error; full deployment is still unverified.
-3. Implement and test the reviewed data/model handoff for each supported destination.
+2. Complete reproducible integrated builds, existing-volume upgrades and backup/restore verification. The companion integration guide records a successful fresh-clone Compose/sign-in/shared-lake walkthrough on 10 September 2026, after an earlier host-storage build failure. That historical local run does not verify the current dirty worktrees, a release bundle or production deployment.
+3. Retain local/fixture coverage of the implemented connected-data review flow and complete scoped live acceptance for each supported destination, including Snowflake landing and failure recovery.
 4. Add durable recurring import jobs and safe incremental merge behavior before offering “Keep updated.”
 5. Publish compatible versioned images, the full-workspace bundle and tested standalone options, with setup and operator documentation.
 

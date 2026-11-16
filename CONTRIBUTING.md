@@ -14,7 +14,9 @@ attaching a real one.
     npx playwright install chromium
     npm run check       # types + result/regression tests + build + browser tests
 
-All checks must pass. Browser tests start isolated servers on ports 5273/5274 and use `.test-data/`. The ordinary preview does not need to be running. Use Node.js 22.12+, 24.x, or 26+.
+All checks must pass. Browser tests start isolated servers on ports 5273/5274 and use `.test-data/`. The ordinary preview does not need to be running. Use Node.js 22.x (22.12 or newer), 24.x, or 26.x. Use the latest patch release in your chosen major version. CI runs type checks, coverage, builds and browser tests across all three majors; the container check runs once in the Node 24 job, matching the shipped image.
+
+`npm run typecheck` checks application code, unit/API tests, browser tests and fixtures, and the redesign evaluation harness. `npm run typecheck:tests` runs the test configuration alone. Its `/src/*` path mapping describes Vite imports executed inside browser tests; it does not replace runtime module resolution. Keep shared fixtures typed, and construct deliberately invalid or legacy payloads explicitly at the validation boundary instead of weakening the fixture type.
 
 Each test in `test/corpus.test.ts` and `e2e/smoke.spec.ts` exists because a
 specific defect reached a user; if you're fixing a bug, a new test that fails

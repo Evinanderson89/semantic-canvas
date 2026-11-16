@@ -65,6 +65,11 @@ test("a failed save keeps edits and an actionable error; retry succeeds", async 
   await expect(page.getByRole("alert")).toContainText("Save failed: Disk full");
   await expect(page.locator(".save-status")).toHaveText("Unsaved changes");
   await expect(page.locator(".tile")).toHaveCount(1);
+  await expect(page.getByRole("alert").getByRole("button", { name: "Download backup", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Dismiss notification", exact: true }).click();
+  await expect(page.locator(".document-notice")).toHaveCount(0);
+  await expect(page.locator(".save-status")).toHaveText("Unsaved changes");
+  await expect(page.locator(".tile")).toHaveCount(1);
   await page.unroute("**/api/dashboards");
   await save(page);
 });

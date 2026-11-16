@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { readResponse } from "./http.ts";
 
 interface PendingQ { id: string; question: string; options?: string[] }
 
@@ -14,32 +15,53 @@ export function AgentQuestions() {
   const [q, setQ] = useState<PendingQ | null>(null);
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const sending = useRef(false), pollEpoch = useRef(0);
+  const acknowledged = useRef(new Set<string>());
+  const submission = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    let stopped = false;
+    let stopped = false, sequence = 0;
+    const controller = new AbortController();
     const poll = () => {
-      fetch("/api/agent/questions").then((r) => r.json()).then((d) => {
-        if (stopped) return;
-        const next: PendingQ | null = (d.questions ?? [])[0] ?? null;
+      if (sending.current) return;
+      const epoch = pollEpoch.current, request = ++sequence;
+      fetch("/api/agent/questions", { signal: controller.signal }).then(readResponse<{ questions: PendingQ[] }>).then((d) => {
+        if (stopped || request !== sequence || epoch !== pollEpoch.current || sending.current) return;
+        if (!Array.isArray(d.questions) || d.questions.some(item => !item || typeof item.id !== "string" || typeof item.question !== "string"
+          || item.options !== undefined && (!Array.isArray(item.options) || item.options.some(option => typeof option !== "string")))) return;
+        const next = d.questions.find(item => !acknowledged.current.has(item.id)) ?? null;
         setQ((cur) => (cur?.id === next?.id ? cur : next));
       }).catch(() => {});
     };
     poll();
     const id = setInterval(poll, 1500);
-    return () => { stopped = true; clearInterval(id); };
+    return () => { stopped = true; controller.abort(); submission.current?.abort(); clearInterval(id); };
   }, []);
 
-  useEffect(() => { setAnswer(""); }, [q?.id]);
+  useEffect(() => { setAnswer(""); setError(null); }, [q?.id]);
 
   if (!q) return null;
 
-  const submit = (value: string) => {
-    if (!value.trim() || busy) return;
-    setBusy(true);
-    fetch(`/api/agent/questions/${q.id}/answer`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ answer: value }),
-    }).then(() => { setQ(null); setBusy(false); }).catch(() => setBusy(false));
+  const submit = async (value: string) => {
+    if (!value.trim() || sending.current) return;
+    const id = q.id, controller = new AbortController(); submission.current = controller;
+    sending.current = true; pollEpoch.current++; setBusy(true); setError(null); setAnswer(value);
+    try {
+      const response = await fetch(`/api/agent/questions/${encodeURIComponent(id)}/answer`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ answer: value }), signal: controller.signal,
+      }).then(readResponse<{ ok: boolean }>);
+      if (controller.signal.aborted) return;
+      if (response.ok !== true) throw new Error("The server did not confirm your answer. Try again.");
+      acknowledged.current.add(id);
+      setQ(current => current?.id === id ? null : current);
+    } catch (e: any) {
+      if (!controller.signal.aborted) setError(e?.message ?? "Could not send your answer. Try again.");
+    } finally {
+      sending.current = false;
+      if (!controller.signal.aborted) setBusy(false);
+    }
   };
 
   return (
@@ -59,16 +81,17 @@ export function AgentQuestions() {
               ))}
             </div>
           ) : (
-            <textarea autoFocus rows={3} value={answer} placeholder="Type your answer…"
+            <textarea autoFocus rows={3} value={answer} disabled={busy} aria-label="Your answer" placeholder="Type your answer…"
                       onChange={(e) => setAnswer(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit(answer); }} />
           )}
+          {error && <p className="err" role="alert">{error}</p>}
         </section>
-        {!q.options?.length && (
+        {(!q.options?.length || error) && (
           <div className="iv-foot">
             <span className="spacer" />
             <button className="primary" disabled={busy || !answer.trim()} onClick={() => submit(answer)}>
-              {busy ? "Sending…" : "Send"}
+              {busy ? "Sending…" : error ? "Retry answer" : "Send"}
             </button>
           </div>
         )}

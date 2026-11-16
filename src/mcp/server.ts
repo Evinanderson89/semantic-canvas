@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { TOOLS, asText } from "../agent/tools.ts";
+import { TOOLS, asText, runToolInContext } from "../agent/tools.ts";
 
 /**
  * The agentic port: an MCP server any MCP-capable agent (Claude Desktop,
@@ -16,11 +16,17 @@ import { TOOLS, asText } from "../agent/tools.ts";
 const server = new McpServer({ name: "semantic-canvas", version: "0.1.0" });
 
 for (const tool of TOOLS) {
-  const hasInput = Object.keys(tool.inputSchema).length > 0;
   server.registerTool(
     tool.name,
-    hasInput ? { description: tool.description, inputSchema: tool.inputSchema } : { description: tool.description },
-    async (input: any) => ({ content: [{ type: "text" as const, text: asText(await tool.handler(input)) }] }),
+    { description: tool.description, inputSchema: tool.inputSchema },
+    async (input: any, extra) => {
+      try {
+        const result = await runToolInContext({ signal: extra.signal }, () => tool.handler(input));
+        return { content: [{ type: "text" as const, text: asText(result) }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: "text" as const, text: error instanceof Error ? error.message : "The Canvas tool failed" }] };
+      }
+    },
   );
 }
 

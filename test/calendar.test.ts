@@ -17,7 +17,7 @@ import { join } from "node:path";
 // The model's calendar (docs/calendar.md): weeks, fiscal periods and time zones cut the same way everywhere.
 const sunday: Model = { ...base, calendar: { weekStart: "sunday", fiscalYearStartMonth: 1 } };
 const fiscalFeb: Model = { ...base, calendar: { weekStart: "monday", fiscalYearStartMonth: 2 } };
-const at = (iso: string) => new Date(`${iso}T12:00:00`);
+const at = (iso: string) => new Date(`${iso}T12:00:00Z`);
 
 describe("calendar in the compiler", () => {
   it("cuts weeks on the declared start day and fiscal periods on the declared month; default is unchanged", () => {

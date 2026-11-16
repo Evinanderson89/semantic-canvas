@@ -12,6 +12,17 @@ import { canvasSchema, dashboardSchema, saveSchema } from "../compiler/schema.ts
 import { DEFAULT_CANVAS } from "../canvas/presets.ts";
 import { folderSchema, viewSaveSchema, itemKindSchema, itemUpdateSchema, type LibraryFolder, type LibraryItem } from "../library/model.ts";
 
+// Older dashboard records stored only customized canvas fields. Read paths and
+// archive imports must agree on defaults without accepting malformed values.
+const storedCanvasSchema = z.preprocess(value => value !== null && typeof value === "object" && !Array.isArray(value)
+  ? { ...DEFAULT_CANVAS, ...value } : value, canvasSchema);
+function canvasForBackup(value: unknown) {
+  const parsed = storedCanvasSchema.safeParse(value);
+  // Keep invalid legacy data available for explicit repair; never erase it or
+  // silently replace a corrupt setting with a default during export.
+  return parsed.success ? parsed.data : value;
+}
+
 export interface DashboardScope { source: string; model: string }
 export class StoreConflict extends Error { status = 409; }
 const missing = () => Object.assign(new Error("Library item not found in this source"), { status: 404 });
@@ -34,6 +45,9 @@ export async function openStore(path?: string) {
   if (file !== ":memory:") await mkdir(dirname(file), { recursive: true });
   storeInstance = await DuckDBInstance.create(file);
   connection = await storeInstance.connect();
+  // Legacy TIMESTAMP columns have no zone. New canonical dates below are ISO
+  // UTC strings; keep incidental SQL timestamps in UTC as well.
+  await conn().run("SET TimeZone = 'UTC'");
   await conn().run(`CREATE TABLE IF NOT EXISTS dashboards (
     id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL, model VARCHAR NOT NULL,
     spec VARCHAR NOT NULL, canvas VARCHAR NOT NULL, updated_at TIMESTAMP NOT NULL
@@ -57,6 +71,19 @@ export async function openStore(path?: string) {
     dashboard_id VARCHAR NOT NULL, tile_id VARCHAR NOT NULL, audience VARCHAR NOT NULL,
     owner_id VARCHAR NOT NULL, body VARCHAR NOT NULL
   )`);
+  await conn().run(`CREATE TABLE IF NOT EXISTS dashboard_versions (
+    dashboard_id VARCHAR NOT NULL, source_id VARCHAR NOT NULL, revision INTEGER NOT NULL,
+    name VARCHAR NOT NULL, spec VARCHAR NOT NULL, canvas VARCHAR NOT NULL, saved_at VARCHAR,
+    PRIMARY KEY (dashboard_id, source_id, revision)
+  )`);
+  await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS updated_at_utc VARCHAR");
+  await conn().run("ALTER TABLE library_views ADD COLUMN IF NOT EXISTS updated_at_utc VARCHAR");
+  // Do not guess the timezone of old local timestamps. Version history was
+  // written as ISO UTC and can recover the current save only when it matches.
+  await conn().run(`UPDATE dashboards AS d SET updated_at_utc = v.saved_at FROM dashboard_versions AS v
+    WHERE d.updated_at_utc IS NULL AND d.id = v.dashboard_id AND d.source_id = v.source_id
+    AND d.revision = v.revision AND d.name = v.name AND d.spec = v.spec AND d.canvas = v.canvas
+    AND v.saved_at LIKE '%Z' AND try_cast(v.saved_at AS TIMESTAMPTZ) IS NOT NULL`);
   return file;
 }
 export async function closeStore() { await pending; connection?.closeSync(); storeInstance?.closeSync(); connection = null; storeInstance = null; }
@@ -69,8 +96,8 @@ export const migrateLegacySources = (scopes: DashboardScope[]) => serialized(asy
 });
 export const listDashboards = (scope: DashboardScope) => serialized(async () => {
   const r = await conn().runAndReadAll(
-    "SELECT id, name, updated_at, revision, folder_id FROM dashboards WHERE source_id = ? AND NOT coalesce(is_template, false) ORDER BY updated_at DESC", [scope.source]);
-  return r.getRows().map((row) => ({ id: String(row[0]), name: String(row[1]), updated_at: String(row[2]), revision: Number(row[3]), folderId: row[4] == null ? null : String(row[4]) }));
+    "SELECT id, name, updated_at_utc, revision, folder_id FROM dashboards WHERE source_id = ? AND NOT coalesce(is_template, false) ORDER BY try_cast(updated_at_utc AS TIMESTAMPTZ) DESC NULLS LAST, updated_at DESC, id", [scope.source]);
+  return r.getRows().map((row) => ({ id: String(row[0]), name: String(row[1]), updated_at: row[2] == null ? null : String(row[2]), revision: Number(row[3]), folderId: row[4] == null ? null : String(row[4]) }));
 });
 export const saveDashboard = (input: unknown, scope: DashboardScope) => serialized(async () => {
   const d = saveSchema.parse(input);
@@ -85,11 +112,14 @@ export const saveDashboard = (input: unknown, scope: DashboardScope) => serializ
     await requireFolder(folderId, scope.source);
     // Updating a large VARCHAR can trigger DuckDB's indexed UPDATE limitation.
     // Explicit delete + insert in one transaction preserves atomic replacement.
+    if (current) await archiveDashboard(d.id, scope.source);
     if (current) await conn().run("DELETE FROM dashboards WHERE id = ?", [d.id]);
+    const savedAt = new Date().toISOString();
     await conn().run(`INSERT INTO dashboards
-      (id, name, model, spec, canvas, updated_at, source_id, schema_version, revision, folder_id)
-      VALUES (?, ?, ?, ?, ?, now(), ?, ?, ?, ?)`, [d.id, d.name || d.spec.title, scope.model,
-      JSON.stringify(d.spec), JSON.stringify(d.canvas), scope.source, d.schemaVersion, revision, folderId]);
+      (id, name, model, spec, canvas, updated_at, source_id, schema_version, revision, folder_id, updated_at_utc)
+      VALUES (?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?)`, [d.id, d.name || d.spec.title, scope.model,
+      JSON.stringify(d.spec), JSON.stringify(d.canvas), scope.source, d.schemaVersion, revision, folderId, savedAt]);
+    await archiveDashboard(d.id, scope.source, savedAt);
     const tileIds = d.spec.tiles.map(t => t.id);
     await conn().run(`DELETE FROM chart_activity WHERE dashboard_id = ? AND source_id = ?${tileIds.length ? ` AND tile_id NOT IN (${tileIds.map(() => "?").join(",")})` : ""}`, [d.id, scope.source, ...tileIds]);
     await conn().run("COMMIT");
@@ -105,39 +135,87 @@ export const loadDashboard = (id: string, scope: DashboardScope) => serialized(a
   const spec = dashboardSchema.safeParse(JSON.parse(String(row[1])));
   if (!spec.success) { const issue = spec.error.issues[0]; throw Object.assign(new Error(`Dashboard "${id}" does not match the current schema (${issue?.path.join(".") || "spec"}: ${issue?.message ?? "invalid"}). Fix or remove it from a library backup, then restore.`), { status: 422 }); }
   return { id, name: String(row[0]), spec: spec.data,
-    canvas: canvasSchema.parse({ ...DEFAULT_CANVAS, ...JSON.parse(String(row[2])) }), revision: Number(row[3]), schemaVersion: 1, folderId: row[5] == null ? null : String(row[5]), isTemplate: Boolean(row[6]) };
+    canvas: storedCanvasSchema.parse(JSON.parse(String(row[2]))), revision: Number(row[3]), schemaVersion: 1, folderId: row[5] == null ? null : String(row[5]), isTemplate: Boolean(row[6]) };
+});
+/** Immutable design/query snapshots. Older current documents have no reliable timezone timestamp. */
+async function archiveDashboard(id: string, source: string, savedAt: string | null = null) {
+  await conn().run(`INSERT INTO dashboard_versions
+    SELECT id, source_id, revision, name, spec, canvas, coalesce(?, updated_at_utc) FROM dashboards
+    WHERE id = ? AND source_id = ? AND NOT coalesce(is_template, false)
+    ON CONFLICT DO NOTHING`, [savedAt, id, source]);
+}
+export const listDashboardVersions = (id: string, scope: DashboardScope) => serialized(async () => {
+  const current = (await conn().runAndReadAll("SELECT revision, name, spec, updated_at_utc FROM dashboards WHERE id = ? AND source_id = ? AND NOT coalesce(is_template, false)", [id, scope.source])).getRows()[0];
+  if (!current) throw missing();
+  const rows = (await conn().runAndReadAll("SELECT revision, name, saved_at, spec FROM dashboard_versions WHERE dashboard_id = ? AND source_id = ? ORDER BY revision DESC", [id, scope.source])).getRows();
+  if (!rows.some(r => Number(r[0]) === Number(current[0]))) rows.unshift([current[0], current[1], current[3], current[2]]);
+  return rows.map(r => ({ revision: Number(r[0]), name: String(r[1]), savedAt: r[2] == null ? null : String(r[2]), tiles: JSON.parse(String(r[3])).tiles.length, current: Number(r[0]) === Number(current[0]) }));
+});
+export const loadDashboardVersion = (id: string, revision: number, scope: DashboardScope) => serialized(async () => {
+  const current = (await conn().runAndReadAll("SELECT revision, name, spec, canvas, updated_at_utc FROM dashboards WHERE id = ? AND source_id = ? AND NOT coalesce(is_template, false)", [id, scope.source])).getRows()[0];
+  if (!current) throw missing();
+  const row = (await conn().runAndReadAll("SELECT name, spec, canvas, saved_at FROM dashboard_versions WHERE dashboard_id = ? AND source_id = ? AND revision = ?", [id, scope.source, revision])).getRows()[0]
+    ?? (Number(current[0]) === revision ? [current[1], current[2], current[3], current[4]] : undefined);
+  if (!row) throw missing();
+  return { id, revision, name: String(row[0]), spec: dashboardSchema.parse(JSON.parse(String(row[1]))), canvas: storedCanvasSchema.parse(JSON.parse(String(row[2]))), savedAt: row[3] == null ? null : String(row[3]) };
 });
 export const deleteDashboard = (id: string, scope: DashboardScope, revision: number) => serialized(async () => {
-  const r = await conn().runAndReadAll("DELETE FROM dashboards WHERE id = ? AND source_id = ? AND revision = ? RETURNING id", [id, scope.source, revision]);
-  if (!r.getRows().length) throw new StoreConflict("Dashboard changed or was not found; reopen it before deleting");
-  await conn().run("DELETE FROM chart_activity WHERE dashboard_id = ? AND source_id = ?", [id, scope.source]);
-  return { ok: true };
+  await conn().run("BEGIN TRANSACTION");
+  try {
+    const r = await conn().runAndReadAll("DELETE FROM dashboards WHERE id = ? AND source_id = ? AND revision = ? RETURNING id", [id, scope.source, revision]);
+    if (!r.getRows().length) throw new StoreConflict("Dashboard changed or was not found; reopen it before deleting");
+    await conn().run("DELETE FROM chart_activity WHERE dashboard_id = ? AND source_id = ?", [id, scope.source]);
+    await conn().run("DELETE FROM dashboard_versions WHERE dashboard_id = ? AND source_id = ?", [id, scope.source]);
+    await conn().run("COMMIT"); return { ok: true };
+  } catch (e) { await conn().run("ROLLBACK"); throw e; }
 });
 
+const backupDates = {
+  updatedAt: z.string().datetime().nullable(),
+  // Kept as a wall-clock value with explicitly unknown timezone. Never append Z.
+  legacyUpdatedAt: z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$/).nullable().default(null),
+};
 const backupDashboardSchema = z.object({
-  id: z.string().min(1), name: z.string(), source: z.string().nullable(), model: z.string(), spec: dashboardSchema, canvas: canvasSchema,
+  id: z.string().min(1), name: z.string(), source: z.string().nullable(), model: z.string(), spec: dashboardSchema, canvas: storedCanvasSchema,
   folderId: z.string().nullable().default(null), isTemplate: z.boolean().default(false),
-  revision: z.number().int().min(1), schemaVersion: z.literal(1), updatedAt: z.string().datetime(),
+  revision: z.number().int().min(1), schemaVersion: z.literal(1), ...backupDates,
 });
 // Documents are validated one by one so a legacy record names itself instead of failing the whole archive with a Zod dump.
-const librarySchema = z.object({ format: z.literal("semantic-canvas-library"), version: z.literal(1), createdAt: z.string(), dashboards: z.array(z.unknown()).max(100000), initializedSources: z.array(z.string().min(1)).max(10000).default([]), activity: z.array(activityRecordSchema).max(100000).default([]),
+const versionBackupSchema = z.object({ dashboardId: z.string().min(1), source: z.string().min(1), revision: z.number().int().positive(), name: z.string(), spec: dashboardSchema, canvas: storedCanvasSchema, savedAt: z.string().datetime().nullable() });
+const librarySchema = z.object({ versions: z.array(versionBackupSchema).max(100000).default([]), format: z.literal("semantic-canvas-library"), version: z.union([z.literal(1), z.literal(2)]), createdAt: z.string(), dashboards: z.array(z.unknown()).max(100000), initializedSources: z.array(z.string().min(1)).max(10000).default([]), activity: z.array(activityRecordSchema).max(100000).default([]),
   folders: z.array(folderSchema.extend({ source: z.string().min(1) })).max(10000).default([]),
-  views: z.array(viewSaveSchema.safeExtend({ source: z.string().min(1), model: z.string(), updatedAt: z.string().datetime() })).max(10000).default([]),
+  views: z.array(viewSaveSchema.safeExtend({ source: z.string().min(1), model: z.string(), ...backupDates })).max(10000).default([]),
 }).strict();
+function restoreDate(item: { updatedAt: string | null; legacyUpdatedAt: string | null }, version: 1 | 2, savedAt?: string | null) {
+  if (version === 1 && item.updatedAt === null) throw new Error("Version-1 backups require an updatedAt date");
+  const utc = version === 1 ? savedAt ?? null : item.updatedAt ?? savedAt ?? null;
+  const raw = utc ?? (version === 1 ? item.updatedAt!.replace("T", " ").replace(/Z$/, "") : item.legacyUpdatedAt);
+  if (raw === null) throw new Error("A backup with an unknown save time must retain legacyUpdatedAt");
+  return { utc, raw };
+}
 /** Serialized with saves; includes discussions and alert observations, never credentials or full query results. */
 export const exportLibrary = () => serialized(async () => {
-  const rows = (await conn().runAndReadAll("SELECT id, name, source_id, model, spec, canvas, revision, schema_version, updated_at::VARCHAR, folder_id, is_template FROM dashboards ORDER BY id")).getRows();
+  const rows = (await conn().runAndReadAll("SELECT id, name, source_id, model, spec, canvas, revision, schema_version, updated_at::VARCHAR, folder_id, is_template, updated_at_utc FROM dashboards ORDER BY id")).getRows();
   const folders = (await conn().runAndReadAll("SELECT id, name, parent_id, revision, source_id FROM library_folders ORDER BY id")).getRows().map(r => ({ ...folderFromRow(r), source: String(r[4]) }));
-  const views = (await conn().runAndReadAll("SELECT id, name, description, folder_id, spec, canvas, revision, source_id, model, updated_at::VARCHAR FROM library_views ORDER BY id")).getRows().map(r => ({ ...viewFromRow(r), source: String(r[7]), model: String(r[8]), updatedAt: new Date(String(r[9]) + "Z").toISOString() }));
+  const views = (await conn().runAndReadAll("SELECT id, name, description, folder_id, spec, canvas, revision, source_id, model, updated_at::VARCHAR, updated_at_utc FROM library_views ORDER BY id")).getRows().map(r => ({ ...viewFromRow(r), source: String(r[7]), model: String(r[8]), updatedAt: r[10] == null ? null : String(r[10]), legacyUpdatedAt: r[10] == null ? String(r[9]) : null }));
   const initializedSources = (await conn().runAndReadAll("SELECT source_id FROM library_initializations ORDER BY source_id")).getRows().map(r => String(r[0]));
-  return { format: "semantic-canvas-library", version: 1, initializedSources, createdAt: new Date().toISOString(), folders, views, activity: await readActivityRows(), dashboards: rows.map(r => ({ id: String(r[0]), name: String(r[1]), source: r[2] == null ? null : String(r[2]), model: String(r[3]), spec: JSON.parse(String(r[4])), canvas: JSON.parse(String(r[5])), revision: Number(r[6]), schemaVersion: Number(r[7]), updatedAt: new Date(String(r[8]) + "Z").toISOString(), folderId: r[9] == null ? null : String(r[9]), isTemplate: Boolean(r[10]) })) };
+  const versions = (await conn().runAndReadAll("SELECT dashboard_id, source_id, revision, name, spec, canvas, saved_at FROM dashboard_versions ORDER BY dashboard_id, revision")).getRows().map(r => ({ dashboardId: String(r[0]), source: String(r[1]), revision: Number(r[2]), name: String(r[3]), spec: JSON.parse(String(r[4])), canvas: canvasForBackup(JSON.parse(String(r[5]))), savedAt: r[6] == null ? null : String(r[6]) }));
+  return { format: "semantic-canvas-library", version: 2, versions, initializedSources, createdAt: new Date().toISOString(), folders, views, activity: await readActivityRows(), dashboards: rows.map(r => ({ id: String(r[0]), name: String(r[1]), source: r[2] == null ? null : String(r[2]), model: String(r[3]), spec: JSON.parse(String(r[4])), canvas: canvasForBackup(JSON.parse(String(r[5]))), revision: Number(r[6]), schemaVersion: Number(r[7]), updatedAt: r[11] == null ? null : String(r[11]), legacyUpdatedAt: r[11] == null ? String(r[8]) : null, folderId: r[9] == null ? null : String(r[9]), isTemplate: Boolean(r[10]) })) };
 });
 /** Restore is offline and only into an empty store. Never silently replaces company work. */
 export const restoreLibrary = (input: unknown) => serialized(async () => {
   const shell = librarySchema.parse(input), invalid: string[] = [];
   const dashboards = shell.dashboards.flatMap(d => { const parsed = backupDashboardSchema.safeParse(d); if (parsed.success) return [parsed.data]; invalid.push(String((d as any)?.id ?? "(missing id)")); return []; });
-  if (invalid.length) throw Object.assign(new Error(`Backup contains ${invalid.length} document${invalid.length === 1 ? "" : "s"} that do not match the current schema: ${invalid.slice(0, 20).join(", ")}. Export again after fixing them, or remove them from the backup.`), { status: 400 });
+  if (invalid.length) throw Object.assign(new Error(`Backup contains ${invalid.length} document${invalid.length === 1 ? " that does" : "s that do"} not match the current schema: ${invalid.slice(0, 20).join(", ")}. Export again after correcting the listed documents, or remove those documents from the backup.`), { status: 400 });
   const backup = { ...shell, dashboards };
+  const versionKeys = new Set<string>();
+  for (const v of backup.versions) {
+    const d = backup.dashboards.find(d => d.id === v.dashboardId && d.source === v.source && !d.isTemplate);
+    const key = JSON.stringify([v.dashboardId, v.source, v.revision]);
+    if (!d || v.revision > d.revision || versionKeys.has(key)) throw new Error("Backup contains invalid dashboard version references");
+    if (v.revision === d.revision && (JSON.stringify(v.spec) !== JSON.stringify(d.spec) || JSON.stringify(v.canvas) !== JSON.stringify(d.canvas) || v.name !== d.name)) throw new Error("Backup current version does not match its dashboard");
+    versionKeys.add(key);
+  }
   if (new Set(backup.dashboards.map(d => d.id)).size !== backup.dashboards.length) throw new Error("Backup contains duplicate dashboard IDs");
   if (new Set(backup.folders.map(f => f.id)).size !== backup.folders.length || new Set(backup.views.map(v => v.id)).size !== backup.views.length) throw new Error("Backup contains duplicate library IDs");
   for (const f of backup.folders) validateFolderTree(backup.folders.filter(x => x.source === f.source), f);
@@ -147,8 +225,16 @@ export const restoreLibrary = (input: unknown) => serialized(async () => {
   try {
     for (const source of new Set(backup.initializedSources)) await conn().run("INSERT INTO library_initializations VALUES (?)", [source]);
     for (const f of backup.folders) await conn().run("INSERT INTO library_folders VALUES (?, ?, ?, ?, ?)", [f.id, f.source, f.name, f.parentId, f.revision]);
-    for (const v of backup.views) await conn().run("INSERT INTO library_views VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [v.id, v.source, v.model, v.name, v.description, v.folderId, JSON.stringify(v.spec), JSON.stringify(v.canvas), v.revision, v.updatedAt]);
-    for (const d of backup.dashboards) await conn().run("INSERT INTO dashboards (id, name, source_id, model, spec, canvas, revision, schema_version, updated_at, folder_id, is_template) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [d.id, d.name, d.source, d.model, JSON.stringify(d.spec), JSON.stringify(d.canvas), d.revision, d.schemaVersion, d.updatedAt, d.folderId, d.isTemplate]);
+    for (const v of backup.views) {
+      const date = restoreDate(v, backup.version);
+      await conn().run("INSERT INTO library_views (id, source_id, model, name, description, folder_id, spec, canvas, revision, updated_at, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [v.id, v.source, v.model, v.name, v.description, v.folderId, JSON.stringify(v.spec), JSON.stringify(v.canvas), v.revision, date.raw, date.utc]);
+    }
+    for (const d of backup.dashboards) {
+      const savedAt = backup.versions.find(v => v.dashboardId === d.id && v.source === d.source && v.revision === d.revision)?.savedAt;
+      const date = restoreDate(d, backup.version, savedAt);
+      await conn().run("INSERT INTO dashboards (id, name, source_id, model, spec, canvas, revision, schema_version, updated_at, folder_id, is_template, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [d.id, d.name, d.source, d.model, JSON.stringify(d.spec), JSON.stringify(d.canvas), d.revision, d.schemaVersion, date.raw, d.folderId, d.isTemplate, date.utc]);
+    }
+    for (const v of backup.versions) await conn().run("INSERT INTO dashboard_versions VALUES (?, ?, ?, ?, ?, ?, ?)", [v.dashboardId, v.source, v.revision, v.name, JSON.stringify(v.spec), JSON.stringify(v.canvas), v.savedAt]);
     for (const r of backup.activity) {
       const d = backup.dashboards.find(d => d.id === r.dashboardId && d.source === r.source);
       if (!d || !d.spec.tiles.some(t => t.id === r.tileId)) throw new Error("Activity references a missing chart");
@@ -192,8 +278,8 @@ export const listCoreLibrary = (scope: DashboardScope) => serialized(async () =>
   const items: LibraryItem[] = [];
   for (const kind of ["dashboard", "view"] as const) {
     const table = kind === "dashboard" ? "dashboards" : "library_views";
-    const rows = (await conn().runAndReadAll(`SELECT id, name, folder_id, revision, updated_at::VARCHAR, json_array_length(spec, '$.tiles'), ${kind === "view" ? "description" : "json_extract_string(spec, '$.description')"}, ${kind === "dashboard" ? "is_template" : "false"} FROM ${table} WHERE source_id = ? ORDER BY lower(name), id`, [scope.source])).getRows();
-    items.push(...rows.map(r => ({ id: String(r[0]), kind, name: String(r[1]), folderId: r[2] == null ? null : String(r[2]), revision: Number(r[3]), updatedAt: new Date(String(r[4]) + "Z").toISOString(), tileCount: Number(r[5]), description: r[6] == null ? "" : String(r[6]), ...(r[7] ? { isTemplate: true } : {}) })));
+    const rows = (await conn().runAndReadAll(`SELECT id, name, folder_id, revision, updated_at_utc, json_array_length(spec, '$.tiles'), ${kind === "view" ? "description" : "json_extract_string(spec, '$.description')"}, ${kind === "dashboard" ? "is_template" : "false"} FROM ${table} WHERE source_id = ? ORDER BY lower(name), id`, [scope.source])).getRows();
+    items.push(...rows.map(r => ({ id: String(r[0]), kind, name: String(r[1]), folderId: r[2] == null ? null : String(r[2]), revision: Number(r[3]), updatedAt: r[4] == null ? null : String(r[4]), tileCount: Number(r[5]), description: r[6] == null ? "" : String(r[6]), ...(r[7] ? { isTemplate: true } : {}) })));
   }
   return { folders, items };
 });
@@ -228,7 +314,7 @@ export const saveLibraryView = (input: unknown, scope: DashboardScope) => serial
   await conn().run("BEGIN TRANSACTION");
   try {
     if (current) await conn().run("DELETE FROM library_views WHERE id = ?", [v.id]);
-    await conn().run("INSERT INTO library_views VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now())", [v.id, scope.source, scope.model, v.name, v.description, v.folderId, JSON.stringify(v.spec), JSON.stringify(v.canvas), v.revision + 1]);
+    await conn().run("INSERT INTO library_views (id, source_id, model, name, description, folder_id, spec, canvas, revision, updated_at, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now(), ?)", [v.id, scope.source, scope.model, v.name, v.description, v.folderId, JSON.stringify(v.spec), JSON.stringify(v.canvas), v.revision + 1, new Date().toISOString()]);
     await conn().run("COMMIT"); return { ok: true, id: v.id, revision: v.revision + 1 };
   } catch (e) { await conn().run("ROLLBACK"); throw e; }
 });
@@ -244,11 +330,14 @@ export const updateLibraryItem = (kindInput: unknown, id: string, input: unknown
   // A replacement transaction avoids DuckDB indexed VARCHAR update limits and preserves all columns.
   await conn().run("BEGIN TRANSACTION");
   try {
+    if (kind === "dashboard") await archiveDashboard(id, scope.source);
     await conn().run(`CREATE TEMP TABLE library_item_change AS SELECT * FROM ${table} WHERE id = ?`, [id]);
-    await conn().run("UPDATE library_item_change SET name = ?, spec = ?, folder_id = ?, revision = ?, updated_at = now()", [name, JSON.stringify(spec), folderId, patch.revision + 1]);
+    const savedAt = new Date().toISOString();
+    await conn().run("UPDATE library_item_change SET name = ?, spec = ?, folder_id = ?, revision = ?, updated_at = now(), updated_at_utc = ?", [name, JSON.stringify(spec), folderId, patch.revision + 1, savedAt]);
     await conn().run(`DELETE FROM ${table} WHERE id = ?`, [id]);
     await conn().run(`INSERT INTO ${table} SELECT * FROM library_item_change`);
     await conn().run("DROP TABLE library_item_change");
+    if (kind === "dashboard") await archiveDashboard(id, scope.source, savedAt);
     await conn().run("COMMIT"); return { ok: true, revision: patch.revision + 1 };
   } catch (e) { await conn().run("ROLLBACK"); throw e; }
 });
@@ -294,7 +383,41 @@ export const mutateActivity = (scope: ActivityScope, tileId: string, change: (ro
 /** One transaction per source. Renames, moves and deletions survive future boots and backups. */
 export const initializeCoreLibrary = (scope: DashboardScope, model: Model) => serialized(async () => {
   const skipped: string[] = [];
-  if ((await conn().runAndReadAll("SELECT source_id FROM library_initializations WHERE source_id = ?", [scope.source])).getRows().length) return skipped;
+  if ((await conn().runAndReadAll("SELECT source_id FROM library_initializations WHERE source_id = ?", [scope.source])).getRows().length) {
+    // Upgrade only untouched built-in starters. User saves, renames, moves and removals stay intact.
+    for (const d of libraryStarters(model)) {
+      const rows = (await conn().runAndReadAll("SELECT id, spec, canvas, revision FROM dashboards WHERE source_id = ? AND is_template = true AND name = ?", [scope.source, d.name])).getRows();
+      // The prior automatic refresh incremented the revision, so revision=1
+      // alone misses installations already upgraded to the curated library.
+      // Recognize only exact preceding bundled compositions, not arbitrary
+      // revision-2 documents imported or customized by the user.
+      const preceding = d.name === "SaaS overview" ? { ...d.spec, tiles: d.spec.tiles.map(tile => {
+        if (tile.id !== "retention-trend") return tile;
+        return { ...tile, format: { palette: "default", padding: 18 } };
+      }) } : ["Subscriptions", "Subscription add-ons", "Events & engagement"].includes(d.name) ? { ...d.spec, tiles: d.spec.tiles.map(tile => {
+        if (tile.id === "revenue-share") return { ...tile, title: "Which plans contribute revenue?", dimensions: ["dim_plans.plan_name"] };
+        if (tile.id === "addon-share") return { ...tile, title: "Add-on revenue mix by plan", dimensions: ["dim_plans.plan_name"] };
+        if (tile.id === "activity-share") return { ...tile, format: { ...tile.format, palette: "cool" } };
+        return tile;
+      }) } : null;
+      const currentSpec = JSON.stringify(dashboardSchema.parse(d.spec)), currentCanvas = JSON.stringify(canvasSchema.parse(d.canvas));
+      for (const r of rows) {
+        const storedSpec = JSON.stringify(dashboardSchema.parse(JSON.parse(String(r[1])))), storedCanvas = JSON.stringify(canvasSchema.parse(JSON.parse(String(r[2]))));
+        const knownPreceding = preceding && storedSpec === JSON.stringify(dashboardSchema.parse(preceding)) && storedCanvas === currentCanvas;
+        if (Number(r[3]) !== 1 && !knownPreceding || storedSpec === currentSpec && storedCanvas === currentCanvas) continue;
+        await conn().run("BEGIN TRANSACTION");
+        try {
+          await conn().run("CREATE TEMP TABLE starter_upgrade AS SELECT * FROM dashboards WHERE id = ?", [r[0]]);
+          await conn().run("UPDATE starter_upgrade SET spec = ?, canvas = ?, revision = revision + 1, updated_at = now(), updated_at_utc = ?", [JSON.stringify(d.spec), JSON.stringify(d.canvas), new Date().toISOString()]);
+          await conn().run("DELETE FROM dashboards WHERE id = ?", [r[0]]);
+          await conn().run("INSERT INTO dashboards SELECT * FROM starter_upgrade");
+          await conn().run("DROP TABLE starter_upgrade");
+          await conn().run("COMMIT");
+        } catch (e) { await conn().run("ROLLBACK"); throw e; }
+      }
+    }
+    return skipped;
+  }
   const starters = libraryStarters(model), folders = await readFolders(scope.source);
   const ids = new Map<string, string>();
   await conn().run("BEGIN TRANSACTION");
@@ -314,8 +437,8 @@ export const initializeCoreLibrary = (scope: DashboardScope, model: Model) => se
       const key = folderForDashboard(model, spec.data);
       if (key) await conn().run("UPDATE dashboards SET folder_id = ? WHERE id = ? AND source_id = ?", [ids.get(key)!, String(row[0]), scope.source]);
     }
-    for (const d of starters) await conn().run(`INSERT INTO dashboards (id, name, model, spec, canvas, updated_at, source_id, schema_version, revision, folder_id, is_template)
-      VALUES (?, ?, ?, ?, ?, now(), ?, 1, 1, ?, true)`, [randomUUID(), d.name, scope.model, JSON.stringify(d.spec), JSON.stringify(d.canvas), scope.source, ids.get(d.folder)!]);
+    for (const d of starters) await conn().run(`INSERT INTO dashboards (id, name, model, spec, canvas, updated_at, source_id, schema_version, revision, folder_id, is_template, updated_at_utc)
+      VALUES (?, ?, ?, ?, ?, now(), ?, 1, 1, ?, true, ?)`, [randomUUID(), d.name, scope.model, JSON.stringify(d.spec), JSON.stringify(d.canvas), scope.source, ids.get(d.folder)!, new Date().toISOString()]);
     await conn().run("INSERT INTO library_initializations VALUES (?)", [scope.source]);
     await conn().run("COMMIT"); return skipped;
   } catch (error) { await conn().run("ROLLBACK"); throw error; }
