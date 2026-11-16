@@ -24,6 +24,7 @@
     "check": "npm run typecheck && npm run test && npm run build && npm run e2e",
     "e2e": "playwright test",
     "test:container": "node scripts/docker-smoke.mjs",
+    "check:keycloak": "node scripts/keycloak-acceptance.mjs",
     "check:container": "docker build -t semantic-canvas:company-preview . && npm run test:container",
     "serve": "SC_SERVE_UI=true tsx src/server.ts",
     "backup": "tsx scripts/library.ts backup",
