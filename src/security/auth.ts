@@ -27,7 +27,9 @@ export interface ForwardedAuth {
 }
 interface Session { identity: Identity; csrf: string; expires: number; forwarded?: ForwardedAuth }
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
-export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string; scopes: string; sessionSeconds: number; access?: AccessConfig;
+export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string;
+  /** How the client secret reaches the token endpoint. Unset: body, or header when discovery advertises only that. */
+  clientAuth?: "client_secret_post" | "client_secret_basic"; scopes: string; sessionSeconds: number; access?: AccessConfig;
   /** Shared with the gateway's control API; verifies the data policy it signs onto each request (gateway-platform/docs/policy.md). Absent: policies are not read. */
   policySecret?: string;
   /** This app's slug at the gateway (the first label of its public host, `semantic-canvas` at semantic-canvas.apps.example.com); a data policy signed for another app is not ours. */
@@ -63,6 +65,12 @@ function verifyGatewayPolicy(body: string | undefined, sig: string | undefined, 
   return { rules, expires: payload.exp * 1000 };
 }
 const token = () => randomBytes(32).toString("base64url");
+/** A short provider or library code such as invalid_client. Never a message, URL, token or claim. */
+function failureCode(error: unknown): string {
+  const e = error as { error?: unknown; code?: unknown; name?: unknown } | null;
+  const code = [e?.error, e?.code, e?.name].find(value => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value));
+  return typeof code === "string" ? code : "unknown";
+}
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
 const cookie = (req: Request, name: string) => req.headers.cookie?.split(";").map(x => x.trim()).find(x => x.startsWith(`${name}=`))?.slice(name.length + 1);
 export const identityOf = (req: Request): Identity | undefined => (req as any).identity;
@@ -96,7 +104,9 @@ export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
   if (url.protocol !== "https:" || issuer.protocol !== "https:") throw new Error("Team sign-in requires HTTPS for the public URL and identity provider");
   if (url.pathname !== "/" || url.search || url.hash || url.username || url.password || issuer.username || issuer.password || issuer.search || issuer.hash) throw new Error("Use a public origin without a path and a valid OIDC issuer URL");
   if (!config.scopes.split(/\s+/).includes("openid")) throw new Error("SC_OIDC_SCOPES must include openid");
-  return { ...config, publicUrl: url.origin, issuer: issuer.href, clientId: env.SC_OIDC_CLIENT_ID, clientSecret: env.SC_OIDC_CLIENT_SECRET,
+  const clientAuth = env.SC_OIDC_CLIENT_AUTH?.trim() || undefined;
+  if (clientAuth !== undefined && clientAuth !== "client_secret_post" && clientAuth !== "client_secret_basic") throw new Error("SC_OIDC_CLIENT_AUTH must be client_secret_post or client_secret_basic");
+  return { ...config, publicUrl: url.origin, issuer: issuer.href, clientId: env.SC_OIDC_CLIENT_ID, clientSecret: env.SC_OIDC_CLIENT_SECRET, ...(clientAuth ? { clientAuth } : {}),
     access: accessSchema.parse(YAML.parse(await readFile(env.SC_ACCESS_PATH!, "utf8"))) };
 }
 
@@ -112,7 +122,19 @@ export class CompanyAuth {
   constructor(readonly config: AuthConfig, private audit: (event: string, data?: Record<string, string | number | boolean>) => void = () => {}) {}
   async start() {
     if (this.config.mode === "gateway") this.gatewayKeys = createRemoteJWKSet(new URL(this.config.jwksUri!), { timeoutDuration: 5000 });
-    if (this.config.mode === "team") this.provider = await oidc.discovery(new URL(this.config.issuer!), this.config.clientId!, this.config.clientSecret!, undefined, { timeout: 10 });
+    if (this.config.mode === "team") {
+      const secret = this.config.clientSecret!;
+      const connect = (method: NonNullable<AuthConfig["clientAuth"]>) => oidc.discovery(new URL(this.config.issuer!), this.config.clientId!, secret,
+        method === "client_secret_basic" ? oidc.ClientSecretBasic(secret) : oidc.ClientSecretPost(secret), { timeout: 10 });
+      let provider = await connect(this.config.clientAuth ?? "client_secret_post");
+      // Some providers accept the secret only in the Authorization header. Discovery can show that;
+      // a per-application setting it cannot show needs SC_OIDC_CLIENT_AUTH.
+      const advertised = provider.serverMetadata().token_endpoint_auth_methods_supported;
+      if (!this.config.clientAuth && advertised && !advertised.includes("client_secret_post") && advertised.includes("client_secret_basic")) provider = await connect("client_secret_basic");
+      // Verify the ID token signature against the provider's keys, not only the TLS channel it arrived on.
+      oidc.enableNonRepudiationChecks(provider);
+      this.provider = provider;
+    }
   }
   private prune() { const now = Date.now(); for (const [k, v] of this.sessions) if (v.expires < now) this.sessions.delete(k); for (const [k, v] of this.attempts) if (v.expires < now) this.attempts.delete(k); for (const [k, v] of this.lastVerified) if (v.exp < now) this.lastVerified.delete(k); }
   /** The owner's identity while they still hold access: an unexpired team session, or in gateway mode a token verified since the server started that has not expired. */
@@ -211,7 +233,7 @@ export class CompanyAuth {
         if (!identity) { this.audit("auth.access_denied"); return res.status(403).send("Your account has no Semantic Canvas access. Ask your administrator to assign a group."); }
         const old = cookie(req, "__Host-sc_session"); if (old) this.sessions.delete(digest(old));
         this.issue(identity, res); this.audit("auth.signed_in", { actor: identity.id, role: identity.role }); res.redirect("/");
-      } catch { this.audit("auth.callback_failed"); res.status(400).send("Sign-in could not be verified. Return to the app and try again."); }
+      } catch (error) { this.audit("auth.callback_failed", { errorType: failureCode(error) }); res.status(400).send("Sign-in could not be verified. Return to the app and try again."); }
     });
     app.post("/api/auth/logout", (req, res) => {
       const session = this.session(req);

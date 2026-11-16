@@ -49,6 +49,16 @@ The team project uses separate volumes from the demo and starts with no sources.
 
 Caddy manages HTTPS certificates and forwards the original Host header. The app has no published host port in this recipe. If using another proxy, preserve Host exactly as `SC_PUBLIC_URL`, terminate TLS, and keep the upstream private. Do not log full callback URLs, cookies, Authorization headers or request bodies at the proxy.
 
+### Identity provider notes
+
+These notes come from simulated provider profiles in `test/identityProviderProfiles.test.ts`, which reproduce each vendor's documented issuer, client authentication and ID-token shapes. They are not acceptance against a real Okta or Microsoft Entra tenant; test with yours before onboarding users.
+
+- **Client authentication.** Canvas sends the client secret in the token request body (`client_secret_post`) unless discovery advertises only the Authorization-header method. Okta advertises both, but each application accepts only the method it is registered with, and web applications default to the header method: set `SC_OIDC_CLIENT_AUTH=client_secret_basic` for those. A mismatch fails sign-in with an `auth.callback_failed` record whose `errorType` is `invalid_client`.
+- **Okta groups.** Group names appear only after you add a groups claim to the application or authorization server. Without it every account is refused.
+- **Entra groups.** The `groups` claim carries group object IDs, not names; bind those IDs. An account in more groups than a token can carry receives a Graph reference instead of a `groups` claim. Canvas does not call Graph, so that account is refused unless it has a subject binding. Entra app roles avoid the limit: assign roles and set `groupsClaim: roles`.
+- **Subject bindings** match the token's `sub`. In Entra that value is specific to the application and differs from the object ID shown in the portal.
+- **Signatures and key rotation.** Canvas verifies the ID token signature against the provider's published keys. A provider that publishes its next key before signing with it rotates without interruption. If a token is signed with a key Canvas has not seen and keys were fetched under a minute ago, sign-in fails closed until the next fetch is allowed.
+
 ### Roles and sessions
 
 | Capability | Viewer | Editor | Administrator |
