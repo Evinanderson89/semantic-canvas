@@ -7,6 +7,7 @@ import type { CanvasSpec } from "../canvas/presets.ts";
 import type { Model } from "../semantic/model.ts";
 import type { CanvasProposal } from "../canvas/proposals.ts";
 import { validateRedesign } from "../suggest/redesign.ts";
+import { rationaleIssues, type RationaleIssue } from "../canvas/rationaleChecks.ts";
 import { rememberDecision, type ReviewDecision } from "../suggest/reviewSession.ts";
 import { fingerprint } from "./document.ts";
 import { readResponse } from "./http.ts";
@@ -20,7 +21,7 @@ import { DataFindings } from "./MetricEvidence.tsx";
 import { renderMarkdown } from "./markdown.tsx";
 import type { DrillEntry } from "./drill.ts";
 
-type Preview = { proposal: CanvasProposal; spec: DashboardSpec; canvas: CanvasSpec; before: DashboardSpec; expected: string; context: string; explanation: string };
+type Preview = { proposal: CanvasProposal; spec: DashboardSpec; canvas: CanvasSpec; before: DashboardSpec; expected: string; context: string; explanation: string; rationaleWarnings: RationaleIssue[] };
 export function AiRedesign({ spec, canvas, model, available, canConfigure, onConfigure, onClose, onApply, queryContext, filtersByTile, drills, resolveFilters, resolveScopeWarnings, activeTabId, filterContext }: {
   activeTabId?: string; filterContext?: string;
   resolveFilters?: (spec: DashboardSpec) => Record<string, FilterSpec[]>;
@@ -65,7 +66,9 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, onCon
       if (controller.signal.aborted || latest.current !== snapshot) return;
       if (!result.proposal) { setPreview(null); setExplanation(result.text || "The assistant did not find a useful redesign. Try a more specific goal."); return; }
       const next = validateRedesign(spec, canvas, result.proposal, model, activeTabId);
-      setPreview({ ...next, proposal: result.proposal, before: spec, expected: fingerprint(spec, canvas), context: snapshot, explanation: result.text || "" });
+      setPreview({ ...next, proposal: result.proposal, before: spec, expected: fingerprint(spec, canvas), context: snapshot, explanation: result.text || "",
+        // Recalculated here from the documents and the review's query ledger, so the warning does not depend on the server reporting it.
+        rationaleWarnings: rationaleIssues(spec, next.spec, result.proposal.reason, Array.isArray(result.research) ? result.research : result.proposal ? [] : undefined) });
       setView("after");
     } catch (e: any) { if (!controller.signal.aborted) setError(aiError(e)); }
     finally { if (request.current === controller) setBusy(false); }
@@ -102,7 +105,11 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, onCon
         {busy && <div role="status"><p>Reviewing the canvas and governed metrics, then preparing changes you can inspect.</p><button className="link" onClick={() => { request.current?.abort(); setBusy(false); }}>Cancel generation</button></div>}
         {error && <div><p className="err" role="alert">{error}</p>{canConfigure && <button className="review-action" onClick={onConfigure}>Check AI connection</button>}</div>}
         {explanation && <div className="ai-redesign-explanation">{renderMarkdown(explanation)}</div>}
-        {preview && <div className="ai-redesign-explanation"><h3>{preview.proposal.title}</h3>{!stale && impact && <RedesignImpact impact={impact} />}<details><summary>AI design rationale</summary><p>{preview.proposal.reason}</p>{renderMarkdown(preview.explanation)}</details></div>}
+        {preview && <div className="ai-redesign-explanation"><h3>{preview.proposal.title}</h3>{!stale && impact && <RedesignImpact impact={impact} />}{!!preview.rationaleWarnings.length && <div className="rationale-warnings" role="note" aria-label="Rationale checks">
+          <strong>Check this rationale before relying on it</strong>
+          <ul>{preview.rationaleWarnings.map(issue => <li key={issue.id}>{issue.message}</li>)}</ul>
+          <small>Calculated from your dashboard and this review’s queries. The rationale below is shown as the AI wrote it; the proposed charts are checked separately.</small>
+        </div>}<details open={!!preview.rationaleWarnings.length || undefined}><summary>AI design rationale</summary><p>{preview.proposal.reason}</p>{renderMarkdown(preview.explanation)}</details></div>}
         {!preview && !explanation && <div className="ai-redesign-imagine"><h3>More than moving boxes</h3><p>Turn an unhelpful breakdown into a trend. Put related evidence together. Bring the key numbers into focus.</p><small>The AI will propose changes based on your actual canvas and available metrics.</small></div>}
       </section>
       <section className="ai-redesign-preview" aria-label="Dashboard redesign preview">
