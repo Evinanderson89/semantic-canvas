@@ -110,7 +110,9 @@ try {
   console.log(`Provider: ${version} (${image}); issuer ${issuer}`);
   check("provider discovery issuer matches the configured issuer exactly", discovery.issuer === issuer);
 
-  const canvas = await startCanvas("post", issuer);
+  // A short re-check interval so provider-side changes are observable within this run (default: 300 seconds).
+  const recheckSeconds = 10;
+  const canvas = await startCanvas("post", issuer, { SC_SESSION_RECHECK_SECONDS: String(recheckSeconds) });
   // --- sign-in and roles ------------------------------------------------------
   check("unauthenticated API request is refused", (await canvas.call("/api/model")).status === 401);
   const admin = await signIn(canvas, "ada-admin");
@@ -142,12 +144,18 @@ try {
   const movingId = json((await adminApi(`/users?username=moving-viewer&exact=true`)).text)?.[0]?.id;
   const groupId = json((await adminApi(`/groups?search=semantic-canvas-viewers`)).text)?.find(g => g.name === "semantic-canvas-viewers")?.id;
   const removed = await adminApi(`/users/${movingId}/groups/${groupId}`, { method: "DELETE" });
-  const stillOpen = (await canvas.call("/api/model", { headers: headers(moving) })).status;
   const relogin = await signIn(canvas, "moving-viewer");
   check("group removal at the provider is enforced at the next sign-in", moving.session?.user?.role === "viewer" && removed.status === 204 && relogin.status === 403);
-  // Recorded as a known limit, not a pass/fail expectation: the earlier session is not ended by the provider change.
-  results.push({ observation: "session opened before the group removal", stillAuthorized: stillOpen === 200, note: "Canvas does not re-check the provider during a session; it ends at expiry, sign-out or restart." });
-  console.log(`NOTE  session opened before the group removal still authorized: ${stillOpen === 200}`);
+  // Open sessions: one whose group was removed, one whose account is disabled, one unchanged.
+  const vicId = json((await adminApi(`/users?username=vic-viewer&exact=true`)).text)?.[0]?.id;
+  const disabledNow = await adminApi(`/users/${vicId}`, { method: "PUT", body: JSON.stringify({ enabled: false }) });
+  await new Promise(r => setTimeout(r, (recheckSeconds + 2) * 1000));
+  const afterRemoval = (await canvas.call("/api/model", { headers: headers(moving) })).status;
+  const afterDisable = (await canvas.call("/api/model", { headers: headers(viewer) })).status;
+  const unchanged = (await canvas.call("/api/operations/status", { headers: headers(admin) })).status;
+  check("an open session ends within the re-check interval after its group is removed at the provider", afterRemoval === 401, `status ${afterRemoval}`);
+  check("an open session ends within the re-check interval after its account is disabled at the provider", disabledNow.status === 204 && afterDisable === 401, `status ${afterDisable}`);
+  check("an unchanged account's open session continues through a provider re-check", unchanged === 200 && /"event":"auth.session_(access_changed|revoked)"/.test(canvas.output()) && !canvas.output().includes("auth.recheck_unavailable"), `status ${unchanged}`);
 
   // Rotate the realm signing key: a higher-priority key becomes the active signer. Canvas has cached the old keys.
   const rotated = await adminApi("/components", { method: "POST", body: JSON.stringify({ name: `rotated-${Date.now()}`, providerId: "rsa-generated", providerType: "org.keycloak.keys.KeyProvider",
