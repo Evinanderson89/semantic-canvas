@@ -46,6 +46,23 @@ it("generates absolute, secret-free configuration for the actual API port", () =
   expect(setup.command).toContain("claude mcp add-json --scope user semantic-canvas");
 });
 
+it("generates ready-to-copy, secret-free onboarding configurations for Codex, Cursor, Antigravity, VS Code, Gemini CLI, and generic MCP clients", () => {
+  const setup = claudeSetup(59231);
+  const expectedEntry = setup.desktop.mcpServers["semantic-canvas"];
+  expect(setup.clients.codex.configToml).toContain("[mcp_servers.semantic-canvas]");
+  expect(setup.clients.codex.configToml).toContain(`command = ${JSON.stringify(process.execPath)}`);
+  expect(setup.clients.codex.configToml).toContain(JSON.stringify(resolve("src/mcp/server.ts")));
+  expect(setup.clients.codex.configToml).toContain('env = { SEMANTIC_CANVAS_URL = "http://127.0.0.1:59231" }');
+  expect(setup.clients.codex.command).toContain("codex mcp add semantic-canvas --env 'SEMANTIC_CANVAS_URL=http://127.0.0.1:59231' --");
+  expect(setup.clients.cursor.mcpJson).toEqual({ mcpServers: { "semantic-canvas": expectedEntry } });
+  expect(setup.clients.antigravity.mcpConfigJson).toEqual({ mcpServers: { "semantic-canvas": expectedEntry } });
+  expect(setup.clients.vscode.mcpJson).toEqual({ servers: { "semantic-canvas": { type: "stdio", ...expectedEntry } } });
+  expect(setup.clients.gemini.settingsJson).toEqual({ mcpServers: { "semantic-canvas": expectedEntry } });
+  expect(setup.clients.generic.mcpJson).toEqual({ mcpServers: { "semantic-canvas": expectedEntry } });
+  expect(setup.clients.generic.command).toContain("'SEMANTIC_CANVAS_URL=http://127.0.0.1:59231'");
+  expect(JSON.stringify(setup.clients)).not.toMatch(/API_KEY|SECRET|PASSWORD|TOKEN/i);
+});
+
 it("describes oversized JSON as a request limit rather than mislabelling every upload as a dashboard", async () => {
   const response = await fetch(url + "/api/setup/model", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: "a".repeat(8 * 1024 * 1024) }) });
   expect(response.status).toBe(413);

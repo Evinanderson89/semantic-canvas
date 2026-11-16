@@ -23,8 +23,16 @@ function canvasForBackup(value: unknown) {
   return parsed.success ? parsed.data : value;
 }
 
-export interface DashboardScope { source: string; model: string }
+export interface DashboardScope {
+  source: string;
+  model: string;
+  actorId?: string;
+  actorRole?: "viewer" | "editor" | "admin";
+  actorName?: string;
+  enforceLock?: boolean;
+}
 export class StoreConflict extends Error { status = 409; }
+const LOCKED_DASHBOARD_MESSAGE = "This dashboard is locked by its owner. Ask the owner or an administrator to unlock it, or save a copy.";
 const missing = () => Object.assign(new Error("Library item not found in this source"), { status: 404 });
 let connection: DuckDBConnection | null = null;
 let storeInstance: DuckDBInstance | null = null;
@@ -58,6 +66,12 @@ export async function openStore(path?: string) {
   await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS revision INTEGER DEFAULT 1");
   await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS folder_id VARCHAR");
   await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS is_template BOOLEAN DEFAULT false");
+  await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS owner_id VARCHAR");
+  await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS owner_name VARCHAR");
+  await conn().run("ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS locked BOOLEAN DEFAULT false");
+  await conn().run(`CREATE TABLE IF NOT EXISTS audit_events (
+    id VARCHAR, ts VARCHAR, event VARCHAR, actor VARCHAR, details VARCHAR
+  )`);
   await conn().run("CREATE TABLE IF NOT EXISTS library_initializations (source_id VARCHAR PRIMARY KEY)");
   await conn().run(`CREATE TABLE IF NOT EXISTS library_folders (
     id VARCHAR PRIMARY KEY, source_id VARCHAR NOT NULL, name VARCHAR NOT NULL, parent_id VARCHAR, revision INTEGER NOT NULL
@@ -87,6 +101,25 @@ export async function openStore(path?: string) {
   return file;
 }
 export async function closeStore() { await pending; connection?.closeSync(); storeInstance?.closeSync(); connection = null; storeInstance = null; }
+export const recordAuditEvent = (event: string, data: Record<string, unknown> = {}) => serialized(async () => {
+  if (!connection) return null;
+  const id = randomUUID(), ts = new Date().toISOString();
+  const actor = typeof data.actor === "string" && data.actor ? data.actor : null;
+  const details = JSON.stringify(data);
+  await conn().run("INSERT INTO audit_events (id, ts, event, actor, details) VALUES (?, ?, ?, ?, ?)", [id, ts, event, actor, details]);
+  return { id, ts, event, actor, details: data };
+});
+export const listAuditEvents = (limit = 100) => serialized(async () => {
+  const cap = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 100)));
+  const rows = (await conn().runAndReadAll("SELECT id, ts, event, actor, details FROM audit_events ORDER BY ts DESC, rowid DESC LIMIT ?", [cap])).getRows();
+  return rows.map((row) => ({
+    id: String(row[0]),
+    ts: String(row[1]),
+    event: String(row[2]),
+    actor: row[3] == null ? null : String(row[3]),
+    details: row[4] == null ? {} : JSON.parse(String(row[4])),
+  }));
+});
 /** Legacy saves knew only the model name. Claim them only when that name has one source. */
 export const migrateLegacySources = (scopes: DashboardScope[]) => serialized(async () => {
   for (const scope of scopes) {
@@ -96,19 +129,31 @@ export const migrateLegacySources = (scopes: DashboardScope[]) => serialized(asy
 });
 export const listDashboards = (scope: DashboardScope) => serialized(async () => {
   const r = await conn().runAndReadAll(
-    "SELECT id, name, updated_at_utc, revision, folder_id FROM dashboards WHERE source_id = ? AND NOT coalesce(is_template, false) ORDER BY try_cast(updated_at_utc AS TIMESTAMPTZ) DESC NULLS LAST, updated_at DESC, id", [scope.source]);
-  return r.getRows().map((row) => ({ id: String(row[0]), name: String(row[1]), updated_at: row[2] == null ? null : String(row[2]), revision: Number(row[3]), folderId: row[4] == null ? null : String(row[4]) }));
+    "SELECT id, name, updated_at_utc, revision, folder_id, owner_id, owner_name, locked FROM dashboards WHERE source_id = ? AND NOT coalesce(is_template, false) ORDER BY try_cast(updated_at_utc AS TIMESTAMPTZ) DESC NULLS LAST, updated_at DESC, id", [scope.source]);
+  return r.getRows().map((row) => ({
+    id: String(row[0]), name: String(row[1]), updated_at: row[2] == null ? null : String(row[2]), revision: Number(row[3]), folderId: row[4] == null ? null : String(row[4]),
+    ...(row[5] != null ? { ownerId: String(row[5]) } : {}),
+    ...(row[6] != null ? { ownerName: String(row[6]) } : {}),
+    ...(row[7] != null && (Boolean(row[7]) || row[5] != null) ? { locked: Boolean(row[7]) } : {}),
+  }));
 });
 export const saveDashboard = (input: unknown, scope: DashboardScope) => serialized(async () => {
   const d = saveSchema.parse(input);
   await conn().run("BEGIN TRANSACTION");
   try {
-    const current = (await conn().runAndReadAll("SELECT source_id, revision, folder_id, is_template FROM dashboards WHERE id = ?", [d.id])).getRows()[0];
+    const current = (await conn().runAndReadAll("SELECT source_id, revision, folder_id, is_template, owner_id, owner_name, locked FROM dashboards WHERE id = ?", [d.id])).getRows()[0];
+    if (current && String(current[0]) === scope.source && scope.enforceLock && Boolean(current[6]) && current[4] != null && scope.actorId !== String(current[4]) && scope.actorRole !== "admin")
+      throw Object.assign(new Error(LOCKED_DASHBOARD_MESSAGE), { status: 403 });
     if (current ? String(current[0]) !== scope.source || Number(current[1]) !== d.revision : d.revision !== 0)
       throw new StoreConflict("This dashboard changed or belongs to another source. Reopen the latest version, or save your edits as a copy.");
     if (current?.[3]) throw new StoreConflict("Open this starter as a new dashboard, then save your own copy.");
     const revision = d.revision + 1;
     const folderId = d.folderId === undefined ? current?.[2] == null ? null : String(current[2]) : d.folderId;
+    const currentOwnerId = current?.[4] == null ? null : String(current[4]);
+    const currentOwnerName = current?.[5] == null ? null : String(current[5]);
+    const ownerId = currentOwnerId ?? scope.actorId ?? null;
+    const ownerName = currentOwnerId ? currentOwnerName : (scope.actorName ?? currentOwnerName ?? null);
+    const locked = d.locked === undefined ? Boolean(current?.[6]) : Boolean(d.locked);
     await requireFolder(folderId, scope.source);
     // Updating a large VARCHAR can trigger DuckDB's indexed UPDATE limitation.
     // Explicit delete + insert in one transaction preserves atomic replacement.
@@ -116,9 +161,9 @@ export const saveDashboard = (input: unknown, scope: DashboardScope) => serializ
     if (current) await conn().run("DELETE FROM dashboards WHERE id = ?", [d.id]);
     const savedAt = new Date().toISOString();
     await conn().run(`INSERT INTO dashboards
-      (id, name, model, spec, canvas, updated_at, source_id, schema_version, revision, folder_id, updated_at_utc)
-      VALUES (?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?)`, [d.id, d.name || d.spec.title, scope.model,
-      JSON.stringify(d.spec), JSON.stringify(d.canvas), scope.source, d.schemaVersion, revision, folderId, savedAt]);
+      (id, name, model, spec, canvas, updated_at, source_id, schema_version, revision, folder_id, updated_at_utc, owner_id, owner_name, locked)
+      VALUES (?, ?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?)`, [d.id, d.name || d.spec.title, scope.model,
+      JSON.stringify(d.spec), JSON.stringify(d.canvas), scope.source, d.schemaVersion, revision, folderId, savedAt, ownerId, ownerName, locked]);
     await archiveDashboard(d.id, scope.source, savedAt);
     const tileIds = d.spec.tiles.map(t => t.id);
     await conn().run(`DELETE FROM chart_activity WHERE dashboard_id = ? AND source_id = ?${tileIds.length ? ` AND tile_id NOT IN (${tileIds.map(() => "?").join(",")})` : ""}`, [d.id, scope.source, ...tileIds]);
@@ -128,14 +173,18 @@ export const saveDashboard = (input: unknown, scope: DashboardScope) => serializ
 });
 export const loadDashboard = (id: string, scope: DashboardScope) => serialized(async () => {
   const r = await conn().runAndReadAll(
-    "SELECT name, spec, canvas, revision, schema_version, folder_id, is_template FROM dashboards WHERE id = ? AND source_id = ?", [id, scope.source]);
+    "SELECT name, spec, canvas, revision, schema_version, folder_id, is_template, owner_id, owner_name, locked FROM dashboards WHERE id = ? AND source_id = ?", [id, scope.source]);
   const row = r.getRows()[0];
   if (!row) return null;
   if (Number(row[4]) !== 1) throw new Error("This dashboard requires a newer version of Semantic Canvas");
   const spec = dashboardSchema.safeParse(JSON.parse(String(row[1])));
   if (!spec.success) { const issue = spec.error.issues[0]; throw Object.assign(new Error(`Dashboard "${id}" does not match the current schema (${issue?.path.join(".") || "spec"}: ${issue?.message ?? "invalid"}). Fix or remove it from a library backup, then restore.`), { status: 422 }); }
   return { id, name: String(row[0]), spec: spec.data,
-    canvas: storedCanvasSchema.parse(JSON.parse(String(row[2]))), revision: Number(row[3]), schemaVersion: 1, folderId: row[5] == null ? null : String(row[5]), isTemplate: Boolean(row[6]) };
+    canvas: storedCanvasSchema.parse(JSON.parse(String(row[2]))), revision: Number(row[3]), schemaVersion: 1, folderId: row[5] == null ? null : String(row[5]), isTemplate: Boolean(row[6]),
+    ...(row[7] != null ? { ownerId: String(row[7]) } : {}),
+    ...(row[8] != null ? { ownerName: String(row[8]) } : {}),
+    ...(row[9] != null && (Boolean(row[9]) || row[7] != null) ? { locked: Boolean(row[9]) } : {}),
+  };
 });
 /** Immutable design/query snapshots. Older current documents have no reliable timezone timestamp. */
 async function archiveDashboard(id: string, source: string, savedAt: string | null = null) {
@@ -162,6 +211,9 @@ export const loadDashboardVersion = (id: string, revision: number, scope: Dashbo
 export const deleteDashboard = (id: string, scope: DashboardScope, revision: number) => serialized(async () => {
   await conn().run("BEGIN TRANSACTION");
   try {
+    const current = (await conn().runAndReadAll("SELECT owner_id, locked FROM dashboards WHERE id = ? AND source_id = ?", [id, scope.source])).getRows()[0];
+    if (current && scope.enforceLock && Boolean(current[1]) && current[0] != null && scope.actorId !== String(current[0]) && scope.actorRole !== "admin")
+      throw Object.assign(new Error(LOCKED_DASHBOARD_MESSAGE), { status: 403 });
     const r = await conn().runAndReadAll("DELETE FROM dashboards WHERE id = ? AND source_id = ? AND revision = ? RETURNING id", [id, scope.source, revision]);
     if (!r.getRows().length) throw new StoreConflict("Dashboard changed or was not found; reopen it before deleting");
     await conn().run("DELETE FROM chart_activity WHERE dashboard_id = ? AND source_id = ?", [id, scope.source]);

@@ -1,14 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { AiProviderError } from "../agent/provider.ts";
 
 /** Only allowlisted metadata leaves the provider boundary. Provider messages
  * can contain request text; never log or echo the raw body, headers or key. */
 export function providerFailureDiagnostic(error: unknown) {
-  if (!(error instanceof Anthropic.APIError)) return undefined;
+  if (!(error instanceof Anthropic.APIError) && !(error instanceof AiProviderError)) return undefined;
   const status = error.status;
   const category = status === 401 || status === 403 ? "authentication"
     : status === 429 || status === 529 ? "busy"
-    : status === 400 && /schema|strict|additionalproperties|anyof/i.test(error.message) ? "tool-schema"
+    : status === 400 && /schema|strict|additionalproperties|anyof|invalid_function_parameters/i.test(error.message) ? "tool-schema"
     : status === 400 ? "invalid-request"
     : status === 413 ? "request-size"
     : status === undefined ? "connection"

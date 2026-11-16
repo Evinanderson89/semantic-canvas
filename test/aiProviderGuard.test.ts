@@ -30,6 +30,7 @@ for (const [feature, run] of actions) {
     ["missing key", { provider: "anthropic", model: "synthetic", apiKey: "" }],
     ["blank key", { provider: "anthropic", model: "synthetic", apiKey: "  " }],
     ["missing model", { provider: "anthropic", model: "  ", apiKey: "synthetic-key" }],
+    ["missing baseUrl for openai-compatible", { provider: "openai-compatible", model: "synthetic", apiKey: "synthetic-key" }],
   ] as const) it(`${feature} rejects ${reason} before creating an external client`, async () => {
     await expect(run(cfg)).rejects.toMatchObject({ status: 503 });
     expect(constructed).not.toHaveBeenCalled();
