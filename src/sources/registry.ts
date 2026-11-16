@@ -6,7 +6,9 @@ import type { Model, SemanticAdapter } from "../semantic/model.ts";
 import { duckglueAdapter } from "../semantic/duckglue.ts";
 import { dbtAdapter } from "../semantic/dbt.ts";
 import { snowflakeSemanticAdapter } from "../semantic/snowflakeSemantic.ts";
+import { cubeAdapter } from "../semantic/cube.ts";
 import { pooledDuckdb } from "../connectors/pool.ts";
+import { sqliteConnector } from "../connectors/sqlite.ts";
 import { snowflakeConnector } from "../connectors/snowflake.ts";
 import { mergeOverlay, readOverlay } from "./connected.ts";
 import { mergeExtension, readExtension } from "./extensions.ts";
@@ -41,6 +43,7 @@ const ADAPTERS: Record<string, SemanticAdapter> = {
   duckglue: duckglueAdapter,
   dbt: dbtAdapter,
   "snowflake-semantic": snowflakeSemanticAdapter,
+  cube: cubeAdapter,
 };
 
 export const expand = (v: string) =>
@@ -54,6 +57,10 @@ export async function connectConnector(c: Record<string, any>): Promise<Connecto
       size: Number(c.poolSize ?? 4),
       awsProfile: c.awsProfile ? expand(String(c.awsProfile)) : undefined,
       awsRegion: c.awsRegion ? expand(String(c.awsRegion)) : undefined,
+    });
+  if (type === "duckdb-db" || type === "sqlite")
+    return sqliteConnector(expand(String(c.databasePath ?? c.path ?? ":memory:")), {
+      size: Number(c.poolSize ?? 4),
     });
   if (type === "snowflake")
     return snowflakeConnector({
