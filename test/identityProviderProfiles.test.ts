@@ -202,17 +202,21 @@ it("derives distinct, stable account IDs per provider and keeps provider materia
   for (const tenant of [okta, oktaOrg, oktaBasicApp, oktaMisconfigured, entra, entraRoles]) for (const secret of [clientSecret, "opaque-provider-token", "@example.com", "@contoso.example"]) expect(tenant.output()).not.toContain(secret);
 });
 
-// Last: this leaves the tenant signing with a key Canvas has not fetched yet.
 it("verifies the ID token signature and follows a pre-published signing-key rotation without a restart", async () => {
   expect((await entra.signIn("admin")).status).toBe(302);
   expect(entra.jwksFetches()).toBeGreaterThan(0);
   entra.rotateKey();
   const rotated = await entra.signIn("admin");
   expect(rotated.status, rotated.body + entra.output()).toBe(302);
-  // A second rotation moves to a key published after the last fetch. The OIDC library waits before
-  // re-fetching keys, so sign-in fails closed until then; it must not accept the unknown key.
+  // A second rotation moves to a key published after the last fetch. That one attempt fails closed:
+  // the unknown key is never accepted. Canvas then re-reads the provider's keys, so the retry succeeds.
   entra.rotateKey();
   const unknown = await entra.signIn("admin");
   expect(unknown.status).toBe(400);
-  expect(entra.output()).toMatch(/"event":"auth.callback_failed"/);
+  expect(entra.output()).toMatch(/"event":"auth.callback_failed"[^\n]*"errorType":"OAUTH_KEY_SELECTION_FAILED"/);
+  for (let i = 0; i < 100 && !entra.output().includes("auth.provider_keys_refreshed"); i++) await new Promise(r => setTimeout(r, 50));
+  expect(entra.output()).toContain("auth.provider_keys_refreshed");
+  const retried = await entra.signIn("admin");
+  expect(retried.status, retried.body).toBe(302);
+  expect(retried.session.user.role).toBe("admin");
 });

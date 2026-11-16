@@ -57,7 +57,7 @@ These notes come from simulated provider profiles in `test/identityProviderProfi
 - **Okta groups.** Group names appear only after you add a groups claim to the application or authorization server. Without it every account is refused.
 - **Entra groups.** The `groups` claim carries group object IDs, not names; bind those IDs. An account in more groups than a token can carry receives a Graph reference instead of a `groups` claim. Canvas does not call Graph, so that account is refused unless it has a subject binding. Entra app roles avoid the limit: assign roles and set `groupsClaim: roles`.
 - **Subject bindings** match the token's `sub`. In Entra that value is specific to the application and differs from the object ID shown in the portal.
-- **Signatures and key rotation.** Canvas verifies the ID token signature against the provider's published keys. A provider that publishes its next key before signing with it rotates without interruption. If a token is signed with a key Canvas has not seen and keys were fetched under a minute ago, sign-in fails closed until the next fetch is allowed.
+- **Signatures and key rotation.** Canvas verifies the ID token signature against the provider's published keys. A provider that publishes its next key before signing with it rotates without interruption. If a token is signed with a key Canvas has not seen, that one sign-in fails closed and Canvas re-reads the provider's keys, at most once every ten seconds; the person's next attempt then succeeds. An unknown key is never accepted.
 
 ### Roles and sessions
 

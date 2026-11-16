@@ -122,7 +122,10 @@ export class CompanyAuth {
   constructor(readonly config: AuthConfig, private audit: (event: string, data?: Record<string, string | number | boolean>) => void = () => {}) {}
   async start() {
     if (this.config.mode === "gateway") this.gatewayKeys = createRemoteJWKSet(new URL(this.config.jwksUri!), { timeoutDuration: 5000 });
-    if (this.config.mode === "team") {
+    if (this.config.mode === "team") this.provider = await this.connectProvider();
+  }
+  private lastKeyRefresh = 0;
+  private async connectProvider() {
       const secret = this.config.clientSecret!;
       const connect = (method: NonNullable<AuthConfig["clientAuth"]>) => oidc.discovery(new URL(this.config.issuer!), this.config.clientId!, secret,
         method === "client_secret_basic" ? oidc.ClientSecretBasic(secret) : oidc.ClientSecretPost(secret), { timeout: 10 });
@@ -133,8 +136,15 @@ export class CompanyAuth {
       if (!this.config.clientAuth && advertised && !advertised.includes("client_secret_post") && advertised.includes("client_secret_basic")) provider = await connect("client_secret_basic");
       // Verify the ID token signature against the provider's keys, not only the TLS channel it arrived on.
       oidc.enableNonRepudiationChecks(provider);
-      this.provider = provider;
-    }
+      return provider;
+  }
+  /** A token signed with a key we have not fetched fails closed. Reconnect so the next
+   * attempt reads the provider's current keys, at most once every ten seconds: the old
+   * configuration keeps serving until the new one is ready, and a failure keeps it. */
+  private refreshProviderKeys() {
+    if (Date.now() - this.lastKeyRefresh < 10_000) return;
+    this.lastKeyRefresh = Date.now();
+    void this.connectProvider().then(provider => { this.provider = provider; this.audit("auth.provider_keys_refreshed"); }, () => this.audit("auth.provider_refresh_failed"));
   }
   private prune() { const now = Date.now(); for (const [k, v] of this.sessions) if (v.expires < now) this.sessions.delete(k); for (const [k, v] of this.attempts) if (v.expires < now) this.attempts.delete(k); for (const [k, v] of this.lastVerified) if (v.exp < now) this.lastVerified.delete(k); }
   /** The owner's identity while they still hold access: an unexpired team session, or in gateway mode a token verified since the server started that has not expired. */
@@ -233,7 +243,12 @@ export class CompanyAuth {
         if (!identity) { this.audit("auth.access_denied"); return res.status(403).send("Your account has no Semantic Canvas access. Ask your administrator to assign a group."); }
         const old = cookie(req, "__Host-sc_session"); if (old) this.sessions.delete(digest(old));
         this.issue(identity, res); this.audit("auth.signed_in", { actor: identity.id, role: identity.role }); res.redirect("/");
-      } catch (error) { this.audit("auth.callback_failed", { errorType: failureCode(error) }); res.status(400).send("Sign-in could not be verified. Return to the app and try again."); }
+      } catch (error) {
+        const code = failureCode(error);
+        this.audit("auth.callback_failed", { errorType: code });
+        if (code === "OAUTH_KEY_SELECTION_FAILED") this.refreshProviderKeys();
+        res.status(400).send("Sign-in could not be verified. Return to the app and try again.");
+      }
     });
     app.post("/api/auth/logout", (req, res) => {
       const session = this.session(req);
