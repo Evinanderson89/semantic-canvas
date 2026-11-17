@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import { api, asText, runToolInContext, TOOLS, type ToolSpec } from "../agent/tools.ts";
 import { coachSemanticModel, type AnalysisGoal } from "../semantic/coach.ts";
+import { convertSemanticLayer, type SemanticLayerFormat } from "../semantic/convert.ts";
 import type { Model } from "../semantic/model.ts";
 import type { ForwardedAuth } from "../security/auth.ts";
 
@@ -34,8 +35,36 @@ const COACH_TOOL: ToolSpec = {
   },
 };
 
+const CONVERT_TOOL: ToolSpec = {
+  name: "convert_semantic_model",
+  description:
+    "Export the active semantic model or convert external semantic layer YAML/JSON between DuckGlue, Snowflake Cortex Analyst, dbt MetricFlow, AWS Glue Data Catalog, and Cube.",
+  inputSchema: {
+    targetFormat: z.enum(["duckglue", "snowflake", "metricflow", "glue", "cube"]),
+    content: z.string().optional(),
+    sourceFormat: z.enum(["auto", "duckglue", "snowflake", "metricflow", "glue", "cube"]).optional(),
+  },
+  handler: async ({
+    targetFormat,
+    content,
+    sourceFormat,
+  }: {
+    targetFormat: SemanticLayerFormat;
+    content?: string;
+    sourceFormat?: SemanticLayerFormat | "auto";
+  }) => {
+    const model = content?.trim() ? undefined : ((await api("/api/model")) as Model);
+    return convertSemanticLayer({
+      targetFormat,
+      content: content?.trim() ? content : undefined,
+      sourceFormat: sourceFormat ?? "auto",
+      model,
+    });
+  },
+};
+
 export function remoteToolsForRole(role: RemoteMcpRole): ToolSpec[] {
-  return [...TOOLS, COACH_TOOL].filter((tool) => {
+  return [...TOOLS, COACH_TOOL, CONVERT_TOOL].filter((tool) => {
     if (EXCLUDED_REMOTE_TOOLS.has(tool.name)) return false;
     if (role === "viewer" && WRITE_TOOLS.has(tool.name)) return false;
     return true;
@@ -129,6 +158,60 @@ export async function handleRemoteMcp(req: Request, res: Response, deps: RemoteM
             isError: false,
             content: [{ type: "text" as const, text: JSON.stringify(report) }],
             structuredContent: report,
+          },
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "The Canvas tool failed";
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32000, message: msg },
+          result: { isError: true, content: [{ type: "text" as const, text: msg }] },
+        });
+      }
+      return;
+    }
+    if (name === "convert_semantic_model") {
+      const parsedConvert = z.object(CONVERT_TOOL.inputSchema).safeParse(rawArgs);
+      if (!parsedConvert.success) {
+        const msg = parsedConvert.error.issues.map((i) => `${i.path.join(".") || "arguments"}: ${i.message}`).join("; ");
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32602, message: msg },
+          result: { isError: true, content: [{ type: "text", text: msg }] },
+        });
+        return;
+      }
+      try {
+        const targetFormat = String(parsedConvert.data.targetFormat) as SemanticLayerFormat;
+        const content =
+          typeof parsedConvert.data.content === "string" && parsedConvert.data.content.trim()
+            ? parsedConvert.data.content
+            : undefined;
+        const sourceFormat =
+          typeof parsedConvert.data.sourceFormat === "string" && parsedConvert.data.sourceFormat.trim()
+            ? (parsedConvert.data.sourceFormat.trim() as SemanticLayerFormat | "auto")
+            : "auto";
+        const model = content
+          ? undefined
+          : ((await runToolInContext(
+              { source: deps.source, principal: deps.principal, auth: deps.forwarded },
+              () => api("/api/model"),
+            )) as Model);
+        const converted = convertSemanticLayer({
+          targetFormat,
+          content,
+          sourceFormat,
+          model,
+        });
+        res.json({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            isError: false,
+            content: [{ type: "text" as const, text: JSON.stringify(converted) }],
+            structuredContent: converted,
           },
         });
       } catch (error) {

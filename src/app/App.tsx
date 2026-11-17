@@ -36,13 +36,14 @@ import { MetricRegistry, DataModel } from "./Explore.tsx";
 import { Connections, type Principal, type RlsPolicy, type SourceInfo } from "./Connections.tsx";
 import { Modeler } from "./Modeler.tsx";
 import type { Brief } from "../suggest/match.ts";
-import { DEFAULT_CANVAS, type CanvasSpec } from "../canvas/presets.ts";
+import { DEFAULT_CANVAS, THEME_PRESETS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
 import { applyLayout } from "../canvas/layouts.ts";
 import { prepareNewTile } from "../suggest/prepareTile.ts";
 import { downloadPng, downloadSvg, slugForFilename } from "./export.ts";
 import { ExecutiveDigestDialog, YamlCodeSyncDialog, OperationsAuditDialog } from "./CommercialDrawers.tsx";
 import { SemanticCoachDialog } from "./SemanticCoach.tsx";
+import { CommandPalette, type PaletteItem } from "./CommandPalette.tsx";
 import { metricOf, calendarOf, prettifyModelName, todayOf, type Model } from "../semantic/model.ts";
 import type { DashboardSpec, TileSpec } from "../compiler/spec.ts";
 
@@ -107,6 +108,7 @@ export function App() {
   const [yamlSyncOpen, setYamlSyncOpen] = useState(false);
   const [opsAuditOpen, setOpsAuditOpen] = useState(false);
   const [coachOpen, setCoachOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   // /modeler is the Modeler's own address on the gateway (registered as its own app); the SPA serves it like any path.
   const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library" | "modeler">(() => location.pathname.replace(/\/+$/, "") === "/modeler" ? "modeler" : "home");
   // ?source=&table= from an "Open in Semantic Canvas" link: read once, applied when the sources (then the model) are known, and stripped.
@@ -272,7 +274,7 @@ export function App() {
 
   React.useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if (canvas.locked || document.querySelector("dialog[open]")) return;
+      if (canvas.locked || document.querySelector("dialog[open], .cmdk-dialog")) return;
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement)?.isContentEditable) return;
       const meta = e.metaKey || e.ctrlKey;
@@ -291,6 +293,18 @@ export function App() {
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   }, [book, canvas]);
+
+  React.useEffect(() => {
+    if (!model) return;
+    const onPaletteKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "k") return;
+      if (document.querySelector("dialog[open]")) return;
+      e.preventDefault();
+      setPaletteOpen((v) => !v);
+    };
+    window.addEventListener("keydown", onPaletteKey);
+    return () => window.removeEventListener("keydown", onPaletteKey);
+  }, [Boolean(model)]);
 
   const compose = (spec: DashboardSpec, surface: CanvasSpec) => {
     if (book) { past.current.push(documentSnapshot(book, canvas)); future.current = []; }
@@ -615,6 +629,203 @@ export function App() {
     pendingReveal.current = { x: at.x, y: at.y, w: available, h };
   };
 
+  const themeKeywordAliases: Record<string, string[]> = {
+    "broadside": ["broadside", "editorial", "paper", "light", "default"],
+    "newsroom-dark": ["newsroom-dark", "boardroom-dark", "executive-slate", "dark", "slate", "night"],
+    "swiss-grid": ["swiss-grid", "high-contrast-print", "print", "monochrome", "contrast", "grid"],
+    "studio-warm": ["studio-warm", "editorial-warm", "warm", "cream", "amber"],
+  };
+
+  const paletteItems: PaletteItem[] = [
+    ...(session.canEdit ? [{
+      id: "action:new-dashboard",
+      label: "New dashboard from scratch",
+      subtitle: "Start an empty governed canvas",
+      category: "Actions" as const,
+      keywords: ["new", "scratch", "blank", "create", "dashboard", "canvas"],
+      onSelect: () => {
+        const c = freshCanvas();
+        if (beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: c })) {
+          pendingFit.current = true;
+          setView("home");
+        }
+      },
+    }] : []),
+    {
+      id: "action:semantic-coach",
+      label: "Semantic Layer Coach & Dialect Converter",
+      subtitle: dash
+        ? "Score readiness, generate YAML fixes & convert across 5 dialects"
+        : "Audit semantic readiness & convert across DuckGlue, Snowflake, MetricFlow, Glue & Cube",
+      category: "Actions",
+      keywords: ["coach", "dialect", "converter", "snowflake", "cortex", "metricflow", "dbt", "glue", "cube", "duckglue", "readiness", "semantic"],
+      onSelect: () => {
+        if (!dash) {
+          setRegistryTable(null);
+          setView("registry");
+        }
+        setCoachOpen(true);
+      },
+    },
+    ...(dash ? [
+      {
+        id: "action:executive-digest",
+        label: "Executive digest & SHA-256 verified brief",
+        subtitle: "Warehouse-verified headline values, Markdown & signed bundle",
+        category: "Actions" as const,
+        keywords: ["digest", "brief", "sha256", "sha-256", "verified", "executive", "summary"],
+        onSelect: () => setDigestOpen(true),
+      },
+      {
+        id: "action:yaml-sync",
+        label: "Dashboard-as-Code (YAML sync & diff)",
+        subtitle: "Inspect, diff & apply declarative dashboard YAML",
+        category: "Actions" as const,
+        keywords: ["yaml", "code", "git", "diff", "sync", "spec", "dashboard-as-code"],
+        onSelect: () => setYamlSyncOpen(true),
+      },
+      ...(dash.tiles.length > 0 ? [{
+        id: "action:review-share",
+        label: "Review and share (Dashboard, Story & Infographic)",
+        subtitle: "Editorial review, story presentation & infographic export",
+        category: "Actions" as const,
+        keywords: ["review", "share", "story", "infographic", "handoff", "presentation", "pdf"],
+        onSelect: () => setHandoff(true),
+      }] : []),
+      ...(session.canEdit ? [{
+        id: "action:ai-redesign",
+        label: "Improve dashboard with AI",
+        subtitle: "Preview improved layout, chart types & comparisons",
+        category: "Actions" as const,
+        keywords: ["ai", "improve", "redesign", "beautify", "arrange", "layout"],
+        onSelect: () => setAiRedesign(true),
+      }] : []),
+      {
+        id: "action:export-svg",
+        label: "Export dashboard as Vector SVG",
+        subtitle: "Print-grade scalable vector export of the canvas",
+        category: "Actions" as const,
+        keywords: ["export", "svg", "vector", "download", "print", "illustrator", "figma"],
+        onSelect: () => {
+          const surface = scrollRef.current?.querySelector<HTMLElement>(".canvas-surface");
+          if (!surface) return;
+          try {
+            downloadSvg(`${slugForFilename(dash.title || "dashboard")}.svg`, surface);
+          } catch (e: any) {
+            setNotice(`Could not export SVG: ${e.message}`);
+          }
+        },
+      },
+      {
+        id: "action:export-png",
+        label: "Export dashboard as PNG",
+        subtitle: "High-DPI raster image export of the canvas",
+        category: "Actions" as const,
+        keywords: ["export", "png", "image", "screenshot", "download"],
+        onSelect: () => { void exportDashboardPng(); },
+      },
+    ] : []),
+    {
+      id: "action:ops-audit",
+      label: "Operations, ROI & audit log",
+      subtitle: "Query latency, cache hit rate & governance audit trail",
+      category: "Actions",
+      keywords: ["operations", "roi", "audit", "log", "telemetry", "governance", "cost"],
+      onSelect: () => setOpsAuditOpen(true),
+    },
+    ...(dash && !canvas.locked
+      ? THEME_PRESETS.map((preset): PaletteItem => ({
+          id: `theme:${preset.id}`,
+          label: `Theme: ${preset.label}`,
+          subtitle: `${preset.hint ?? "Editorial canvas theme"}${(canvas.theme ?? "broadside") === preset.id ? " · Active" : ""}`,
+          category: "Themes",
+          keywords: [preset.id, preset.label, ...(themeKeywordAliases[preset.id] ?? [])],
+          onSelect: () => changeCanvas({ ...canvas, theme: preset.id }),
+        }))
+      : []),
+    {
+      id: "nav:home",
+      label: "Workspace Home",
+      subtitle: !dash && view === "home" ? "Current view · Start or resume drafts" : "Return to workspace entry & drafts",
+      category: "Navigate",
+      keywords: ["workspace", "home", "start", "drafts", "entry"],
+      onSelect: () => { if (beginDocument(null)) { setRegistryTable(null); setView("home"); } },
+    },
+    {
+      id: "nav:library",
+      label: "CoreCanvas Library",
+      subtitle: "Saved dashboards, folders & reusable chart views",
+      category: "Navigate",
+      keywords: ["library", "corecanvas", "saved", "views", "folders", "templates"],
+      onSelect: () => browseLibrary(null),
+    },
+    {
+      id: "nav:registry",
+      label: "Metric Registry",
+      subtitle: `${Object.keys(model.metrics).length} governed metrics, synonyms & SQL contracts`,
+      category: "Navigate",
+      keywords: ["metric", "registry", "catalogue", "catalog", "definitions", "sql", "synonyms"],
+      onSelect: () => { if (beginDocument(null)) { setRegistryTable(null); setView("registry"); } },
+    },
+    {
+      id: "nav:model",
+      label: "Data Model",
+      subtitle: `${Object.keys(model.tables).length} tables & ${model.joins.length} verified joins`,
+      category: "Navigate",
+      keywords: ["data", "model", "tables", "joins", "grain", "schema", "columns"],
+      onSelect: () => { if (beginDocument(null)) { setRegistryTable(null); setView("model"); } },
+    },
+    ...(session.canAdmin ? [{
+      id: "nav:modeler",
+      label: "Modeler",
+      subtitle: "Extend tables, relationships & governed semantic definitions",
+      category: "Navigate" as const,
+      keywords: ["modeler", "author", "publish", "tables", "joins", "schema"],
+      onSelect: () => { if (beginDocument(null)) { setRegistryTable(null); setView("modeler"); } },
+    }] : []),
+    {
+      id: "nav:connections",
+      label: "Connections",
+      subtitle: `${sources.length || 1} warehouse sources, RLS policies & AI providers`,
+      category: "Navigate",
+      keywords: ["connections", "sources", "warehouse", "duckdb", "snowflake", "rls", "security"],
+      onSelect: () => { if (beginDocument(null)) { setRegistryTable(null); setView("connections"); } },
+    },
+    ...Object.values(model.metrics).map((m): PaletteItem => ({
+      id: `metric:${m.name}`,
+      label: m.label,
+      subtitle: `${m.baseTable} · ${m.type ?? "simple"}`,
+      category: "Semantic Metrics",
+      keywords: [m.name, m.baseTable, ...(m.synonyms ?? [])],
+      onSelect: () => {
+        if (dash && session.canEdit && !canvas.locked) {
+          try {
+            const prepared = prepareNewTile(model, {
+              id: nextId(),
+              kind: "metric",
+              title: m.label,
+              metrics: [m.name],
+              dimensions: [],
+              chart: "kpi",
+              layout: { x: 0, y: 0, w: 320, h: 164, z: 1 },
+            });
+            const { id: _id, layout: _layout, ...draft } = prepared;
+            const hasDim = prepared.dimensions.length > 0;
+            addTile(draft, hasDim ? { w: 420, h: 248 } : { w: 320, h: 164 });
+          } catch (err) {
+            setNotice(err instanceof Error ? err.message : `Could not add ${m.label}.`);
+          }
+        } else if (!dash && session.canEdit) {
+          setView("home");
+          void build({ table: m.baseTable, metrics: [m.name], audience: "operator", grain });
+        } else if (beginDocument(null)) {
+          setRegistryTable(m.baseTable);
+          setView("registry");
+        }
+      },
+    })),
+  ];
+
   return (
     <div className={"shell" + (collapsed ? " narrow" : "") + (inspecting ? " inspecting" : "")}>
       {collapsed && (
@@ -659,6 +870,23 @@ export function App() {
         }}>Download backup</button>}{notice.kind === "error" && dash && notice.message.startsWith("Recovery backup failed") && <button className="link" onClick={() => {
           if (window.confirm("Leave this dashboard without saving? Download a backup first if you want to keep these changes.")) { currentDocument.current.dirty = false; beginDocument(null); setView("home"); }
         }}>Discard and leave</button>}<button type="button" className="link" aria-label="Dismiss notification" onClick={dismissNotice}>Dismiss</button></div>}
+        {!dash && (
+          <div className="cmdk-workspace-bar">
+            <button
+              type="button"
+              className="cmdk-trigger"
+              aria-label="Open command palette"
+              title="Jump to a governed metric, run an action, or navigate (⌘K / Ctrl+K)"
+              onClick={() => setPaletteOpen(true)}
+            >
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.5" /><path d="m10.5 10.5 3.2 3.2" strokeLinecap="round" />
+              </svg>
+              <span className="cmdk-trigger-label">Jump to metric or action</span>
+              <kbd>⌘K</kbd>
+            </button>
+          </div>
+        )}
         {!dash && view === "library" ? (
           <LibraryBrowser key={activeSourceId} data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} refresh={refreshSaved} folderId={libraryFolder} onFolder={setLibraryFolder} onOpen={openLibraryItem}
             onNewDashboard={folderId => { if (beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas(), folderId })) pendingFit.current = true; }} />
@@ -715,6 +943,19 @@ export function App() {
                 </select>
               </label>
               <span className={"save-status" + (dirty ? " dirty" : "")} role="status">{!session.canEdit ? "Viewer access" : saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
+              <button
+                type="button"
+                className="cmdk-trigger"
+                aria-label="Open command palette"
+                title="Jump to a governed metric, run an action, or switch theme (⌘K / Ctrl+K)"
+                onClick={() => setPaletteOpen(true)}
+              >
+                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                  <circle cx="7" cy="7" r="4.5" /><path d="m10.5 10.5 3.2 3.2" strokeLinecap="round" />
+                </svg>
+                <span className="cmdk-trigger-label">Jump</span>
+                <kbd>⌘K</kbd>
+              </button>
               <button className="icon quiet" title="Refresh" aria-label="Refresh" onClick={refreshData}>
                 <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M16 10a6 6 0 1 1-1.8-4.2M16 3v3.5h-3.5" /></svg>
@@ -967,6 +1208,7 @@ export function App() {
       {yamlSyncOpen && dash && <YamlCodeSyncDialog dashboardId={dashId} spec={dash} canvas={canvas} onApply={(nextSpec, nextCanvas) => { compose(nextSpec, nextCanvas ?? canvas); setNotice("Dashboard YAML applied to canvas.", "success"); }} onClose={() => setYamlSyncOpen(false)} />}
       {opsAuditOpen && <OperationsAuditDialog onClose={() => setOpsAuditOpen(false)} />}
       {coachOpen && <SemanticCoachDialog model={model} sourceId={activeSourceId ?? ""} onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} onClose={() => setCoachOpen(false)} />}
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} items={paletteItems} />
     </div>
   );
 }

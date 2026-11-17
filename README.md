@@ -25,6 +25,9 @@ Move seamlessly across three synchronized views of the same governed document:
 - **Compiled SQL & Metric Lineage DAG Inspector (`POST /api/query/lineage`):** Inspect parameterized SQL, join paths, applied RLS predicates, and the upstream table-to-metric DAG for any tile.
 - **Source Freshness & SLA Health (`GET /api/sources/:id/health`):** Real-time watermark inspection and SLA status (`healthy`, `warning`, `breached`) per source.
 - **2-Way Dashboard-as-Code YAML Sync & Diff (`GET /api/dashboards/:id/yaml`, `POST /api/dashboards/import-yaml`):** Export any dashboard to deterministic YAML for Git version control, preview structural diffs, and import YAML changes back into the workspace.
+- **Universal 5-Dialect Semantic Layer Converter & Coach (`GET /api/model/export`, `POST /api/model/convert`, `POST /api/model/coach`):** Convert governed models across **DuckGlue / Canvas (`duckglue`)**, **Snowflake Cortex Analyst (`snowflake`)**, **dbt MetricFlow (`metricflow`)**, **AWS Glue Data Catalog (`glue`)**, and **Cube (`cube`)**, score model readiness across five analytical categories, and generate dialect-native YAML recipes for natural-language questions. See [multi-dialect conversion, coaching & CLI](docs/semantic-layer-conversion.md).
+- **Developer & CI/CD Semantic CLI (`npm run semantic`):** Headless CLI supporting `formats`, `convert` (`--from auto --to <dialect>`), and `coach` (`--question`, `--format`, `--json`, and `--fail-under <0-100>` for GitHub Actions Semantic Quality Gates).
+- **`⌘K` / `Ctrl+K` Universal Command Palette:** Instant keyboard launcher for governed metrics (synonym-aware search across metric names, tables, and business synonyms), canvas actions, editorial themes, and workspace navigation.
 
 ### 2. Designers & Storytellers
 - **4 Curated Editorial Theme Presets:** Switch between `editorial-warm`, `executive-slate`, `high-contrast-print`, and `boardroom-dark` palettes tuned for screen, projector, and print.
@@ -39,7 +42,7 @@ Move seamlessly across three synchronized views of the same governed document:
 
 ### 4. Enterprise & AI Ecosystem
 - **Provider-Agnostic AI:** Connect `anthropic` (Claude), `openai`, `gemini`, or any `openai-compatible` local/VPC endpoint (vLLM, Ollama, LiteLLM). Core exploration, deterministic review, driver attribution, and smart arrange require no AI key.
-- **8-Tool MCP Onboarding Hub + Authenticated Remote MCP (`POST /api/mcp`):** Ready-to-copy configurations for **Claude Desktop**, **Claude Code**, **Codex**, **Cursor**, **Antigravity**, **VS Code**, **Gemini CLI**, and **generic** stdio clients, plus authenticated remote HTTP MCP (`POST /api/mcp`) enforcing company RBAC and RLS.
+- **8-Tool MCP Onboarding Hub + Authenticated Remote MCP (`POST /api/mcp`):** Ready-to-copy configurations for **Claude Desktop**, **Claude Code**, **Codex**, **Cursor**, **Antigravity**, **VS Code**, **Gemini CLI**, and **generic** stdio clients, plus authenticated remote HTTP MCP (`POST /api/mcp`) enforcing company RBAC and RLS—including `convert_semantic_model` and `coach_semantic_model` for multi-dialect semantic translation and readiness coaching.
 - **Identity, Provisioning & Governance:** OIDC sign-in with real-time IdP session revalidation, **SCIM 2.0 provisioning (`/api/scim/v2`)**, zero-downtime `access.yaml` hot reload, and per-dashboard ownership and lock controls.
 - **High-Availability & Operations Telemetry:** AES-256-GCM encrypted persistent sessions, distributed scheduler leases, Slack and generic webhook alert delivery, and durable audit & ROI telemetry endpoints (`GET /api/operations/audit`, `GET /api/operations/metrics`, `GET /api/operations/manifest`).
 
