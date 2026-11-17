@@ -1,3 +1,4 @@
+import { joinProblems } from "../compiler/issueText.ts";
 import { createHash } from "node:crypto";
 import { numericValue } from "../charts/values.ts";
 import { compileTile, parseDimension, splitPartialPeriods, validateTile } from "../compiler/compile.ts";
@@ -156,7 +157,7 @@ export async function generateExecutiveDigest(
     const validationIssues = validateTile(model, tile, { role: options?.role });
     if (validationIssues.length > 0) {
       addCaveat(
-        `${tileTitle}: Skipped (${validationIssues.map((i) => i.problem).join("; ")}).`,
+        `${tileTitle}: Skipped (${joinProblems(validationIssues.map((i) => i.problem)).replace(/\.$/, "")}).`,
       );
       continue;
     }

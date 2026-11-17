@@ -233,9 +233,9 @@ export function App() {
   // Filter before rendering, so an edited chart never sends even one request
   // with the previous query's drill range. Prune stored sessions as well so
   // undo cannot revive stale exploration after a query change or removal.
-  const activeDrillSessions = React.useMemo(() => retainDrillSessions(book?.tiles ?? [], drillSessions), [book, drillSessions]);
+  const activeDrillSessions = React.useMemo(() => retainDrillSessions(book?.tiles ?? [], drillSessions, model), [book, drillSessions, model]);
   const drills = React.useMemo(() => Object.fromEntries(Object.entries(activeDrillSessions).map(([id, session]) => [id, session.entries])), [activeDrillSessions]);
-  useEffect(() => { setDrillSessions(current => retainDrillSessions(book?.tiles ?? [], current)); }, [book]);
+  useEffect(() => { setDrillSessions(current => retainDrillSessions(book?.tiles ?? [], current, model)); }, [book, model]);
 
   // Same status the AgentChat toggle polls for -- whether "Explain this" on
   // a tile should even offer itself, rather than showing a button that
@@ -923,13 +923,16 @@ export function App() {
           </>
         ) : (
           <>
-            <div className="topbar" ref={topbarRef}>
+            <div className="topbar doc-head canvas-head" ref={topbarRef}>
               <button className="link back-link" onClick={() => beginDocument(null)}>← <span>Workspace</span></button>
               <div className="dashboard-identity">
+                <div className="broadside-eyebrow mono">GOVERNED SEMANTIC WORKSPACE · PARAMETERIZED SQL</div>
                 <h1 className="dash-title">{dash.title}</h1>
                 <div className="dashboard-meta">
                   <span>{dash.tiles.length} tiles</span><span aria-hidden="true">·</span>
                   <span>{prettifyModelName(model.name)}</span>
+                  <span className="masthead-pill">Settled + Lag Hatched</span>
+                  <span className="masthead-pill">SHA-256 Verified Brief</span>
                   {templateId && <span title="This starter opens as a new dashboard. Save to keep your version.">· Starter copy</span>}
                   {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
                 </div>

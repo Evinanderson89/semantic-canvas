@@ -159,8 +159,14 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
         <p className="ai-redesign-preview-caption">{presentation.description} Presentation only; your dashboard stays intact.</p>
         <div className="report-scroll" ref={previewScroll}>
           <article className={`report-document report-${mode}`} ref={report} aria-label={`${presentation.label} presentation`}>
-            <header className="report-cover"><span className="eyebrow">Semantic Canvas · {presentation.label}</span><h1>{spec.title}</h1>
+            <header className="report-cover doc-head"><span className="eyebrow">Semantic Canvas · {presentation.label}</span>
+              <div className="broadside-eyebrow mono">GOVERNED SEMANTIC WORKSPACE · PARAMETERIZED SQL</div>
+              <h1>{spec.title}</h1>
               {spec.description && <p className="report-description">{spec.description}</p>}
+              <div className="report-masthead-pills">
+                <span className="masthead-pill">Settled + Lag Hatched</span>
+                <span className="masthead-pill">SHA-256 Verified Brief</span>
+              </div>
               <p className="report-model">Model: {model.name} · Current tab and viewing scope</p>
               {model.calendar?.today && <p className="report-model">Reporting date: {model.calendar.today} (fixed model clock)</p>}
               {question.trim() && <div className="report-question"><span>Business question</span><h2>{question}</h2></div>}

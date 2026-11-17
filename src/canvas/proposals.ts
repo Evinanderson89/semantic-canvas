@@ -95,7 +95,7 @@ export function applyProposal(spec: DashboardSpec, canvas: CanvasSpec, raw: unkn
         .map(table => [table, selected.filter(name => metricOf(model, name)?.baseTable === table)]));
       correction = ` Split this tile into separate charts by base table, preserving the intended metrics. Shared dates do not permit combining base tables. Selected metric groups: ${JSON.stringify(groups)}.`;
     }
-    return `Tile ${i.tile}: ${i.problem}.${correction}`;
+    return `Tile ${i.tile}: ${i.problem.replace(/\s*\.+$/, "")}.${correction}`;
   }).join("; "));
   // Validate the final combination, not intermediate action order. Leave an
   // unchanged broken chart available for layout recovery; new/changed chart

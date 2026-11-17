@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.1 (2026-11-17)
+
+### Vibrant Broadside UI Overhaul
+- Upgraded typography (`index.html`, `src/app/styles.css`) to the Vibrant Broadside font stack: `Bricolage Grotesque` (`--font-display`), `Source Serif 4` (`--font-editorial`), `Plus Jakarta Sans` (`--font-sans`), and `JetBrains Mono` (`--font-mono`).
+- Replaced workspace color tokens with **Vibrant Broadside Light** (`#f6f8fc` ground, `#ffffff` surface, `#090d16` ink/masthead rule, `#1d4ed8` Electric Cobalt accent, `#059669` emerald positive, `#e11d48` vermilion negative) and **Vibrant Broadside Obsidian Dark** (`#080c17` ground, `#0d1424` surface, `#3b82f6` cobalt accent, `#10b981` positive, `#f43f5e` negative) in `src/app/styles.css` and `src/charts/MetricColors.tsx`.
+- Updated `PALETTES.default` and `PALETTES.cool` in `src/format/format.ts` to Electric Cobalt (`#2563eb` / `#1d4ed8`), emerald, amber, vermilion, violet, and cyan palettes.
+- Added `2px solid` Broadside masthead top rules, `.broadside-eyebrow` (`GOVERNED SEMANTIC WORKSPACE · PARAMETERIZED SQL`), and `.masthead-pill` provenance badges (`Settled + Lag Hatched`, `SHA-256 Verified Brief`) across Canvas and Report views (`src/app/App.tsx`, `src/app/ReviewHandoff.tsx`).
+- Added governed metric slug badges (`<code className="metric-slug">{spec.metrics[0]}</code>`) in tile headers (`src/app/Tile.tsx`, `src/app/Kpi.tsx`), high-contrast mono KPI delta pill badges (`.kpi-delta .pos` / `.neg`), SVG linear-gradient sparkline area fills (`src/app/Kpi.tsx`), and `01 /` numbered section kickers.
+
+### Compatible-Grain Drill-Down & Issue Punctuation Fix
+- Updated `src/app/drill.ts` (`drillGrainAllowed`, `drillGrain`, `compatibleDrill`, `retainDrillSessions`) to validate candidate drill grains against the semantic model (`validateTile`), advancing only to allowed finer grains (e.g., `year -> month` on monthly tables) and returning `null` when no finer grain is supported (preventing invalid `month -> day` drill requests on month-only metrics like `ending_mrr` on `fct_saas_monthly`).
+- Updated `src/app/Tile.tsx`, `src/app/query.ts`, and `src/app/App.tsx` so time-axis drill targets are only interactive when a valid finer grain exists and incompatible drill levels are automatically pruned.
+- Added `src/compiler/issueText.ts` (`joinProblems`, `issuesText`) and updated `src/app/Tile.tsx`, `src/app/http.ts`, `src/app/Picker.tsx`, `src/compiler/compile.ts`, `src/compiler/lineage.ts`, `src/suggest/storyAdditions.ts`, `src/suggest/digest.ts`, and `src/canvas/proposals.ts` to eliminate duplicate periods (`..`) when joining validation and compiler diagnostics.
+- Added 9 regression tests in `test/drillCompatibleGrain.test.ts` and updated `test/comparisonLabel.test.ts` and `test/designerPolish.test.ts`.
+
 ## v0.2.0 — Broadside Publication Modes, Multi-Adapter Lineage, Executive Digests & Enterprise MCP
 
 ### Broadside Design Philosophy & Publication Modes

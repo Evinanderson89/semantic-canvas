@@ -3,6 +3,7 @@ import { parseDimension, validateTile } from "../compiler/compile.ts";
 import { metricOf, metricType, periodRollupAllowed, timeColumnOf, type Model } from "../semantic/model.ts";
 import { prepareNewTile } from "./prepareTile.ts";
 import { inferChart } from "./chartRules.ts";
+import { issuesText } from "../compiler/issueText.ts";
 
 export interface StoryAddition { metrics: string[]; title: string; breakdown: "time" | "none" }
 export type StoryTile = { kind?: string; chart?: string; metrics: string[]; dimensions: string[]; where?: TileSpec["where"]; compare?: TileSpec["compare"] };
@@ -25,7 +26,7 @@ export function prepareStoryAddition(model: Model, addition: StoryAddition): Til
   if (addition.breakdown === "none" && tile.metrics.length === 1 && tile.dimensions.length) tile.chart = "kpi";
   tile.layout.h = tile.chart === "stat" || tile.chart === "kpi" ? 156 : 300;
   const issues = validateTile(model, tile);
-  if (issues.length) throw new Error(issues.map(i => i.problem).join("; "));
+  if (issues.length) throw new Error(issuesText(issues));
   return tile;
 }
 

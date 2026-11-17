@@ -14,6 +14,7 @@ import {
 } from "../semantic/model.ts";
 import { compileTile, parseDimension, validateTile } from "./compile.ts";
 import type { TileSpec } from "./spec.ts";
+import { issuesText } from "./issueText.ts";
 
 export interface MetricComponentNode {
   name: string;
@@ -67,7 +68,7 @@ export function inspectTileLineage(
 ): TileLineageInspection {
   const issues = validateTile(model, tile, { role: options?.role });
   if (issues.length) {
-    throw Object.assign(new Error(issues.map((i) => i.problem).join("; ")), { status: 400, issues });
+    throw Object.assign(new Error(issuesText(issues)), { status: 400, issues });
   }
 
   const metrics = tile.metrics.map((name) => metricOf(model, name));

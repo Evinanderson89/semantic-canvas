@@ -7,6 +7,7 @@ import { requiredDimensions } from "../suggest/prepareTile.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { useFieldProfiles } from "./useFieldProfiles.ts";
 import { filterValueLabels, useFilterMetadata } from "./useFilterMetadata.ts";
+import { issuesText } from "../compiler/issueText.ts";
 
 type Draft = Omit<TileSpec, "id" | "layout">;
 type Field = { key: string; label: string; hint: string; numeric: boolean; temporal: boolean };
@@ -128,7 +129,7 @@ export function Picker({ model, queryContext = "", onAdd, onClose }: {
     try {
       prepared = requiredDimensions(model, metrics, dims);
       const issues = validateTile(model, { id: "draft", metrics, dimensions: prepared, where, layout: { x: 0, y: 0, w: 400, h: 300 } });
-      if (issues.length) throw new Error(issues.map(i => i.problem).join("; "));
+      if (issues.length) throw new Error(issuesText(issues));
     } catch (e: any) { setValidationError(e.message); return; }
     setValidationError(""); setDims(prepared);
     setStage("viz"); setProfileAttempt(n => n + 1); setChart(null);
