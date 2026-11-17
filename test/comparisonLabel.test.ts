@@ -4,9 +4,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { Kpi } from "../src/app/Kpi.tsx";
 import { DEFAULT_FORMAT, makeFormatter } from "../src/format/format.ts";
 
-const card = (latest: number, previous: number, percent = false) => renderToStaticMarkup(createElement(Kpi, {
-  label: "Measured change", series: [{ x: "2026-08-01", y: latest }], grain: "month", previous, comparison: "prior", percent,
+const card = (latest: number, previous: number, percent = false, metricSlug?: string) => renderToStaticMarkup(createElement(Kpi, {
+  label: "Measured change", metricSlug, series: [{ x: "2026-08-01", y: latest }], grain: "month", previous, comparison: "prior", percent,
 }));
+it("renders optional metricSlug pill beside the KPI label", () => {
+  expect(card(203300, 177800, false, "ending_mrr")).toContain('<code class="metric-slug">ending_mrr</code>');
+});
 it("distinguishes small real changes from displayed zero in currency/count comparisons", () => {
   expect(card(99.99, 100)).toContain("Down &lt;0.1%");
   expect(card(100.01, 100)).toContain("Up &lt;0.1%");

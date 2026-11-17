@@ -35,12 +35,13 @@ import type { Model } from "../semantic/model.ts";
 import { calendarOf, metricOf, semanticHints, timeColumnOf } from "../semantic/model.ts";
 import { dataAsOf } from "./connected.tsx";
 import type { FilterSpec } from "../compiler/spec.ts";
-import { drillInto, NEXT_GRAIN, type DrillEntry, type DrillGrain } from "./drill.ts";
+import { drillGrain, drillInto, type DrillEntry, type DrillGrain } from "./drill.ts";
 import { downloadCsv, downloadSpreadsheet, downloadPng, slugForFilename } from "./export.ts";
 import { renderMarkdown } from "./markdown.tsx";
 import { betterKind, coarserGrain, detectNoisy, noiseScores, recommend,
          type DegenerateFinding, type FieldProfile, type VizOption } from "../suggest/recommend.ts";
 import { useSession } from "./Session.tsx";
+import { issuesText } from "../compiler/issueText.ts";
 
 /** A KPI card's natural height -- matches the headline tiles Exec Summary
  *  already packs at this height (layouts.ts: layoutExecSummary). A chart
@@ -127,6 +128,11 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   const query = visibleQuery(model, spec, crossFilters, drill);
   const { dimensions, where } = query;
   const grain = timeDimIndex !== -1 ? dimensions[timeDimIndex].split(":")[0] : null;
+  // The finer grain a click on a time bucket opens -- null when the metric or
+  // its period column allows nothing finer (Ending MRR is month-only), so the
+  // bucket is not offered as a drill instead of drilling into a rejected query.
+  const drillNext = useMemo(() => onDrill && timeDimIndex !== -1 ? drillGrain(model, { ...spec, dimensions }) : null,
+    [!!onDrill, timeDimIndex, model, spec, JSON.stringify(dimensions)]);
 
   const queryKey = JSON.stringify({
     m: spec.metrics, d: dimensions, w: where, l: spec.limit,
@@ -159,7 +165,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         if (ac.signal.aborted) return;
         setState(ok ? { status: "ok", ...body, key: queryKey, receivedAt: new Date().toISOString() }
           : { status: "error", key: queryKey, message: body.issues
-              ? body.issues.map((i: any) => i.problem).join("; ") : body.error });
+              ? issuesText(body.issues) : body.error });
       })
       .catch((e) => {
         // An aborted request is a superseded one, not a failure to report.
@@ -473,6 +479,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       {kind !== "kpi" && (
         <header>
           <h4 title={title}>{title}</h4>
+          {spec.metrics[0] && <code className="metric-slug">{spec.metrics[0]}</code>}
           <div className="tile-header-actions">
           {state.status === "ok" && <button className="chart-note-button" aria-label="Chart notes and query details" title={[
             `Query ran in ${state.ms}ms`,
@@ -616,7 +623,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         )}
         {currentResult && state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
           plotIssue ? <div className="chart-err">{plotIssue}</div> : kind === "kpi" && kpiTimeDimIndex >= 0
-            ? <Kpi label={title} actions={<>{investigate && <button className="investigate-trigger compact" aria-label="Investigate this" title="Investigate this" onPointerDown={e => e.stopPropagation()} onClick={investigate}><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg></button>}<button className="link" aria-label="Metric definition and scope" onClick={() => setEvidenceOpen(true)}>ⓘ</button><ChartActivityButtons tileId={spec.id} /></>} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
+            ? <Kpi label={title} metricSlug={spec.metrics[0]} actions={<>{investigate && <button className="investigate-trigger compact" aria-label="Investigate this" title="Investigate this" onPointerDown={e => e.stopPropagation()} onClick={investigate}><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg></button>}<button className="link" aria-label="Metric definition and scope" onClick={() => setEvidenceOpen(true)}>ⓘ</button><ChartActivityButtons tileId={spec.id} /></>} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
                    previous={query.compare && query.compare !== "none" ? numericValue(state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)]) : undefined}
                    comparison={cardComparison({ ...spec, dimensions })}
                    onComparison={onUpdate && !locked ? mode => onUpdate(withCardComparison(spec, mode)) : undefined}
@@ -635,7 +642,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
               ? <DataTable display={tableDisplay(model, spec)} presentation={presentation} columns={state.columns} rows={state.rows} defaultSortColumn={timeDimIndex === -1 && spec.metrics.length === 1 ? spec.metrics[0] : undefined} />
               : <Chart kind={kind} separateAxes={units.separateAxes} onStatus={error => setRendered(previous => previous?.key === renderKey && previous.error === error ? previous : { key: renderKey, error })} labels={Object.fromEntries(Object.values(model.metrics).map(m => [m.name, m.label]))} {...plotted!} format={chartFmt} secondaryFormat={showingPercentChange ? chartFmt : secondaryFmt} metricFormats={["heatmap", "scatter"].includes(kind) ? Object.fromEntries(spec.metrics.map(m => [m, showingPercentChange ? chartFmt : resolveFormat(model, { ...spec, metrics: [m] })])) : undefined}
                        explorationFocus={explorationFocus}
-                       pickableColumns={dimensions?.filter(d => d.includes(":") ? !!onDrill && !!NEXT_GRAIN[d.split(":")[0] as DrillGrain] : !!onCrossFilter).map(dimAlias)}
+                       pickableColumns={dimensions?.filter(d => d.includes(":") ? !!onDrill && !!drillNext : !!onCrossFilter).map(dimAlias)}
                        onPick={(kind === "smallMultiples" ? onCrossFilter : onCrossFilter || onDrill) && dimensions?.length
                          ? (col, value) => {
                              const dim = dimensions.find((d) => dimAlias(d) === col);
@@ -646,7 +653,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                                const column = dim.split(":")[1];
                                const date = value instanceof Date ? value : new Date(String(value));
                                if (Number.isNaN(+date)) return;
-                               const entry = drillInto(grain, column, date, calendarOf(model));
+                               const entry = drillInto(grain, column, date, calendarOf(model), drillNext);
                                if (entry) onDrill(entry);
                                return;
                              }

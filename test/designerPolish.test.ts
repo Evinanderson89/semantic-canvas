@@ -10,7 +10,8 @@ import { PRESETS, presetById } from "../src/canvas/presets.ts";
 import { serializeSvgElement } from "../src/app/export.ts";
 
 describe("editorial themes and palettes", () => {
-  it("provides broadside, swiss, and editorial palettes in PALETTES", () => {
+  it("provides vibrant broadside default, broadside, swiss, and editorial palettes in PALETTES", () => {
+    expect(PALETTES.default).toEqual(["#2563eb", "#059669", "#d97706", "#e11d48", "#7c3aed", "#0891b2"]);
     expect(PALETTES.broadside).toEqual(["#1d4ed8", "#0f766e", "#b45309", "#be123c", "#4338ca", "#334155"]);
     expect(PALETTES.swiss).toEqual(["#dc2626", "#171717", "#525252", "#2563eb", "#ca8a04", "#737373"]);
     expect(PALETTES.editorial).toEqual(["#2f6b96", "#3d7a5a", "#b86b35", "#a84448", "#6d598a", "#4a8580"]);

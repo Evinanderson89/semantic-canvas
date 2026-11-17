@@ -1,6 +1,7 @@
 import type { Connector } from "../connectors/types.ts";
 import { metricOf, joinPath, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, ratioSideDimensions, computedMetricIssue, calendarOf, nativePeriod, periodRollupAllowed, type Metric, type Model } from "../semantic/model.ts";
 import type { FilterSpec, TileSpec, ValidationIssue } from "./spec.ts";
+import { issuesText } from "./issueText.ts";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const GRAINS = new Set(["day", "week", "month", "quarter", "year"]);
@@ -143,7 +144,7 @@ function reportingTimeRef(model: Model, conn: Connector, owner: string, column: 
 
 export function compileTile(model: Model, conn: Connector, tile: TileSpec, options: { probe?: boolean; role?: string } = {}): string {
   const issues = validateTile(model, tile, options);
-  if (issues.length) throw new Error(issues.map((i) => i.problem).join("; "));
+  if (issues.length) throw new Error(issuesText(issues));
   const tileMetrics = tile.metrics.map((n) => metricOf(model, n));
   if (tileMetrics.some((m) => !m)) throw new Error("compileTile called with an unvalidated tile");
   const q = conn.quote.bind(conn);

@@ -17,7 +17,7 @@ export const useMetricOrder = () => useContext(MetricOrder);
  * indistinguishable from the first even when both appeared in one chart.
  * The sequence depends only on the palette, so subsets retain their identities. */
 function expandedPalette(palette: string[], count: number): string[] {
-  const colors = palette.length ? [...palette] : ["#5b8fb0"];
+  const colors = palette.length ? [...palette] : ["#2563eb"];
   if (count <= colors.length) return colors;
   const seen = new Set(colors.map(color => lab(color).formatHex()));
   const candidates = new Map<string, ReturnType<typeof lab>>();
