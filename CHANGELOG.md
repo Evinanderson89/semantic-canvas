@@ -12,6 +12,10 @@
 - Added the **Compiled SQL & Metric Lineage DAG Inspector (`POST /api/query/lineage`)** to inspect parameterized SQL, join paths, row-level security predicates, and upstream table-to-metric lineage graphs.
 - Added **Source Freshness & SLA Health (`GET /api/sources/:id/health`)** for watermark monitoring and SLA breach detection.
 - Added **2-way Dashboard-as-Code YAML Sync & Diff (`GET /api/dashboards/:id/yaml`, `POST /api/dashboards/import-yaml`)** with deterministic serialization, dry-run structural diffing, and Git-friendly round-trip import.
+- Added the **Universal 5-Dialect Semantic Layer Converter (`GET /api/model/export`, `POST /api/model/convert`)** translating semantic models across **DuckGlue / Canvas (`duckglue`)**, **Snowflake Cortex Analyst (`snowflake`)**, **dbt MetricFlow (`metricflow`)**, **AWS Glue Data Catalog (`glue`)**, and **Cube (`cube`)** with automatic source-dialect detection.
+- Added the **Semantic Layer Coach & Analysis Readiness Advisor (`GET` / `POST /api/model/coach`)** scoring semantic models across time-series honesty, driver attribution joins, unit-economics ratios, cohorts/cumulative windows, and AI/MCP readiness, with multi-dialect YAML fix snippets and natural-language question coaching.
+- Added the **`npm run semantic` Developer & CI/CD CLI (`scripts/semantic-cli.ts`)** with `formats`, `convert`, and `coach` (`--question`, `--format`, `--json`, and `--fail-under <0-100>` CI quality gates), documented in `docs/semantic-layer-conversion.md`.
+- Added the **`⌘K` / `Ctrl+K` Universal Command Palette** for instant synonym-aware governed metric placement, workspace navigation, theme switching, and canvas actions.
 
 ### Designers & Storytellers
 - Added **4 curated Editorial Theme Presets**: `editorial-warm`, `executive-slate`, `high-contrast-print`, and `boardroom-dark`.
@@ -25,7 +29,7 @@
 
 ### Enterprise & AI Ecosystem
 - Added **provider-agnostic AI** supporting `anthropic`, `openai`, `gemini`, and `openai-compatible` endpoints.
-- Added the **8-tool MCP onboarding hub** (generating configs for **Claude Desktop**, **Claude Code**, **Codex**, **Cursor**, **Antigravity**, **VS Code**, **Gemini CLI**, and **generic** MCP clients) plus **authenticated remote MCP (`POST /api/mcp`)** with RBAC and RLS enforcement.
+- Added the **8-tool MCP onboarding hub** (generating configs for **Claude Desktop**, **Claude Code**, **Codex**, **Cursor**, **Antigravity**, **VS Code**, **Gemini CLI**, and **generic** MCP clients) plus **authenticated remote MCP (`POST /api/mcp`)** with RBAC and RLS enforcement and dedicated `convert_semantic_model` and `coach_semantic_model` tools.
 - Added **OIDC real-time session revalidation**, **SCIM 2.0 provisioning (`/api/scim/v2`)**, **zero-downtime `access.yaml` reload**, and **per-dashboard ownership/lock controls**.
 - Added **AES-256-GCM persistent sessions & distributed scheduler leases**, **Slack/webhook alert delivery**, and **durable audit & ROI telemetry (`GET /api/operations/audit`, `GET /api/operations/metrics`, `GET /api/operations/manifest`)**.
 

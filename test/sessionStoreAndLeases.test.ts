@@ -48,12 +48,12 @@ describe("Persistent Encrypted Session Store & Distributed Scheduler Lease Lock"
       // Tampering with ciphertext or auth tag must be rejected
       const parts = cipherA.split(":");
       const flippedTag =
-        parts[2].slice(0, -1) + (parts[2].endsWith("A") ? "B" : "A");
+        (parts[2][0] === "A" ? "B" : "A") + parts[2].slice(1);
       const tamperedTagToken = [parts[0], parts[1], flippedTag, parts[3]].join(":");
       expect(decryptSecret(tamperedTagToken, secret)).toBeNull();
 
       const flippedData =
-        parts[3].slice(0, -1) + (parts[3].endsWith("A") ? "B" : "A");
+        (parts[3][0] === "A" ? "B" : "A") + parts[3].slice(1);
       const tamperedDataToken = [parts[0], parts[1], parts[2], flippedData].join(":");
       expect(decryptSecret(tamperedDataToken, secret)).toBeNull();
 

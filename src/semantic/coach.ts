@@ -14,6 +14,7 @@ import {
   type Model,
   type Table,
 } from "./model.ts";
+import { buildSnippetsByFormat, type SemanticLayerFormat } from "./convert.ts";
 
 export type AnalysisGoal =
   | "all"
@@ -34,6 +35,7 @@ export interface CoachingFinding {
   whyItMatters: string;
   recommendation: string;
   yamlSnippet: string;
+  snippetsByFormat?: Record<SemanticLayerFormat, string>;
   proposedMetric?: {
     name: string;
     label: string;
@@ -51,6 +53,7 @@ export interface QuestionCoaching {
   matchedTables: string[];
   coachingSteps: string[];
   suggestedYaml?: string;
+  snippetsByFormat?: Record<SemanticLayerFormat, string>;
 }
 
 export interface SemanticCoachReport {
@@ -615,6 +618,8 @@ function analyzeQuestionAgainstModel(model: Model, rawQuestion: string): Questio
     );
   }
 
+  const suggestedYaml = yamlBlocks.length > 0 ? yamlBlocks.join("\n\n") : undefined;
+  const primaryTable = [...matchedTablesSet][0] ?? Object.keys(model.tables)[0];
   return {
     question,
     canAnswerNow,
@@ -622,7 +627,12 @@ function analyzeQuestionAgainstModel(model: Model, rawQuestion: string): Questio
     matchedDimensions,
     matchedTables: [...matchedTablesSet],
     coachingSteps,
-    ...(yamlBlocks.length > 0 ? { suggestedYaml: yamlBlocks.join("\n\n") } : {}),
+    ...(suggestedYaml
+      ? {
+          suggestedYaml,
+          snippetsByFormat: buildSnippetsByFormat(suggestedYaml, { table: primaryTable }),
+        }
+      : {}),
   };
 }
 
@@ -1100,9 +1110,20 @@ export function coachSemanticModel(
     categories.reduce((acc, cat) => acc + categoryScores[cat], 0) / categories.length,
   );
 
-  // Sort findings by priority (high -> medium -> low)
+  // Sort findings by priority (high -> medium -> low) and populate multi-dialect snippets
   const priorityRank = { high: 0, medium: 1, low: 2 };
   allFindings.sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority]);
+  for (const finding of allFindings) {
+    const inferredTable =
+      finding.proposedMetric?.baseTable ??
+      model.metrics[finding.target]?.baseTable ??
+      finding.target.split(/[.( ]/)[0];
+    finding.snippetsByFormat = buildSnippetsByFormat(finding.yamlSnippet, {
+      table: inferredTable,
+      metricName: finding.proposedMetric?.name ?? finding.target,
+      label: finding.proposedMetric?.label,
+    });
+  }
 
   const goal = options?.goal ?? "all";
   const filteredFindings =

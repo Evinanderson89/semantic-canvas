@@ -19,6 +19,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "messy-lake": "tsx scripts/messy-lake.ts",
+    "semantic": "tsx scripts/semantic-cli.ts",
     "typecheck": "tsc --noEmit && npm run typecheck:tests",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
     "check": "npm run typecheck && npm run test && npm run build && npm run e2e",

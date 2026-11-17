@@ -33,6 +33,13 @@ import type { Connector } from "./connectors/types.ts";
 import { executionBudget } from "./connectors/execution.ts";
 import { fieldReachable, isNumeric, metricOf, reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
 import { coachSemanticModel, type AnalysisGoal } from "./semantic/coach.ts";
+import {
+  convertSemanticLayer,
+  exportSemanticModel,
+  isSemanticLayerFormat,
+  SEMANTIC_FORMATS,
+  type SemanticLayerFormat,
+} from "./semantic/convert.ts";
 import { metricIssues, publicationEntry, publicationRevision, publishSchema, readOverlay, registrationEntry, registerSchema, summarize, writeOverlay, type ConnectedEntry } from "./sources/connected.ts";
 import { connectConnector } from "./sources/registry.ts";
 import { discoverSchema } from "./sources/schema.ts";
@@ -958,6 +965,45 @@ app.post("/api/model/coach", safe((req, res) => {
   const goal = typeof body.goal === "string" && body.goal.trim() ? (body.goal.trim() as AnalysisGoal) : undefined;
   const question = typeof body.question === "string" && body.question.trim() ? body.question.trim() : undefined;
   res.json(coachSemanticModel(modelOf(req), { goal, question }));
+}));
+app.get("/api/model/export", safe((req, res) => {
+  const rawFormat = typeof req.query.format === "string" && req.query.format.trim() ? req.query.format.trim().toLowerCase() : "duckglue";
+  if (!isSemanticLayerFormat(rawFormat)) {
+    return res.status(400).json({
+      error: `Unsupported semantic layer format "${rawFormat}". Expected one of: ${SEMANTIC_FORMATS.map((f) => f.id).join(", ")}.`,
+    });
+  }
+  res.json(exportSemanticModel(modelOf(req), rawFormat));
+}));
+app.post("/api/model/convert", safe((req, res) => {
+  const body = req.body ?? {};
+  const targetFormat = typeof body.targetFormat === "string" ? body.targetFormat.trim().toLowerCase() : "";
+  if (!isSemanticLayerFormat(targetFormat)) {
+    return res.status(400).json({
+      error: `Unsupported targetFormat "${body.targetFormat ?? ""}". Expected one of: ${SEMANTIC_FORMATS.map((f) => f.id).join(", ")}.`,
+    });
+  }
+  const rawSourceFormat =
+    typeof body.sourceFormat === "string" && body.sourceFormat.trim()
+      ? body.sourceFormat.trim().toLowerCase()
+      : "auto";
+  if (rawSourceFormat !== "auto" && !isSemanticLayerFormat(rawSourceFormat)) {
+    return res.status(400).json({
+      error: `Unsupported sourceFormat "${body.sourceFormat}". Expected "auto" or one of: ${SEMANTIC_FORMATS.map((f) => f.id).join(", ")}.`,
+    });
+  }
+  try {
+    const content = typeof body.content === "string" && body.content.trim() ? body.content : undefined;
+    const converted = convertSemanticLayer({
+      model: modelOf(req),
+      targetFormat,
+      content,
+      sourceFormat: rawSourceFormat as SemanticLayerFormat | "auto",
+    });
+    res.json(converted);
+  } catch (err: any) {
+    return res.status(400).json({ error: String(err?.message ?? "Semantic layer conversion failed.") });
+  }
 }));
 /** Source-authorized schema discovery. */
 app.get("/api/schema", safe(async (req, res) => {
