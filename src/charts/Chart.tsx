@@ -290,6 +290,234 @@ function addSecondaryAxis(fig: any, plan: DualAxisPlan, tick: (v: number) => str
   return fig;
 }
 
+/**
+ * Draws Broadside editorial annotations onto a rendered Plot figure:
+ * - Horizontal dashed target benchmark line + amber pill (`f.targetValue`, `f.targetLabel`)
+ * - Vertical dashed policy/event cutover rule + dark pill badge (`f.annotations`)
+ * - Partial-period diagonal amber settlement-lag hatch over the final temporal interval on area charts
+ */
+function addBroadsideMarks(
+  fig: any,
+  f: import("../format/format.ts").FormatSpec,
+  data: any[],
+  x: string,
+  y: string,
+  temporalX: boolean,
+  kind: ChartKind,
+  box: { w: number; h: number },
+  marginLeft: number,
+  marginRight: number,
+) {
+  if (typeof fig?.scale !== "function") return fig;
+  const xs = fig.scale("x");
+  const ys = fig.scale("y");
+  if (!xs || !ys || typeof xs.apply !== "function" || typeof ys.apply !== "function") return fig;
+  const svg: SVGSVGElement | null = fig.tagName === "FIGURE" ? fig.querySelector(":scope > svg") : fig;
+  if (!svg) return fig;
+
+  const ns = "http://www.w3.org/2000/svg";
+  const xRange = Array.isArray(xs.range) && xs.range.length >= 2 ? xs.range : [marginLeft, box.w - marginRight];
+  const yRange = Array.isArray(ys.range) && ys.range.length >= 2 ? ys.range : [12, box.h - 34];
+  const xLeft = Math.min(...xRange);
+  const xRight = Math.max(...xRange);
+  const yTop = Math.min(...yRange);
+  const yBottom = Math.max(...yRange);
+
+  const layer = document.createElementNS(ns, "g");
+  layer.setAttribute("class", "broadside-annotations");
+  layer.setAttribute("pointer-events", "none");
+
+  // 1. Partial-period diagonal settlement-lag hatch on temporal area charts
+  if (kind === "area" && temporalX) {
+    const valid = data
+      .filter((d) => d[x] instanceof Date && Number.isFinite(+d[x]) && typeof d[y] === "number" && Number.isFinite(d[y]))
+      .sort((a, b) => +a[x] - +b[x]);
+    if (valid.length >= 4) {
+      const prev = valid[valid.length - 2];
+      const last = valid[valid.length - 1];
+      const hx1 = xs.apply(prev[x]);
+      const hx2 = xs.apply(last[x]);
+      const hy1 = ys.apply(prev[y]);
+      const hy2 = ys.apply(last[y]);
+      const rawY0 = ys.apply(0);
+      const hy0 = Number.isFinite(rawY0) ? Math.min(yBottom, Math.max(yTop, rawY0)) : yBottom;
+      if (Number.isFinite(hx1) && Number.isFinite(hx2) && hx2 > hx1 + 6 && Number.isFinite(hy1) && Number.isFinite(hy2)) {
+        const patternId = `broadside-lag-hatch-${Math.round(box.w)}-${Math.round(box.h)}`;
+        let defs = svg.querySelector("defs");
+        if (!defs) {
+          defs = document.createElementNS(ns, "defs");
+          svg.insertBefore(defs, svg.firstChild);
+        }
+        if (!defs.querySelector(`#${patternId}`)) {
+          const pat = document.createElementNS(ns, "pattern");
+          pat.setAttribute("id", patternId);
+          pat.setAttribute("width", "8");
+          pat.setAttribute("height", "8");
+          pat.setAttribute("patternUnits", "userSpaceOnUse");
+          pat.setAttribute("patternTransform", "rotate(45)");
+          const bg = document.createElementNS(ns, "rect");
+          bg.setAttribute("width", "8");
+          bg.setAttribute("height", "8");
+          bg.setAttribute("fill", "#fef3c7");
+          bg.setAttribute("fill-opacity", "0.24");
+          const stripe = document.createElementNS(ns, "line");
+          stripe.setAttribute("x1", "0");
+          stripe.setAttribute("y1", "0");
+          stripe.setAttribute("x2", "0");
+          stripe.setAttribute("y2", "8");
+          stripe.setAttribute("stroke", "#d97706");
+          stripe.setAttribute("stroke-width", "1.6");
+          stripe.setAttribute("stroke-opacity", "0.48");
+          pat.append(bg, stripe);
+          defs.appendChild(pat);
+        }
+
+        const poly = document.createElementNS(ns, "polygon");
+        poly.setAttribute("class", "broadside-hatch-zone");
+        poly.setAttribute("points", `${hx1},${hy1} ${hx2},${hy2} ${hx2},${hy0} ${hx1},${hy0}`);
+        poly.setAttribute("fill", `url(#${patternId})`);
+        const title = document.createElementNS(ns, "title");
+        title.textContent = "Late settlement hatched";
+        poly.appendChild(title);
+        layer.appendChild(poly);
+
+        const sep = document.createElementNS(ns, "line");
+        sep.setAttribute("x1", String(hx1));
+        sep.setAttribute("y1", String(yTop));
+        sep.setAttribute("x2", String(hx1));
+        sep.setAttribute("y2", String(hy0));
+        sep.setAttribute("stroke", "#d97706");
+        sep.setAttribute("stroke-width", "1.1");
+        sep.setAttribute("stroke-dasharray", "3,3");
+        sep.setAttribute("stroke-opacity", "0.75");
+        layer.appendChild(sep);
+
+        const tag = document.createElementNS(ns, "text");
+        tag.setAttribute("x", String(Math.min(xRight - 4, (hx1 + hx2) / 2)));
+        tag.setAttribute("y", String(Math.max(10, yTop + 9)));
+        tag.setAttribute("text-anchor", "middle");
+        tag.setAttribute("fill", "#b45309");
+        tag.setAttribute("font-family", "JetBrains Mono, ui-monospace, monospace");
+        tag.setAttribute("font-size", "8.5");
+        tag.setAttribute("font-weight", "700");
+        tag.setAttribute("letter-spacing", "0.05em");
+        tag.textContent = "LAG HATCHED";
+        layer.appendChild(tag);
+      }
+    }
+  }
+
+  // 2. Horizontal target benchmark line + pill
+  if (typeof f.targetValue === "number" && Number.isFinite(f.targetValue)) {
+    const ty = ys.apply(f.targetValue);
+    if (Number.isFinite(ty) && ty >= yTop - 4 && ty <= yBottom + 4) {
+      const line = document.createElementNS(ns, "line");
+      line.setAttribute("class", "broadside-target-line");
+      line.setAttribute("x1", String(xLeft));
+      line.setAttribute("y1", String(ty));
+      line.setAttribute("x2", String(xRight));
+      line.setAttribute("y2", String(ty));
+      line.setAttribute("stroke", "#d97706");
+      line.setAttribute("stroke-width", "1.5");
+      line.setAttribute("stroke-dasharray", "5,4");
+      layer.appendChild(line);
+
+      const labelText = (f.targetLabel && f.targetLabel.trim() ? f.targetLabel.trim() : "Target").toUpperCase();
+      const pillW = Math.max(66, Math.round(labelText.length * 6.0 + 16));
+      const pillH = 17;
+      const pillX = xLeft + 8;
+      const pillY = Math.max(yTop + 2, Math.min(yBottom - pillH - 2, ty - pillH - 3));
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", String(pillX));
+      rect.setAttribute("y", String(pillY));
+      rect.setAttribute("width", String(pillW));
+      rect.setAttribute("height", String(pillH));
+      rect.setAttribute("rx", "3.5");
+      rect.setAttribute("fill", "#fef3c7");
+      rect.setAttribute("stroke", "#d97706");
+      rect.setAttribute("stroke-width", "1");
+      const text = document.createElementNS(ns, "text");
+      text.setAttribute("x", String(pillX + pillW / 2));
+      text.setAttribute("y", String(pillY + 11.5));
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("fill", "#92400e");
+      text.setAttribute("font-family", "JetBrains Mono, ui-monospace, monospace");
+      text.setAttribute("font-size", "9");
+      text.setAttribute("font-weight", "700");
+      text.setAttribute("letter-spacing", "0.04em");
+      text.textContent = labelText;
+      layer.append(rect, text);
+    }
+  }
+
+  // 3. Vertical policy-cut / event annotations on temporal axis
+  if (temporalX && Array.isArray(f.annotations) && f.annotations.length > 0) {
+    for (const ann of f.annotations) {
+      if (!ann?.at || !ann?.label) continue;
+      const dt = coerceDate(ann.at);
+      if (!(dt instanceof Date) || Number.isNaN(+dt)) continue;
+      const ax = xs.apply(dt);
+      if (!Number.isFinite(ax) || ax < xLeft - 2 || ax > xRight + 2) continue;
+
+      const vline = document.createElementNS(ns, "line");
+      vline.setAttribute("class", "broadside-policy-line");
+      vline.setAttribute("x1", String(ax));
+      vline.setAttribute("y1", String(yTop + 18));
+      vline.setAttribute("x2", String(ax));
+      vline.setAttribute("y2", String(yBottom));
+      vline.setAttribute("stroke", "#090d16");
+      vline.setAttribute("stroke-width", "1.5");
+      vline.setAttribute("stroke-dasharray", "4,3");
+      vline.setAttribute("stroke-opacity", "0.78");
+      layer.appendChild(vline);
+
+      const matched = data.find((d) => d[x] instanceof Date && Math.abs(+d[x] - +dt) < 86400000 * 3 && typeof d[y] === "number" && Number.isFinite(d[y]));
+      if (matched) {
+        const cy = ys.apply(matched[y]);
+        if (Number.isFinite(cy)) {
+          const dot = document.createElementNS(ns, "circle");
+          dot.setAttribute("cx", String(ax));
+          dot.setAttribute("cy", String(cy));
+          dot.setAttribute("r", "4");
+          dot.setAttribute("fill", "#1d4ed8");
+          dot.setAttribute("stroke", "#ffffff");
+          dot.setAttribute("stroke-width", "1.75");
+          layer.appendChild(dot);
+        }
+      }
+
+      const badgeText = ann.label.trim().toUpperCase();
+      const badgeW = Math.max(84, Math.round(badgeText.length * 5.6 + 16));
+      const badgeH = 18;
+      const badgeX = Math.max(xLeft + 4, Math.min(xRight - badgeW - 4, ax - badgeW / 2));
+      const badgeY = yTop + 1;
+      const badgeRect = document.createElementNS(ns, "rect");
+      badgeRect.setAttribute("x", String(badgeX));
+      badgeRect.setAttribute("y", String(badgeY));
+      badgeRect.setAttribute("width", String(badgeW));
+      badgeRect.setAttribute("height", String(badgeH));
+      badgeRect.setAttribute("rx", "3.5");
+      badgeRect.setAttribute("fill", "#090d16");
+      const badgeLabel = document.createElementNS(ns, "text");
+      badgeLabel.setAttribute("x", String(badgeX + badgeW / 2));
+      badgeLabel.setAttribute("y", String(badgeY + 12));
+      badgeLabel.setAttribute("text-anchor", "middle");
+      badgeLabel.setAttribute("fill", "#ffffff");
+      badgeLabel.setAttribute("font-family", "JetBrains Mono, ui-monospace, monospace");
+      badgeLabel.setAttribute("font-size", "8.8");
+      badgeLabel.setAttribute("font-weight", "700");
+      badgeLabel.setAttribute("letter-spacing", "0.04em");
+      badgeLabel.textContent = badgeText;
+      layer.append(badgeRect, badgeLabel);
+    }
+  }
+
+  if (layer.childNodes.length > 0) {
+    svg.appendChild(layer);
+  }
+  return fig;
+}
+
 /** Rows with a present value. This helper is for independent marks only:
  * connected line/area paths must retain missing rows so they break at gaps. */
 export function definedRows<T extends Record<string, unknown>>(rows: T[], key: string): T[] {
@@ -405,10 +633,11 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       };
       if (!dual) {
         const fittedTick = fitTicks(observed, tick);
-        return scaleCaption(Plot.plot({ ...common, y: { ...common.y, tickFormat: fittedTick }, color: seriesColor, ...(fitted ? { caption: "Y-axis fitted to data" } : {}),
+        const plot = scaleCaption(Plot.plot({ ...common, y: { ...common.y, tickFormat: fittedTick }, color: seriesColor, ...(fitted ? { caption: "Y-axis fitted to data" } : {}),
           marks: [...(fitted ? [] : [Plot.ruleY([0])]),
-            Plot.line(tidy, { x: "x", y: "value", stroke: "series", curve: "monotone-x" }),
+            Plot.line(tidy, { x: "x", y: "value", stroke: "series", curve: "monotone-x", strokeWidth: 2 }),
             Plot.dot(tidy, { x: "x", y: "value", stroke: "series", fill: "series", r: 2.5, title: pointTitle })] }), fittedTick);
+        return addBroadsideMarks(plot, f, data, x, y, temporalX, kind, box, marginLeft, marginRight);
       }
       // Secondary-axis series are remapped into the primary axis's numeric
       // range so one Plot y-scale can position both, then a real axis in
@@ -419,15 +648,16 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
         x: d[x], series: m,
         value: d[m] == null ? NaN : secondarySet.has(m) ? dual.remap(Number(d[m])) : Number(d[m]),
       })));
-      const marginRight = f.showY ? 54 : 12;
+      const dualMarginRight = f.showY ? 54 : 12;
       const primaryTick = fitTicks(data.flatMap(d => dual.primary.map(m => numericValue(d[m])).filter((v): v is number => v !== null)), dualTick(dual.primary));
-      const fig = Plot.plot({ ...common, y: { ...common.y, tickFormat: primaryTick }, marginRight, caption: dualCaption(dual),
+      const fig = Plot.plot({ ...common, y: { ...common.y, tickFormat: primaryTick }, marginRight: dualMarginRight, caption: dualCaption(dual),
         color: { ...metricColors, legend },
         marks: [...(fitted ? [] : [Plot.ruleY([0])]),
-          Plot.line(tidyDual, { x: "x", y: "value", stroke: "series", curve: "monotone-x" }),
+          Plot.line(tidyDual, { x: "x", y: "value", stroke: "series", curve: "monotone-x", strokeWidth: 2 }),
           Plot.dot(tidyDual, { x: "x", y: "value", stroke: "series", r: 1.6 })] });
       const withCaption = scaleCaption(fig, primaryTick, dualCaption(dual));
-      return f.showY ? addSecondaryAxis(withCaption, dual, dualTick(dual.secondary), marginRight, box.w) : withCaption;
+      const withAxis = f.showY ? addSecondaryAxis(withCaption, dual, dualTick(dual.secondary), dualMarginRight, box.w) : withCaption;
+      return addBroadsideMarks(withAxis, f, data, x, y, temporalX, kind, box, marginLeft, dualMarginRight);
     }
     case "combo": {
       // Fixed roles, not magnitude-sorted like the plain multi-series line
@@ -485,12 +715,17 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       return dual && f.showY ? addSecondaryAxis(fig, dual, dualTick(dual.secondary), marginRight, box.w) : fig;
     }
     case "area": {
-      return Plot.plot({ ...common,
+      const plot = Plot.plot({ ...common,
         // Explicit boundaries avoid areaY's default stacking, which treats
         // missing measures as empty layers. Retaining the rows breaks both
         // paths at unavailable observations instead of connecting over them.
-        marks: [Plot.area(data, { x1: x, x2: x, y1: 0, y2: y, fill: metricColor(y), fillOpacity: 0.18 }),
-          Plot.line(data, { x, y, stroke: metricColor(y), curve: "monotone-x" }), Plot.ruleY([0])] });
+        marks: [
+          Plot.area(data, { x1: x, x2: x, y1: 0, y2: y, fill: metricColor(y), fillOpacity: 0.16 }),
+          Plot.line(data, { x, y, stroke: metricColor(y), strokeWidth: 2.2, curve: "monotone-x" }),
+          Plot.dot(definedRows(data, y), { x, y, fill: metricColor(y), stroke: "var(--surface)", r: 2.8 }),
+          Plot.ruleY([0]),
+        ] });
+      return addBroadsideMarks(plot, f, data, x, y, temporalX, kind, box, marginLeft, marginRight);
     }
     case "areaStacked": {
       // A missing component is an unknown total, not an empty/zero layer.

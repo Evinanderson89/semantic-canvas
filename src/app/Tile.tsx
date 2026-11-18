@@ -21,6 +21,7 @@ import { chartResult, chartUnits, dimensionAlias as dimAlias } from "./chartResu
 import { validateTile } from "../compiler/compile.ts";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
+import { format as d3format } from "d3-format";
 import { Chart, DataTable, Stat } from "../charts/Chart.tsx";
 import { Kpi } from "./Kpi.tsx";
 import { TileActions } from "./TileChrome.tsx";
@@ -479,7 +480,6 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       {kind !== "kpi" && (
         <header>
           <h4 title={title}>{title}</h4>
-          {spec.metrics[0] && <code className="metric-slug">{spec.metrics[0]}</code>}
           <div className="tile-header-actions">
           {state.status === "ok" && <button className="chart-note-button" aria-label="Chart notes and query details" title={[
             `Query ran in ${state.ms}ms`,
@@ -623,7 +623,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         )}
         {currentResult && state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
           plotIssue ? <div className="chart-err">{plotIssue}</div> : kind === "kpi" && kpiTimeDimIndex >= 0
-            ? <Kpi label={title} metricSlug={spec.metrics[0]} actions={<>{investigate && <button className="investigate-trigger compact" aria-label="Investigate this" title="Investigate this" onPointerDown={e => e.stopPropagation()} onClick={investigate}><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg></button>}<button className="link" aria-label="Metric definition and scope" onClick={() => setEvidenceOpen(true)}>ⓘ</button><ChartActivityButtons tileId={spec.id} /></>} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
+            ? <Kpi label={title} actions={<>{investigate && <button className="investigate-trigger compact" aria-label="Investigate this" title="Investigate this" onPointerDown={e => e.stopPropagation()} onClick={investigate}><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg></button>}<button className="link" aria-label="Metric definition and scope" onClick={() => setEvidenceOpen(true)}>ⓘ</button><ChartActivityButtons tileId={spec.id} /></>} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
                    previous={query.compare && query.compare !== "none" ? numericValue(state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)]) : undefined}
                    comparison={cardComparison({ ...spec, dimensions })}
                    onComparison={onUpdate && !locked ? mode => onUpdate(withCardComparison(spec, mode)) : undefined}
@@ -634,7 +634,15 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                    series={(state.rows ?? []).filter((r: any[]) => r[state.columns.indexOf(dimAlias(dimensions[kpiTimeDimIndex]))] != null).map((r: any[]) =>
                      ({ x: r[state.columns.indexOf(dimAlias(dimensions[kpiTimeDimIndex]))], y: numericValue(r[state.columns.indexOf(spec.metrics[0])]) ?? NaN }))
                      .sort((a: { x: unknown }, b: { x: unknown }) => +new Date(String(a.x)) - +new Date(String(b.x)))}
-                   options={spec.spark} format={makeFormatter(fmt)} percent={fmt.number === "percent"}
+                   options={spec.spark}
+                   format={
+                     fmt.number === "currency" && fmt.decimals == null
+                       ? (n: number) => (Math.abs(n) >= 10000 ? "$" + d3format(".4~s")(n).replace("G", "B") : makeFormatter(fmt)(n))
+                       : fmt.number === "compact" && fmt.decimals == null
+                       ? (n: number) => d3format(".4~s")(n).replace("G", "B")
+                       : makeFormatter(fmt)
+                   }
+                   percent={fmt.number === "percent"}
                    onOptions={onUpdate && !locked ? (spark) => onUpdate({ ...spec, spark }) : undefined} />
           : kind === "stat" || kind === "kpi"
             ? <Stat value={state.rows?.[0]?.[state.columns.indexOf(spec.metrics[0])]} format={makeFormatter(fmt)} />

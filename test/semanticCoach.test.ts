@@ -158,12 +158,25 @@ describe("Semantic Layer Coach & Analysis Readiness Advisor (Unit)", () => {
     expect(conversionFinding?.proposedMetric).toBeDefined();
     expect(proposalProblems(needsCoachingModel, conversionFinding!.proposedMetric!)).toEqual([]);
 
-    // 4. cohorts_and_cumulative: fct_sessions has timeColumn (session_date) and simple metric (session_count) but no cumulative metric
+    // 4. cohorts_and_cumulative: fct_sessions has timeColumn (session_date) and simple metric (session_count) but no cumulative metric;
+    //    and dim_customers lacks an acquisition/signup cohort dimension (signup_date / cohort_month)
     const cohortFindings = report.findings.filter((f) => f.category === "cohorts_and_cumulative");
-    expect(cohortFindings.length).toBeGreaterThanOrEqual(1);
-    expect(cohortFindings[0].yamlSnippet).toContain("type: cumulative");
-    expect(cohortFindings[0].yamlSnippet).toContain("metric: session_count");
-    expect(cohortFindings[0].yamlSnippet).toContain("window: 6");
+    expect(cohortFindings.length).toBeGreaterThanOrEqual(2);
+    const cumulativeFinding = cohortFindings.find((f) => f.id.includes("missing_cumulative"));
+    expect(cumulativeFinding).toBeDefined();
+    expect(cumulativeFinding?.title).toContain("Add a 6-period trailing window metric for rolling totals");
+    expect(cumulativeFinding?.whyItMatters).toContain(
+      "True cohort analysis requires grouping by an acquisition/signup period dimension alongside retention or activity measures",
+    );
+    expect(cumulativeFinding?.yamlSnippet).toContain("type: cumulative");
+    expect(cumulativeFinding?.yamlSnippet).toContain("metric: session_count");
+    expect(cumulativeFinding?.yamlSnippet).toContain("window: 6");
+
+    const cohortDimFinding = cohortFindings.find((f) => f.id.includes("missing_cohort_dimension"));
+    expect(cohortDimFinding).toBeDefined();
+    expect(cohortDimFinding?.target).toBe("dim_customers.signup_date");
+    expect(report.summary).toContain("heuristic readiness");
+    expect(report.summary).toContain("not a quality certification");
 
     // 5. agent_readiness: missing grain on fct_orders, unreviewed table fct_sessions, missing descriptions & smart synonyms
     const agentFindings = report.findings.filter((f) => f.category === "agent_readiness");
@@ -237,13 +250,25 @@ describe("Semantic Layer Coach & Analysis Readiness Advisor (Unit)", () => {
     expect(q2.questionAnalysis?.coachingSteps.some((s) => s.includes("SUM(fct_orders.discount_amount)"))).toBe(true);
     expect(q2.questionAnalysis?.suggestedYaml).toContain("SUM(fct_orders.discount_amount)");
 
-    // 3. Question that CAN be answered right now (completed_orders by status on fct_orders)
+    // 3. Question that appears to be supported by the model (completed_orders by status on fct_orders)
     const q3 = coachSemanticModel(needsCoachingModel, {
       question: "Completed orders by status",
     });
     expect(q3.questionAnalysis?.canAnswerNow).toBe(true);
     expect(q3.questionAnalysis?.matchedMetrics).toContain("completed_orders");
     expect(q3.questionAnalysis?.matchedDimensions).toContain("fct_orders.status");
+    expect(q3.questionAnalysis?.coachingSteps[0]).toContain("Model appears to support this question");
+
+    // 4. Cohort question when dim_customers lacks signup_date / cohort_month
+    const q4 = coachSemanticModel(needsCoachingModel, {
+      question: "Customer cohort retention by signup cohort",
+    });
+    expect(q4.questionAnalysis?.canAnswerNow).toBe(false);
+    expect(
+      q4.questionAnalysis?.coachingSteps.some((s) =>
+        s.includes("True cohort analysis requires grouping by an acquisition/signup period dimension"),
+      ),
+    ).toBe(true);
   });
 
   it("scores a fully governed model at 100/100 with zero findings", () => {
@@ -275,6 +300,7 @@ describe("Semantic Layer Coach & Analysis Readiness Advisor (Unit)", () => {
           columns: [
             { name: "customer_id", type: "string" },
             { name: "segment", type: "string" },
+            { name: "signup_date", type: "date" },
           ],
         },
       },

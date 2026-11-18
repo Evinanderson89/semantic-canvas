@@ -359,7 +359,7 @@ export async function generateExecutiveDigest(
 
 /**
  * Formats an ExecutiveDigest into a clean, Slack/board-memo-ready Markdown brief
- * with a "Verified by Semantic Canvas" provenance footer.
+ * with an "Executive Digest · Snapshot with integrity checksum (SHA-256)" footer.
  */
 export function formatDigestMarkdown(digest: ExecutiveDigest): string {
   const lines: string[] = [];
@@ -388,7 +388,12 @@ export function formatDigestMarkdown(digest: ExecutiveDigest): string {
   }
   lines.push("");
   lines.push("---");
-  lines.push(`Verified by Semantic Canvas · Provenance: \`${digest.provenanceHash}\``);
+  lines.push(
+    `Executive Digest · Snapshot with integrity checksum (SHA-256) · Verified by Semantic Canvas · Provenance: \`${digest.provenanceHash}\``,
+  );
+  lines.push(
+    "_The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship._",
+  );
   return lines.join("\n");
 }
 

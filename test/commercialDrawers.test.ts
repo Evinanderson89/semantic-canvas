@@ -212,6 +212,8 @@ describe("Commercial Drawers & Inspector Lineage/Drivers UI Helpers + API Integr
     expect(draftPreview.briefFingerprint).toBeNull();
     expect(draftPreview.highlights).toHaveLength(1);
     expect(draftPreview.highlights[0]?.metric).toBe("ending_mrr");
+    expect(draftPreview.markdown).toContain("Snapshot with integrity checksum");
+    expect(draftPreview.markdown).toContain("verifies snapshot content integrity");
 
     // Save dashboard so we can test server digest & YAML sync
     const saveRes = await loopbackRequest(`${url}/api/dashboards`, {
@@ -228,7 +230,7 @@ describe("Commercial Drawers & Inspector Lineage/Drivers UI Helpers + API Integr
     });
     expect(saveRes.status).toBe(200);
 
-    // Server-verified Executive Digest
+    // Executive Digest · Snapshot with integrity checksum
     const digestRes = await loopbackRequest(`${url}/api/dashboards/commercial-pulse/digest`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -239,7 +241,10 @@ describe("Commercial Drawers & Inspector Lineage/Drivers UI Helpers + API Integr
     expect(digestView.briefFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(digestView.highlights).toHaveLength(1);
     expect(digestView.markdown).toContain("Executive Digest");
+    expect(digestView.markdown).toContain("Snapshot with integrity checksum");
+    expect(digestView.markdown).toContain("verifies snapshot content integrity");
     expect(digestView.html).toContain("<article");
+    expect(digestView.html).toContain("verifies snapshot content integrity");
 
     // YAML export & import-yaml diff validation
     const updatedSpec: DashboardSpec = {

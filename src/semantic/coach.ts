@@ -70,9 +70,26 @@ export const COACH_CATEGORIES: { id: CoachCategory; label: string; shortLabel: s
   { id: "time_series", label: "Time-Series & Honesty", shortLabel: "Time-Series" },
   { id: "driver_attribution", label: "Driver Attribution & Joins", shortLabel: "Drivers & Joins" },
   { id: "ratios_and_funnels", label: "Ratios & Funnels", shortLabel: "Ratios & Funnels" },
-  { id: "cohorts_and_cumulative", label: "Cohorts & Cumulative", shortLabel: "Cohorts & Cumulative" },
+  { id: "cohorts_and_cumulative", label: "Cohorts & Rolling Totals", shortLabel: "Cohorts & Rolling" },
   { id: "agent_readiness", label: "AI & MCP Readiness", shortLabel: "AI & MCP" },
 ];
+
+const COHORT_DIM_RE =
+  /(^|_)(signup|cohort|acquisition|acquired|first_order|onboard|registered|registration)_(date|month|week|period|at|on|year)$|\bcohort_(month|date|week|period|id)\b|^signup_date$|^cohort_month$/i;
+const CUSTOMER_TABLE_RE = /^(dim_)?(customers?|users?|accounts?|subscribers?|members?|orgs?|organizations?|clients?)$/i;
+
+export function findCohortGroupingDimensions(model: Model): string[] {
+  const found: string[] = [];
+  for (const table of Object.values(model.tables)) {
+    for (const col of table.columns) {
+      if (isLineage(col)) continue;
+      if (COHORT_DIM_RE.test(col.name)) {
+        found.push(`${table.name}.${col.name}`);
+      }
+    }
+  }
+  return found;
+}
 
 export const COACH_PRESET_QUESTIONS: string[] = [
   "Revenue per order by customer segment over time",
@@ -398,6 +415,7 @@ function analyzeQuestionAgainstModel(model: Model, rawQuestion: string): Questio
   }
 
   // Also check if the question asks for "over time" / "trend" / "monthly" and add the primary metric table's time dimension if present
+  const autoTimeDimensions = new Set<string>();
   if (/\b(over time|trend|monthly|weekly|daily|by month|by date|by week)\b/i.test(question)) {
     for (const tName of matchedTablesSet) {
       const t = model.tables[tName];
@@ -407,6 +425,7 @@ function analyzeQuestionAgainstModel(model: Model, rawQuestion: string): Questio
         const qualified = `${t.name}.${tc}`;
         if (!matchedDimensions.includes(qualified)) {
           matchedDimensions.push(qualified);
+          autoTimeDimensions.add(qualified);
         }
       }
     }
@@ -554,7 +573,10 @@ function analyzeQuestionAgainstModel(model: Model, rawQuestion: string): Questio
     metricBaseTables.add(table.name);
   }
   const dimensionTables = new Set<string>(
-    matchedDimensions.map((d) => d.split(".")[0]).filter((t) => Boolean(model.tables[t])),
+    matchedDimensions
+      .filter((d) => !autoTimeDimensions.has(d))
+      .map((d) => d.split(".")[0])
+      .filter((t) => Boolean(model.tables[t])),
   );
   // Also include any explicitly matched dimension table (`dim_*`) if metricBaseTables is non-empty
   for (const tName of matchedTablesSet) {
@@ -604,6 +626,45 @@ function analyzeQuestionAgainstModel(model: Model, rawQuestion: string): Questio
     }
   }
 
+  // Gap check 4: Cohort & retention questions require a true acquisition/signup cohort dimension + activity/retention measure
+  const asksForCohort = /\bcohorts?\b/i.test(question);
+  const asksForRetention = /\b(retention|nrr|grr)\b/i.test(question);
+  if (asksForCohort || asksForRetention) {
+    const cohortDims = findCohortGroupingDimensions(model);
+    for (const cd of cohortDims) {
+      if (asksForCohort && !matchedDimensions.includes(cd)) {
+        matchedDimensions.push(cd);
+        matchedTablesSet.add(cd.split(".")[0]);
+      }
+    }
+    const cohortClarification =
+      "True cohort analysis requires grouping by an acquisition/signup period dimension alongside retention or activity measures (a trailing cumulative total alone only measures rolling volume, not cohort retention).";
+    if (asksForCohort && cohortDims.length === 0) {
+      hasBlockingGap = true;
+      const customerTable =
+        Object.values(model.tables).find((t) => CUSTOMER_TABLE_RE.test(t.name)) ??
+        Object.values(model.tables)[0];
+      const targetTableName = customerTable?.name ?? "dim_customers";
+      coachingSteps.push(
+        `${cohortClarification} Declare an acquisition/signup period dimension such as ${targetTableName}.signup_date or ${targetTableName}.cohort_month.`,
+      );
+      yamlBlocks.push(
+        [
+          "tables:",
+          `  ${targetTableName}:`,
+          "    columns:",
+          "      - name: signup_date",
+          "        type: date",
+          "        description: Customer acquisition or signup period dimension for cohort retention analysis.",
+        ].join("\n"),
+      );
+    } else if (asksForCohort) {
+      coachingSteps.push(
+        `${cohortClarification} Group by ${cohortDims.join(", ")} alongside your retention or activity measure.`,
+      );
+    }
+  }
+
   if (matchedMetrics.length === 0 && !hasBlockingGap) {
     hasBlockingGap = true;
     coachingSteps.push(
@@ -612,9 +673,9 @@ function analyzeQuestionAgainstModel(model: Model, rawQuestion: string): Questio
   }
 
   const canAnswerNow = !hasBlockingGap && matchedMetrics.length > 0;
-  if (canAnswerNow && coachingSteps.length === 0) {
-    coachingSteps.push(
-      `Ready to answer now with governed metric${matchedMetrics.length === 1 ? "" : "s"} (${matchedMetrics.join(", ")})${matchedDimensions.length > 0 ? ` segmented by ${matchedDimensions.join(", ")}` : ""}.`,
+  if (canAnswerNow) {
+    coachingSteps.unshift(
+      `Model appears to support this question with governed metric${matchedMetrics.length === 1 ? "" : "s"} (${matchedMetrics.join(", ")})${matchedDimensions.length > 0 ? ` segmented by ${matchedDimensions.join(", ")}` : ""} (validate with a live query).`,
     );
   }
 
@@ -949,7 +1010,7 @@ export function coachSemanticModel(
   const cumulativeMetrics = allMetrics.filter((m) => metricType(m) === "cumulative");
   if (cumulativeMetrics.length > 0) {
     strengths.push(
-      `${cumulativeMetrics.length} cumulative metric${cumulativeMetrics.length === 1 ? " supports" : "s support"} running-total and trailing-window lifecycle analysis.`,
+      `${cumulativeMetrics.length} cumulative metric${cumulativeMetrics.length === 1 ? " supports" : "s support"} rolling & trailing-window totals.`,
     );
   }
 
@@ -977,10 +1038,10 @@ export function coachSemanticModel(
         id: `cohorts_and_cumulative:missing_cumulative:${table.name}`,
         category: "cohorts_and_cumulative",
         priority: "medium",
-        title: `Add trailing-window cumulative metric on ${table.name} (${baseMetric.label})`,
+        title: `Add a 6-period trailing window metric for rolling totals on ${table.name} (${baseMetric.label})`,
         target: `${table.name}.${baseMetric.name}`,
-        whyItMatters: `Table ${table.name} has a declared time axis (${timeCol}) and simple metrics, but no type: cumulative metric for running totals or trailing-window cohort tracking.`,
-        recommendation: `Define a cumulative metric (type: cumulative, metric: ${baseMetric.name}, window: 6) on ${table.name} for 6-period trailing lifecycle and cohort accumulation.`,
+        whyItMatters: `Table ${table.name} has a declared time axis (${timeCol}) and simple metrics, but no type: cumulative metric for rolling & trailing-window totals. True cohort analysis requires grouping by an acquisition/signup period dimension alongside retention or activity measures (a trailing cumulative total alone only measures rolling volume, not cohort retention).`,
+        recommendation: `Add a 6-period trailing window metric for rolling totals (type: cumulative, metric: ${baseMetric.name}, window: 6) on ${table.name}.`,
         yamlSnippet: [
           "metrics:",
           `  ${cumName}:`,
@@ -989,7 +1050,35 @@ export function coachSemanticModel(
           `    type: cumulative`,
           `    metric: ${baseMetric.name}`,
           `    window: 6`,
-          `    description: Running 6-period cumulative total of ${baseMetric.label} along ${table.name}.${timeCol}.`,
+          `    description: Rolling 6-period trailing-window total of ${baseMetric.label} along ${table.name}.${timeCol} (measures rolling volume, not cohort retention).`,
+        ].join("\n"),
+      });
+    }
+  }
+
+  const cohortGroupingDims = findCohortGroupingDimensions(model);
+  if (cohortGroupingDims.length > 0 && allMetrics.length > 0) {
+    strengths.push(
+      `Cohort grouping dimension (${cohortGroupingDims.join(", ")}) pairs with retention or activity measures for true cohort analysis.`,
+    );
+  } else if (cohortGroupingDims.length === 0) {
+    const customerTable = tables.find((t) => CUSTOMER_TABLE_RE.test(t.name));
+    if (customerTable) {
+      allFindings.push({
+        id: `cohorts_and_cumulative:missing_cohort_dimension:${customerTable.name}`,
+        category: "cohorts_and_cumulative",
+        priority: "medium",
+        title: `Add an acquisition/signup cohort dimension on ${customerTable.name} (e.g. signup_date or cohort_month)`,
+        target: `${customerTable.name}.signup_date`,
+        whyItMatters: `True cohort analysis requires grouping by an acquisition/signup period dimension alongside retention or activity measures (a trailing cumulative total alone only measures rolling volume, not cohort retention). Table ${customerTable.name} currently declares no signup_date or cohort_month dimension.`,
+        recommendation: `Expose an acquisition/signup period dimension (e.g. signup_date or cohort_month) on ${customerTable.name} and pair it with retention or activity measures.`,
+        yamlSnippet: [
+          "tables:",
+          `  ${customerTable.name}:`,
+          "    columns:",
+          "      - name: signup_date",
+          "        type: date",
+          "        description: Customer acquisition or signup period dimension for cohort retention analysis.",
         ].join("\n"),
       });
     }
@@ -1132,8 +1221,8 @@ export function coachSemanticModel(
   const highCount = allFindings.filter((f) => f.priority === "high").length;
   const summary =
     allFindings.length === 0
-      ? `Model "${model.name}" achieved a ${overallScore}/100 analysis readiness score across all 5 coaching dimensions with zero gaps detected.`
-      : `Model "${model.name}" scored ${overallScore}/100 for analysis readiness (${allFindings.length} coaching finding${allFindings.length === 1 ? "" : "s"}${highCount > 0 ? `, including ${highCount} high-priority recommendation${highCount === 1 ? "" : "s"}` : ""}).`;
+      ? `Model "${model.name}" achieved a ${overallScore}/100 heuristic readiness score across all 5 coaching dimensions with zero structural gaps detected (structural heuristic based on declared fields and joins — run a query to validate against warehouse data; not a quality certification).`
+      : `Model "${model.name}" scored ${overallScore}/100 on the heuristic readiness check (${allFindings.length} coaching finding${allFindings.length === 1 ? "" : "s"}${highCount > 0 ? `, including ${highCount} high-priority recommendation${highCount === 1 ? "" : "s"}` : ""}; structural heuristic based on declared fields and joins — run a query to validate against warehouse data; not a quality certification).`;
 
   const questionText = options?.question?.trim();
   const questionAnalysis = questionText

@@ -2,6 +2,7 @@ import { VersionHistory } from "./VersionHistory.tsx";
 import { Investigation } from "./Investigation.tsx";
 import type { InvestigationResult } from "../suggest/investigate.ts";
 import { ReviewHandoff } from "./ReviewHandoff.tsx";
+import type { PresentationMode } from "./ReportPresentation.tsx";
 import { presentationContentKey, withPresentationBrief } from "./presentationBrief.ts";
 import { unappliedFilters } from "./filters.ts";
 import { ChartActivityProvider } from "./ChartActivity.tsx";
@@ -102,6 +103,7 @@ export function App() {
   const [investigating, setInvestigating] = useState<{ id: string; result: InvestigationResult } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [handoff, setHandoff] = useState(false);
+  const [handoffMode, setHandoffMode] = useState<PresentationMode>("dashboard");
   const [interview, setInterview] = useState(false);
   const [aiRedesign, setAiRedesign] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
@@ -670,10 +672,10 @@ export function App() {
     ...(dash ? [
       {
         id: "action:executive-digest",
-        label: "Executive digest & SHA-256 verified brief",
-        subtitle: "Warehouse-verified headline values, Markdown & signed bundle",
+        label: "Executive digest & snapshot with integrity checksum",
+        subtitle: "Warehouse-verified headline values, Markdown & SHA-256 integrity checksum",
         category: "Actions" as const,
-        keywords: ["digest", "brief", "sha256", "sha-256", "verified", "executive", "summary"],
+        keywords: ["digest", "brief", "sha256", "sha-256", "verified", "checksum", "snapshot", "executive", "summary"],
         onSelect: () => setDigestOpen(true),
       },
       {
@@ -690,7 +692,7 @@ export function App() {
         subtitle: "Editorial review, story presentation & infographic export",
         category: "Actions" as const,
         keywords: ["review", "share", "story", "infographic", "handoff", "presentation", "pdf"],
-        onSelect: () => setHandoff(true),
+        onSelect: () => { setHandoffMode("dashboard"); setHandoff(true); },
       }] : []),
       ...(session.canEdit ? [{
         id: "action:ai-redesign",
@@ -926,13 +928,11 @@ export function App() {
             <div className="topbar doc-head canvas-head" ref={topbarRef}>
               <button className="link back-link" onClick={() => beginDocument(null)}>← <span>Workspace</span></button>
               <div className="dashboard-identity">
-                <div className="broadside-eyebrow mono">GOVERNED SEMANTIC WORKSPACE · PARAMETERIZED SQL</div>
                 <h1 className="dash-title">{dash.title}</h1>
                 <div className="dashboard-meta">
                   <span>{dash.tiles.length} tiles</span><span aria-hidden="true">·</span>
                   <span>{prettifyModelName(model.name)}</span>
-                  <span className="masthead-pill">Settled + Lag Hatched</span>
-                  <span className="masthead-pill">SHA-256 Verified Brief</span>
+                  <span className="masthead-pill" title="SHA-256 checks content integrity, not analytical correctness or authorship.">Snapshot with integrity checksum</span>
                   {templateId && <span title="This starter opens as a new dashboard. Save to keep your version.">· Starter copy</span>}
                   {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
                 </div>
@@ -966,7 +966,7 @@ export function App() {
               <button className="save-button" onClick={() => save()} disabled={saving || !session.canEdit} aria-label="Save dashboard">
                 {saving ? "Saving…" : "Save"}
               </button>
-              <button className="review-action" disabled={!dash.tiles.length} onClick={() => setHandoff(true)}>Review and share</button>
+              <button className="review-action" disabled={!dash.tiles.length} onClick={() => { setHandoffMode("dashboard"); setHandoff(true); }}>Review and share</button>
               <Popover label="Dashboard actions" trigger={<span aria-hidden="true">•••</span>} align="end" className="document-menu">
                 {(close) => <>
                   <button onClick={() => { close(); refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
@@ -974,7 +974,7 @@ export function App() {
                   <button disabled={!session.canEdit} onClick={() => { close(); setDistributing(true); }}>Copy charts to…</button>
                   <button disabled={!session.canEdit || !dash.tiles.length} onClick={() => { close(); coreLibrary.refresh(); setSaveViewOpen(true); }}>Save a view to library</button>
                   <button disabled={!session.canEdit} onClick={() => { close(); setReferenceImport(true); }}>Recreate from reference</button>
-                  <button onClick={() => { close(); setDigestOpen(true); }}>Executive digest & verified brief</button>
+                  <button onClick={() => { close(); setDigestOpen(true); }}>Executive digest &amp; integrity snapshot</button>
                   <button onClick={() => { close(); setYamlSyncOpen(true); }}>Dashboard-as-Code (YAML)</button>
                   <button onClick={() => { close(); setCoachOpen(true); }}>Semantic layer coach</button>
                   <button disabled={exportingPng} onClick={() => { close(); exportDashboardPng(); }}>
@@ -999,7 +999,79 @@ export function App() {
 
             <div className={`document-state-bar${canvas.locked ? " preview" : ""}`} aria-label="Dashboard mode">
               <span className="mode-label">{!session.canEdit ? "VIEWER" : canvas.locked ? "PREVIEW" : "EDIT MODE"}</span>
-              <span>{!session.canEdit ? "Read-only dashboard · filters and drill-downs remain interactive." : canvas.locked ? "Previewing your current work. Preview does not publish or save changes." : "Changes stay in your draft until you save."}</span>
+              <div className="journey-bar" role="group" aria-label="End-to-end analytics journey">
+                {session.canEdit && (
+                  <button
+                    type="button"
+                    className="journey-step"
+                    aria-pressed={!canvas.locked && !handoff && !aiRedesign}
+                    title="Start from a messy draft dashboard or edit the canvas"
+                    onClick={() => {
+                      setHandoff(false);
+                      setAiRedesign(false);
+                      if (demoDashboardAvailable(model) && dash.title !== "Growth & acquisition (draft)") {
+                        const c = { ...freshCanvas(), locked: false };
+                        if (beginDocument(demoDashboard(c.width), { canvas: c })) {
+                          pendingFit.current = true;
+                          setView("home");
+                        }
+                      } else if (canvas.locked) {
+                        changeCanvas({ ...canvas, locked: false });
+                      }
+                    }}
+                  >
+                    <span className="journey-num">1</span>
+                    Messy Draft
+                  </button>
+                )}
+                {session.canEdit && (
+                  <button
+                    type="button"
+                    className="journey-step"
+                    disabled={!dash.tiles.length}
+                    title="Run deterministic chart checks, Smart Arrange, and AI design improvements"
+                    onClick={() => {
+                      setHandoff(false);
+                      if (canvas.locked) changeCanvas({ ...canvas, locked: false });
+                      requestAnimationFrame(() => {
+                        const btn = document.querySelector<HTMLButtonElement>('.editbar button[aria-haspopup="dialog"]');
+                        if (btn && btn.getAttribute("aria-expanded") !== "true") btn.click();
+                      });
+                    }}
+                  >
+                    <span className="journey-num">2</span>
+                    Improve &amp; Arrange
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="journey-step"
+                  disabled={!dash.tiles.length}
+                  aria-pressed={handoff && handoffMode === "story"}
+                  title="Open the question-led Executive Story view with supporting evidence"
+                  onClick={() => {
+                    setHandoffMode("story");
+                    setHandoff(true);
+                  }}
+                >
+                  <span className="journey-num">3</span>
+                  Executive Story
+                </button>
+                <button
+                  type="button"
+                  className="journey-step"
+                  disabled={!dash.tiles.length}
+                  aria-pressed={handoff && handoffMode === "infographic"}
+                  title="Open the Broadside Infographic poster view with vector SVG export"
+                  onClick={() => {
+                    setHandoffMode("infographic");
+                    setHandoff(true);
+                  }}
+                >
+                  <span className="journey-num">4</span>
+                  Broadside Infographic
+                </button>
+              </div>
               <span><strong>{dashId ? `Saved version ${revision}` : "Not saved yet"}</strong> · {session.mode === "team" ? "Workspace access" : "Local workspace"}</span>
               <span className="spacer" />
               <button disabled={!dashId} title={!dashId ? "Save once to start version history" : "Browse and restore saved dashboard designs"} onClick={() => setHistoryOpen(true)}>Version history</button>
@@ -1178,14 +1250,34 @@ export function App() {
           addTile(draft, { w: Math.min(900, canvas.width - 48), h: 440 }); setInvestigating(null);
           setNotice("Investigation added with its captured period and filters. One undo removes it.", "success");
         }} />}
-      {handoff && dash && <ReviewHandoff canEdit={session.canEdit} activeTabId={activeTabId} canSave={session.canEdit && !saving} key={`${activeSourceId}:${asWho}:${refreshToken}:${activeTabId}:${draftKey.current}:${presentationContentKey(dash)}:${JSON.stringify([filterValues, drills])}`} spec={dash} canvas={canvas} model={model} dirty={dirty}
+      {handoff && dash && <ReviewHandoff canEdit={session.canEdit} activeTabId={activeTabId} canSave={session.canEdit && !saving} initialMode={handoffMode} key={`${activeSourceId}:${asWho}:${refreshToken}:${activeTabId}:${draftKey.current}:${presentationContentKey(dash)}:${JSON.stringify([filterValues, drills])}`} spec={dash} canvas={canvas} model={model} dirty={dirty}
         evidenceScope={JSON.stringify({ source: activeSourceId, principal: asWho, user: session.user?.id, policy: session.policy })}
         queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills}
         filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))}
         scopeWarnings={Object.fromEntries(dash.tiles.map(t => [t.id, unappliedFilters(book!, t, filterValues, model)]))}
         onClose={() => setHandoff(false)} onKeepBrief={brief => { if (book && session.canEdit) { const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); } }}
         onSave={async brief => { if (!book || !session.canEdit || saving) throw new Error("Saving is unavailable"); const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); await save(false, true, next); }}
-        onWatch={() => { chartPreferences.update("alerts", true); setHandoff(false); setNotice("Chart alerts are visible. Choose a chart’s bell to preview a watch. Save edits first; watches use saved filter defaults.", "info"); }} />}
+        onWatch={() => { chartPreferences.update("alerts", true); setHandoff(false); setNotice("Chart alerts are visible. Choose a chart’s bell to preview a watch. Save edits first; watches use saved filter defaults.", "info"); }}
+        onLoadMessyDraft={session.canEdit ? () => {
+          setHandoff(false);
+          if (demoDashboardAvailable(model) && dash.title !== "Growth & acquisition (draft)") {
+            const c = { ...freshCanvas(), locked: false };
+            if (beginDocument(demoDashboard(c.width), { canvas: c })) {
+              pendingFit.current = true;
+              setView("home");
+            }
+          } else if (canvas.locked) {
+            changeCanvas({ ...canvas, locked: false });
+          }
+        } : undefined}
+        onImproveArrange={session.canEdit ? () => {
+          setHandoff(false);
+          if (canvas.locked) changeCanvas({ ...canvas, locked: false });
+          requestAnimationFrame(() => {
+            const btn = document.querySelector<HTMLButtonElement>('.editbar button[aria-haspopup="dialog"]');
+            if (btn && btn.getAttribute("aria-expanded") !== "true") btn.click();
+          });
+        } : undefined} />}
       {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify(filterValues)} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model))]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
         resolveScopeWarnings={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, unappliedFilters(proposed, t, filterValues, model)]))}
         onClose={() => setAiRedesign(false)} onConfigure={() => { setAiRedesign(false); setView("connections"); }}

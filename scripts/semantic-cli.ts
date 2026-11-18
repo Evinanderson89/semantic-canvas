@@ -411,10 +411,10 @@ async function handleCoach(flags: Map<string, string | boolean>): Promise<Semant
   const targetMeta = formatMeta(rawFormat);
   const lines: string[] = [
     `Semantic Layer Coach — ${report.modelName} (source dialect: ${detectedFormat})`,
-    `Overall Readiness Score: ${report.overallScore}/100`,
+    `Heuristic Readiness Score: ${report.overallScore}/100 (Structural heuristic based on declared fields and joins — run a query to validate against warehouse data; not a quality certification)`,
     report.summary,
     "",
-    "Category Scores:",
+    "Category Scores (Heuristic Structural Check):",
   ];
 
   for (const cat of COACH_CATEGORIES) {
@@ -434,7 +434,9 @@ async function handleCoach(flags: Map<string, string | boolean>): Promise<Semant
     const qa = report.questionAnalysis;
     lines.push("");
     lines.push(`Question Coaching: "${qa.question}"`);
-    lines.push(`  Status: ${qa.canAnswerNow ? "Ready to answer now" : "Model additions recommended"}`);
+    lines.push(
+      `  Status: ${qa.canAnswerNow ? "Model appears to support this question (validate with a live query)" : "Model additions recommended"}`,
+    );
     if (qa.matchedMetrics.length > 0) {
       lines.push(`  Matched metrics: ${qa.matchedMetrics.join(", ")}`);
     }

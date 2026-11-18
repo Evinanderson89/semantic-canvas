@@ -136,7 +136,7 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
   }, [JSON.stringify(points), grain, stroke, gradId, o.shape, o.scale, o.showMinMax, hover?.ratio, box.width, box.height]);
 
   const fmt = format ?? ((n: number) =>
-    Math.abs(n) >= 1000 ? d3.format(".3~s")(n).replace("G", "B") : d3.format(",.3~f")(n));
+    Math.abs(n) >= 1000 ? d3.format(".4~s")(n).replace("G", "B") : d3.format(",.3~f")(n));
   const period = (v: unknown) => v instanceof Date && Number.isFinite(+v) ? v.toISOString().slice(0, 10) : String(v ?? "").slice(0, 10);
 
   return (
@@ -157,15 +157,29 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
         {actions}
       </div>
 
-      <div className="kpi-asof"><span>{grain === "month" ? "Period " : "As of "}{grain === "month" && series.at(-1)?.x ? new Date(String(series.at(-1)?.x).slice(0, 10) + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" }) : period(series.at(-1)?.x) || "—"}</span>{notice}</div>
-      <div className="kpi-value">{latest == null ? "—" : fmt(latest)}</div>
-      <div className="kpi-delta">
-        {mode === "none" ? <span className="flat">comparison off</span> : coverageLimited ? <span className="flat" title="Review the ratio's input dates before comparing these periods.">input coverage · no comparison</span> : partialComparison ? <span className="flat" title="Use complete reporting periods or a finer grain before comparing this selected window.">partial period · no comparison</span> : precisionLimited ? <span className="flat" title="Displayed values may round together. Inspect the data check and compare the exact returned values in the warehouse.">precision limited</span> : delta == null ? <span className="flat" title={mode === "first" && series.length < 2 ? "At least two shown periods are needed to compare with the first." : "A valid comparison value is unavailable."}>no comparison</span> : (
-          <>
-            <span className={sentiment} title={belowDisplayPrecision ? "A nonzero change below the card’s display precision. Inspect the metric evidence for the detailed comparison." : undefined}>{changeLabel}</span>
-            <span className="vs">vs {mode === "first" ? "first shown period" : mode === "yoy" ? "same period last year" : "prior period"}</span>
-          </>
-        )}
+      <div className="kpi-value-row">
+        <div className="kpi-value">{latest == null ? "—" : fmt(latest)}</div>
+        <div className="kpi-delta">
+          {mode === "none" ? <span className="flat">comparison off</span> : coverageLimited ? <span className="flat" title="Review the ratio's input dates before comparing these periods.">input coverage · no comparison</span> : partialComparison ? <span className="flat" title="Use complete reporting periods or a finer grain before comparing this selected window.">partial period · no comparison</span> : precisionLimited ? <span className="flat" title="Displayed values may round together. Inspect the data check and compare the exact returned values in the warehouse.">precision limited</span> : delta == null ? <span className="flat" title={mode === "first" && series.length < 2 ? "At least two shown periods are needed to compare with the first." : "A valid comparison value is unavailable."}>no comparison</span> : (
+            <>
+              <span className={sentiment} title={belowDisplayPrecision ? "A nonzero change below the card’s display precision. Inspect the metric evidence for the detailed comparison." : undefined}>{changeLabel}</span>
+              <span className="vs">vs {mode === "first" ? "first shown period" : mode === "yoy" ? "same period last year" : "prior period"}</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="kpi-asof">
+        <span>
+          {grain === "month" ? "Period " : "As of "}
+          {grain === "month" && series.at(-1)?.x
+            ? new Date(String(series.at(-1)?.x).slice(0, 10) + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" })
+            : period(series.at(-1)?.x) || "—"}
+          {mode === "prior" && previous != null && Number.isFinite(previous) && !partialComparison && !coverageLimited && !precisionLimited
+            ? ` · ${fmt(previous)} prior`
+            : ""}
+        </span>
+        {notice}
       </div>
 
       <div className="spark-wrap">

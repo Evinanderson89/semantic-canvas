@@ -292,6 +292,8 @@ describe("Semantic CLI (scripts/semantic-cli.ts)", () => {
       expect(res.exitCode).toBe(0);
       expect(res.stderr).toBe("");
       expect(res.stdout).toContain("Semantic Layer Coach — cli_commerce_draft");
+      expect(res.stdout).toContain("Heuristic Readiness Score:");
+      expect(res.stdout).toContain("not a quality certification");
       expect(res.stdout).toContain('Question Coaching: "Revenue per order by customer segment over time"');
       expect(res.stdout).toContain("Snowflake Cortex Analyst");
       expect(res.stdout).toContain("snowflake_semantic_model.yaml");
