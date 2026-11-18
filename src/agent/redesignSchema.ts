@@ -73,6 +73,8 @@ export function strictToolSchema(input: Schema): Schema {
   }
   if (output.type === "object" && output.additionalProperties !== false)
     throw new Error("Strict tool objects must reject additional properties");
+  if (output.type === "object" && output.properties && (output.properties.type?.const === "format" || "at" in output.properties && "label" in output.properties && "kind" in output.properties))
+    output.required = Object.keys(output.properties);
   if (constraints.length) output.description = [output.description, `Local validation requires ${constraints.join(", ")}.`].filter(Boolean).join("\n");
   return output;
 }

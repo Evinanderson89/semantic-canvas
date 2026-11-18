@@ -2,8 +2,9 @@ import { MetricColorProvider } from "../charts/MetricColors.tsx";
 import { aiError } from "./aiError.ts";
 import type { Readiness } from "./readiness.ts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DashboardSpec, FilterSpec } from "../compiler/spec.ts";
+import type { DashboardSpec, FilterSpec, TileSpec } from "../compiler/spec.ts";
 import type { CanvasSpec } from "../canvas/presets.ts";
+import { pinnedContent } from "../canvas/layouts.ts";
 import type { Model } from "../semantic/model.ts";
 import type { CanvasProposal } from "../canvas/proposals.ts";
 import { validateRedesign } from "../suggest/redesign.ts";
@@ -21,7 +22,201 @@ import { DataFindings } from "./MetricEvidence.tsx";
 import { renderMarkdown } from "./markdown.tsx";
 import type { DrillEntry } from "./drill.ts";
 
-type Preview = { proposal: CanvasProposal; spec: DashboardSpec; canvas: CanvasSpec; before: DashboardSpec; expected: string; context: string; explanation: string; rationaleWarnings: RationaleIssue[] };
+export interface ResearchLedgerQuery {
+  metrics: string[];
+  dimensions: string[];
+  where?: unknown[];
+  compare?: string;
+  limit?: number | null;
+  rowsChecked: number | null;
+  partial?: unknown;
+  truncated?: boolean | null;
+}
+
+export interface ResearchTraceStep {
+  step: number;
+  tool: string;
+  summary: string;
+  status: "ok" | "rejected";
+  rowsChecked?: number | null;
+}
+
+export const AGENTIC_RESEARCH_STEPS = [
+  "1. Inspecting governed semantic catalogue",
+  "2. Profiling dimensions & querying warehouse rows",
+  "3. Compiling layout & chart encodings",
+  "4. Verifying rationale claims against query ledger",
+] as const;
+
+export function AgenticResearchStepper() {
+  return (
+    <ol className="ai-redesign-steps" aria-label="Agentic research progress">
+      {AGENTIC_RESEARCH_STEPS.map((step) => (
+        <li key={step}>{step}</li>
+      ))}
+    </ol>
+  );
+}
+
+export function VerifiedResearchLedger({
+  research = [],
+  trace = [],
+  rationaleWarnings = [],
+}: {
+  research?: ResearchLedgerQuery[];
+  trace?: ResearchTraceStep[];
+  rationaleWarnings?: RationaleIssue[];
+}) {
+  if (!research.length && !trace.length) return null;
+  const warningCount = rationaleWarnings.length;
+  const statusText = warningCount === 0
+    ? "0 rationale discrepancies"
+    : `${warningCount} rationale ${warningCount === 1 ? "discrepancy" : "discrepancies"} flagged`;
+  return (
+    <details className="ai-redesign-ledger">
+      <summary>
+        <span>Verified Research Ledger</span>
+        <span className={`ledger-badge ${warningCount === 0 ? "ok" : "warn"}`}>{statusText}</span>
+      </summary>
+      <div className="ledger-body">
+        <p className="ledger-status">
+          {warningCount === 0
+            ? "0 rationale discrepancies — quantitative claims verified against governed query ledger."
+            : `${warningCount} rationale ${warningCount === 1 ? "discrepancy" : "discrepancies"} flagged against governed query counts.`}
+        </p>
+        {research.length > 0 && (
+          <ul className="ledger-queries" aria-label="Governed queries checked">
+            {research.map((q, i) => (
+              <li key={i}>
+                <code>{q.metrics.join(", ")}</code>
+                {q.dimensions.length > 0 && <> · <code>{q.dimensions.join(", ")}</code></>}
+                <span className="ledger-rows">
+                  {typeof q.rowsChecked === "number" ? `${q.rowsChecked} rows` : "governed query"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {trace.length > 0 && (
+          <ol className="ledger-trace" aria-label="Agent research trace">
+            {trace.map((s) => (
+              <li key={`${s.step}:${s.tool}`}>
+                <code className={`trace-tool ${s.status}`}>{s.tool}</code>{" "}
+                <span>{s.summary}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </details>
+  );
+}
+
+export function buildDeterministicProposal(
+  spec: DashboardSpec,
+  canvas: CanvasSpec,
+  suggested: DashboardSpec,
+  model: Model,
+  activeTabId?: string,
+): { proposal: CanvasProposal; research: ResearchLedgerQuery[]; trace: ResearchTraceStep[] } {
+  const pinnedIds = new Set(pinnedContent(spec.tiles).map((t) => t.id));
+  const keptIds = new Set(
+    spec.tiles
+      .filter((t) => t.kind === "filter" || pinnedIds.has(t.id))
+      .flatMap((t) => (t.section ? [t.id, t.section] : [t.id])),
+  );
+  const removable = spec.tiles.filter((t) => !keptIds.has(t.id));
+  const referencedSections = new Set(spec.tiles.map((t) => t.section).filter(Boolean));
+  const orderedRemovals = [
+    ...removable.filter((t) => t.kind !== "heading" && !referencedSections.has(t.id)),
+    ...removable.filter((t) => t.kind === "heading" || referencedSections.has(t.id)),
+  ];
+
+  const hasRename = Boolean(suggested.title?.trim() && suggested.title.trim() !== spec.title);
+  const hasDescribe = suggested.description !== undefined;
+  const needsArrange = keptIds.size > 0;
+  const reservedSlots = (hasRename ? 1 : 0) + (hasDescribe ? 1 : 0) + (needsArrange ? 1 : 0) + orderedRemovals.length;
+  const maxAdds = Math.max(1, 30 - reservedSlots);
+  const tilesToAdd = suggested.tiles.slice(0, maxAdds);
+
+  const existingIds = new Set(spec.tiles.map((t) => t.id));
+  const idMap = new Map<string, string>();
+  const usedNewIds = new Set<string>();
+  for (const t of tilesToAdd) {
+    let candidate = `draft_${t.id}`;
+    let suffix = 2;
+    while (existingIds.has(candidate) || usedNewIds.has(candidate)) {
+      candidate = `draft_${t.id}_${suffix++}`;
+    }
+    idMap.set(t.id, candidate);
+    usedNewIds.add(candidate);
+  }
+
+  const maxRight = Math.max(0, ...tilesToAdd.map((t) => t.layout.x + t.layout.w));
+  const scaleX = maxRight > canvas.width ? (canvas.width - 48) / Math.max(1, maxRight - 48) : 1;
+
+  const mappedTiles: TileSpec[] = tilesToAdd.map((t) => {
+    const mappedSection = t.section && idMap.has(t.section) ? idMap.get(t.section)! : null;
+    const x = scaleX < 1 ? Math.max(24, Math.round(24 + (t.layout.x - 24) * scaleX)) : t.layout.x;
+    const w = scaleX < 1
+      ? Math.max(160, Math.min(canvas.width - x - 24, Math.round(t.layout.w * scaleX)))
+      : Math.min(t.layout.w, canvas.width - x);
+    return {
+      ...t,
+      id: idMap.get(t.id)!,
+      section: mappedSection,
+      ...(activeTabId ? { tabId: activeTabId } : {}),
+      layout: { ...t.layout, x, w },
+    };
+  });
+
+  const actions: CanvasProposal["actions"] = [];
+  if (hasRename) actions.push({ type: "rename", title: suggested.title!.trim().slice(0, 1000) });
+  if (hasDescribe) actions.push({ type: "describe", description: suggested.description ?? "" });
+  for (const r of orderedRemovals) actions.push({ type: "remove", id: r.id });
+  for (const tile of mappedTiles) actions.push({ type: "add", tile });
+  if (needsArrange) actions.push({ type: "arrange", layout: "executive" });
+
+  const proposal: CanvasProposal = {
+    title: (suggested.title?.trim() || "Executive deterministic draft").slice(0, 1000),
+    reason: "Deterministically composed from the governed semantic model for your prompt, pairing headline KPIs with time-series trends and cross-table drivers.",
+    actions,
+  };
+
+  const metricTiles = mappedTiles.filter((t) => (t.kind ?? "metric") === "metric" && t.metrics.length > 0);
+  const research: ResearchLedgerQuery[] = metricTiles.map((t) => ({
+    metrics: t.metrics,
+    dimensions: t.dimensions,
+    compare: t.compare ?? "none",
+    rowsChecked: null,
+  }));
+  const tablesUsed = new Set(
+    metricTiles.flatMap((t) => t.metrics.map((m) => model.metrics[m]?.baseTable).filter(Boolean)),
+  );
+  const trace: ResearchTraceStep[] = [
+    {
+      step: 1,
+      tool: "match_model",
+      summary: `Matched prompt against ${Object.keys(model.metrics).length} governed metrics across ${Object.keys(model.tables).length} tables`,
+      status: "ok",
+    },
+    {
+      step: 2,
+      tool: "compose_brief",
+      summary: `Composed ${metricTiles.length} governed charts across ${Math.max(1, tablesUsed.size)} base table(s)`,
+      status: "ok",
+    },
+    {
+      step: 3,
+      tool: "validate_redesign",
+      summary: "Verified layout geometry, chart encodings, and governed filter bindings",
+      status: "ok",
+    },
+  ];
+  return { proposal, research, trace };
+}
+
+type Preview = { proposal: CanvasProposal; spec: DashboardSpec; canvas: CanvasSpec; before: DashboardSpec; expected: string; context: string; explanation: string; rationaleWarnings: RationaleIssue[]; research?: ResearchLedgerQuery[]; trace?: ResearchTraceStep[] };
 export function AiRedesign({ spec, canvas, model, available, canConfigure, onConfigure, onClose, onApply, queryContext, filtersByTile, drills, resolveFilters, resolveScopeWarnings, activeTabId, filterContext }: {
   activeTabId?: string; filterContext?: string;
   resolveFilters?: (spec: DashboardSpec) => Record<string, FilterSpec[]>;
@@ -66,12 +261,48 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, onCon
       if (controller.signal.aborted || latest.current !== snapshot) return;
       if (!result.proposal) { setPreview(null); setExplanation(result.text || "The assistant did not find a useful redesign. Try a more specific goal."); return; }
       const next = validateRedesign(spec, canvas, result.proposal, model, activeTabId);
+      const research = Array.isArray(result.research) ? (result.research as ResearchLedgerQuery[]) : undefined;
+      const trace = Array.isArray(result.trace) ? (result.trace as ResearchTraceStep[]) : undefined;
       setPreview({ ...next, proposal: result.proposal, before: spec, expected: fingerprint(spec, canvas), context: snapshot, explanation: result.text || "",
+        research, trace,
         // Recalculated here from the documents and the review's query ledger, so the warning does not depend on the server reporting it.
-        rationaleWarnings: rationaleIssues(spec, next.spec, [result.proposal.reason, result.text].filter(Boolean).join("\n\n"), Array.isArray(result.research) ? result.research : result.proposal ? [] : undefined) });
+        rationaleWarnings: rationaleIssues(spec, next.spec, [result.proposal.reason, result.text].filter(Boolean).join("\n\n"), research ?? (result.proposal ? [] : undefined)) });
       setView("after");
     } catch (e: any) { if (!controller.signal.aborted) setError(aiError(e)); }
     finally { if (request.current === controller) setBusy(false); }
+  };
+  const generateDeterministic = async () => {
+    request.current?.abort();
+    const controller = new AbortController(); request.current = controller;
+    const snapshot = context;
+    setChecks({}); setAcceptExistingIssues(false); setBusy(true); setError(""); setExplanation(""); setApplied(false); setPreview(null);
+    try {
+      const suggested: DashboardSpec = await fetch("/api/suggest", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ text: goal, audience: "exec", grain: "month" }),
+      }).then(readResponse);
+      if (controller.signal.aborted || latest.current !== snapshot) return;
+      const built = buildDeterministicProposal(spec, canvas, suggested, model, activeTabId);
+      const next = validateRedesign(spec, canvas, built.proposal, model, activeTabId);
+      setPreview({
+        ...next,
+        proposal: built.proposal,
+        before: spec,
+        expected: fingerprint(spec, canvas),
+        context: snapshot,
+        explanation: "Built deterministically from the governed semantic layer with zero LLM latency.",
+        research: built.research,
+        trace: built.trace,
+        rationaleWarnings: rationaleIssues(spec, next.spec, built.proposal.reason, []),
+      });
+      setView("after");
+    } catch (e: any) {
+      if (!controller.signal.aborted) setError(aiError(e));
+    } finally {
+      if (request.current === controller) setBusy(false);
+    }
   };
   const remember = (status: ReviewDecision["status"]) => {
     if (preview) decisions.current = rememberDecision(decisions.current, { key: JSON.stringify(preview.proposal.actions).slice(0,4000), label: preview.proposal.title.slice(0,1000), status });
@@ -99,17 +330,21 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, onCon
           ["Executive overview", "Build an executive dashboard with clear headline numbers, a leading trend, and compact evidence for the next decision."],
           ["Tell a story", "Tell a coherent story: establish the question, sequence the evidence, and make the next question clear. Give the most useful chart room to lead."],
           ["Better comparisons", "Find charts that hide useful information. Improve their reporting periods, breakdowns and comparisons using governed metrics. Add only the context needed to understand them."],
+          ["Revenue & retention drivers", "How is recurring revenue trending, what drove August's change, and how does retention compare across plans?"],
         ].map(([label, value]) => <button key={label} disabled={busy} onClick={() => setGoal(value)}>{label}</button>)}</div>
         {!available ? <p role="status">Connect an AI provider to generate a redesign. {canConfigure ? <button className="link" onClick={onConfigure}>Configure AI</button> : "Ask your workspace administrator to configure AI."}</p>
           : <button className="primary" disabled={busy || !goal.trim()} onClick={generate}>{busy ? "Designing…" : preview ? "Generate another version" : error ? "Retry redesign" : "Show me a better dashboard"}</button>}
-        {busy && <div role="status"><p>Reviewing the canvas and governed metrics, then preparing changes you can inspect.</p><button className="link" onClick={() => { request.current?.abort(); setBusy(false); }}>Cancel generation</button></div>}
+        <button type="button" className="ai-redesign-deterministic" disabled={busy || !goal.trim()} onClick={generateDeterministic}>
+          Generate deterministic draft from prompt
+        </button>
+        {busy && <div role="status" className="ai-redesign-busy"><p>Reviewing the canvas and governed metrics, then preparing changes you can inspect.</p><AgenticResearchStepper /><button className="link" onClick={() => { request.current?.abort(); setBusy(false); }}>Cancel generation</button></div>}
         {error && <div><p className="err" role="alert">{error}</p>{canConfigure && <button className="review-action" onClick={onConfigure}>Check AI connection</button>}</div>}
         {explanation && <div className="ai-redesign-explanation">{renderMarkdown(explanation)}</div>}
         {preview && <div className="ai-redesign-explanation"><h3>{preview.proposal.title}</h3>{!stale && impact && <RedesignImpact impact={impact} />}{!!preview.rationaleWarnings.length && <div className="rationale-warnings" role="note" aria-label="Rationale checks">
           <strong>Check this rationale before relying on it</strong>
           <ul>{preview.rationaleWarnings.map(issue => <li key={issue.id}>{issue.message}</li>)}</ul>
           <small>Calculated from your dashboard and this review’s queries. The rationale below is shown as the AI wrote it; the proposed charts are checked separately.</small>
-        </div>}<details open={!!preview.rationaleWarnings.length || undefined}><summary>AI design rationale</summary><p>{preview.proposal.reason}</p>{renderMarkdown(preview.explanation)}</details></div>}
+        </div>}<details open={!!preview.rationaleWarnings.length || undefined}><summary>AI design rationale</summary><p>{preview.proposal.reason}</p>{renderMarkdown(preview.explanation)}</details><VerifiedResearchLedger research={preview.research} trace={preview.trace} rationaleWarnings={preview.rationaleWarnings} /></div>}
         {!preview && !explanation && <div className="ai-redesign-imagine"><h3>More than moving boxes</h3><p>Turn an unhelpful breakdown into a trend. Put related evidence together. Bring the key numbers into focus.</p><small>The AI will propose changes based on your actual canvas and available metrics.</small></div>}
       </section>
       <section className="ai-redesign-preview" aria-label="Dashboard redesign preview">

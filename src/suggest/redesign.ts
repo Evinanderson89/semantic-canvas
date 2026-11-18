@@ -44,7 +44,7 @@ export function validateRedesign(spec: DashboardSpec, canvas: CanvasSpec, raw: u
       }
     }
   }
-  const analyticalShape = (dashboard: DashboardSpec) => dashboard.tiles.map(t => ({ id: t.id, metrics: t.metrics, dimensions: t.dimensions, compare: t.compare, chart: t.chart, layout: t.layout, section: t.section, kind: t.kind }));
+  const analyticalShape = (dashboard: DashboardSpec) => dashboard.tiles.map(t => ({ id: t.id, metrics: t.metrics, dimensions: t.dimensions, compare: t.compare, chart: t.chart, layout: t.layout, section: t.section, kind: t.kind, format: t.format }));
   if (JSON.stringify(analyticalShape(spec)) === JSON.stringify(analyticalShape(next.spec))) {
     throw new Error("This redesign only changes wording. Propose a useful chart, comparison, or layout improvement.");
   }

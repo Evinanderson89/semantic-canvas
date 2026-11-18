@@ -44,7 +44,13 @@ ${ctx.source ? `Active source: ${ctx.source}.` : ""} ${ctx.principal
   : "No acting principal is set for this session. Ask the user to select the appropriate identity in the UI if access requires one; never invent or switch identity."}`;
 };
 
-function buildTools(ctx: ToolContext, list: ToolSpec[] = TOOLS, onRejected?: (name: string, error: unknown) => void, strictProposal = false) {
+function buildTools(
+  ctx: ToolContext,
+  list: ToolSpec[] = TOOLS,
+  onRejected?: (name: string, error: unknown, input?: unknown) => void,
+  strictProposal = false,
+  onResolved?: (name: string, input: unknown, result: unknown) => void,
+) {
   return list.map((t) => {
     const strict = strictProposal && t.name === "propose_canvas_changes";
     const inputSchema = strict ? z.object(t.inputSchema).strict() : z.object(t.inputSchema);
@@ -54,8 +60,11 @@ function buildTools(ctx: ToolContext, list: ToolSpec[] = TOOLS, onRejected?: (na
       inputSchema,
       run: async (input: any) => {
         ctx.signal?.throwIfAborted();
-        try { return asText(await runToolInContext(ctx, () => t.handler(input))); }
-        catch (error) { onRejected?.(t.name, error); throw error; }
+        let result: unknown;
+        try { result = await runToolInContext(ctx, () => t.handler(input)); }
+        catch (error) { onRejected?.(t.name, error, input); throw error; }
+        onResolved?.(t.name, input, result);
+        return asText(result);
       },
     });
     if (strict) {
@@ -68,7 +77,7 @@ function buildTools(ctx: ToolContext, list: ToolSpec[] = TOOLS, onRejected?: (na
     const parse = tool.parse;
     tool.parse = input => {
       try { return parse(input); }
-      catch (error) { onRejected?.(t.name, error); throw error; }
+      catch (error) { onRejected?.(t.name, error, input); throw error; }
     };
     return tool;
   });
@@ -98,6 +107,57 @@ export interface ResearchQuery {
   metrics: string[]; dimensions: string[]; where: unknown[]; compare: string; limit: number | null;
   rowsChecked: number | null; partial: unknown; truncated: boolean | null;
 }
+export interface AgentTraceStep {
+  step: number;
+  tool: string;
+  summary: string;
+  status: "ok" | "rejected";
+  rowsChecked?: number | null;
+}
+
+function summarizeTraceStep(tool: string, input: any, status: "ok" | "rejected", result?: any, error?: unknown): Omit<AgentTraceStep, "step"> {
+  if (tool === "query_metric") {
+    const metrics = Array.isArray(input?.metrics) && input.metrics.length ? input.metrics.join(", ") : "metrics";
+    const dims = Array.isArray(input?.dimensions) && input.dimensions.length ? ` by ${input.dimensions.join(", ")}` : "";
+    if (status === "ok") {
+      const rawRows = result?.evidence?.rowsChecked ?? (Array.isArray(result?.rows) ? result.rows.length : null);
+      const rowsChecked = typeof rawRows === "number" ? rawRows : null;
+      const rowsLabel = rowsChecked !== null ? ` (${rowsChecked} ${rowsChecked === 1 ? "row" : "rows"} checked)` : "";
+      return { tool, status, summary: `Queried ${metrics}${dims}${rowsLabel}`, rowsChecked };
+    }
+    return { tool, status, summary: `Rejected query for ${metrics}${dims}`, rowsChecked: null };
+  }
+  if (tool === "profile_field") {
+    const base = typeof input?.base === "string" ? input.base.trim() : "";
+    const fields = Array.isArray(input?.fields)
+      ? input.fields.map((f: unknown) => { const s = String(f); return s.includes(".") || !base ? s : `${base}.${s}`; })
+      : [];
+    const target = fields.length ? fields.join(", ") : (base || "fields");
+    return { tool, status, summary: status === "ok" ? `Profiled ${target}` : `Rejected profile for ${target}` };
+  }
+  if (tool === "describe_model") {
+    if (status === "ok") {
+      const tables = result && typeof result === "object" && "tables" in result && result.tables ? Object.keys(result.tables).length : null;
+      const metrics = result && typeof result === "object" && "metrics" in result && result.metrics ? Object.keys(result.metrics).length : null;
+      const counts = tables !== null && metrics !== null ? ` (${tables} tables, ${metrics} metrics)` : "";
+      return { tool, status, summary: `Described semantic model${counts}` };
+    }
+    return { tool, status, summary: "Rejected describe_model" };
+  }
+  if (tool === "propose_canvas_changes") {
+    if (status === "ok") {
+      const count = Array.isArray(input?.actions) ? input.actions.length : (typeof result?.actions === "number" ? result.actions : 0);
+      const title = typeof input?.title === "string" && input.title.trim() ? `: ${input.title.trim()}` : "";
+      return { tool, status, summary: `Proposed ${count} canvas ${count === 1 ? "change" : "changes"}${title}` };
+    }
+    return { tool, status, summary: `Rejected proposal: ${proposalRejection(error)}` };
+  }
+  if (tool === "list_layouts") return { tool, status, summary: status === "ok" ? "Listed layout templates" : "Rejected list_layouts" };
+  if (tool === "list_dashboards") return { tool, status, summary: status === "ok" ? "Listed dashboards" : "Rejected list_dashboards" };
+  if (tool === "get_dashboard") return { tool, status, summary: status === "ok" ? `Loaded dashboard ${input?.id ?? ""}`.trim() : `Rejected get_dashboard ${input?.id ?? ""}`.trim() };
+  return { tool, status, summary: `${status === "ok" ? "Ran" : "Rejected"} ${tool}` };
+}
+
 const RESEARCH_GUIDANCE = "Calculated ledger of the governed queries run in this review. These are the only verified row counts. A row, month or period count in the reason or a caption must equal rowsChecked for a query with the same metrics, dimensions, filters and comparison; a different limit or comparison can return a different count. A proposed chart whose query is not listed has no verified count: omit the count.";
 
 export async function chat(
@@ -108,7 +168,7 @@ export async function chat(
   active?: { spec: DashboardSpec; canvas: CanvasSpec; selected: string[]; model: Model; activeTabId?: string },
   review?: ReviewContext,
   mode: "chat" | "redesign" = "chat",
-): Promise<{ text: string; messages: ChatMessage[]; proposal?: CanvasProposal; research?: ResearchQuery[]; rationaleWarnings?: RationaleIssue[]; providerSchemaFallback?: true }> {
+): Promise<{ text: string; messages: ChatMessage[]; proposal?: CanvasProposal; research?: ResearchQuery[]; trace?: AgentTraceStep[]; rationaleWarnings?: RationaleIssue[]; providerSchemaFallback?: true }> {
   requireAiConfiguration(cfg);
   const client = cfg.provider === "anthropic" ? new Anthropic({ apiKey: cfg.apiKey }) : null;
   const messages: ChatMessage[] = [...history, { role: "user", content: message }];
@@ -145,8 +205,13 @@ export async function chat(
   // last proposal attempt, and never twice: a remaining contradiction becomes a visible warning,
   // not a failed redesign and not a silently edited rationale.
   let rationaleChallenged = false, lastProposalAttempt = false, rationaleWarnings: RationaleIssue[] = [];
-  const rejected = (name: string, error: unknown) => {
+  const trace: AgentTraceStep[] = [];
+  const rejected = (name: string, error: unknown, input?: unknown) => {
     if (name === "propose_canvas_changes") lastRejection = proposalRejection(error);
+    trace.push({ step: trace.length + 1, ...summarizeTraceStep(name, input, "rejected", undefined, error) });
+  };
+  const resolved = (name: string, input: unknown, result: unknown) => {
+    trace.push({ step: trace.length + 1, ...summarizeTraceStep(name, input, "ok", result) });
   };
   const reads = new Set(["describe_model", "query_metric", "profile_field", "list_layouts", "get_dashboard", "list_dashboards"]);
   const research: ResearchQuery[] = [];
@@ -187,8 +252,8 @@ export async function chat(
     model: cfg.model,
     max_tokens: 16000,
     system: phaseSystem(initialTools),
-    max_iterations: mode === "redesign" ? 3 : 6,
-    tools: buildTools(ctx, initialTools, rejected, mode === "redesign"),
+    max_iterations: mode === "redesign" ? (active && active.spec.tiles.length === 0 ? 5 : 3) : 6,
+    tools: buildTools(ctx, initialTools, rejected, mode === "redesign", resolved),
     messages,
   });
   const runner = initial.runner;
@@ -207,7 +272,7 @@ export async function chat(
       const finalized = await runPhase({
         ...runner.params, max_iterations: 1,
         system: phaseSystem([proposalTool], false),
-        tools: buildTools(ctx, [proposalTool], rejected, true),
+        tools: buildTools(ctx, [proposalTool], rejected, true, resolved),
         tool_choice: { type: "tool", name: "propose_canvas_changes" },
         messages: proposalMessages,
       });
@@ -227,7 +292,7 @@ export async function chat(
     rationaleWarnings = rationaleIssues(active.spec, validateRedesign(active.spec, active.canvas, proposal, active.model, active.activeTabId).spec, [proposal.reason, text].filter(Boolean).join("\n\n"), research);
   }
 
-  return { text, proposal, messages: [...messages, { role: "assistant", content: text || "A proposal is ready for review." }], ...(research.length ? { research } : {}), ...(proposal && rationaleWarnings.length ? { rationaleWarnings } : {}), ...(providerSchemaFallback ? { providerSchemaFallback: true as const } : {}) };
+  return { text, proposal, messages: [...messages, { role: "assistant", content: text || "A proposal is ready for review." }], ...(research.length ? { research } : {}), ...(trace.length ? { trace } : {}), ...(proposal && rationaleWarnings.length ? { rationaleWarnings } : {}), ...(providerSchemaFallback ? { providerSchemaFallback: true as const } : {}) };
 }
 
 /**

@@ -14,6 +14,7 @@ import { chartShapeIssue } from "../charts/capabilities.ts";
 import { chartUnits } from "../app/chartResult.ts";
 
 const text = z.string().min(1).max(1000);
+const tileFormat = tileSchema.shape.format.unwrap();
 export const proposalSchema = z.object({
   title: text,
   reason: z.string().min(1).max(4000).describe("Concise design rationale covering key choices, removals and scope caveats. Aim for a few sentences; preserve necessary disclosures. Maximum 4000 characters."),
@@ -23,6 +24,16 @@ export const proposalSchema = z.object({
     z.object({ type: z.literal("title"), id: text, title: text }).strict().describe("Rename an existing tile, including a metric chart. This does not add commentary."),
     z.object({ type: z.literal("note"), id: text.describe("ID of an existing text or heading tile, or one added earlier in this proposal. Never a metric/chart tile ID."), text: z.string().max(100000) }).strict().describe("Replace a text/heading tile's content. To add commentary about a chart, use add with a separate kind:text tile instead."),
     z.object({ type: z.literal("chart"), id: text, chart: tileSchema.shape.chart.unwrap() }).strict(),
+    z.object({
+      type: z.literal("format"),
+      id: text,
+      lineScale: tileFormat.shape.lineScale,
+      palette: tileFormat.shape.palette,
+      targetValue: tileFormat.shape.targetValue,
+      targetLabel: tileFormat.shape.targetLabel,
+      annotations: tileFormat.shape.annotations,
+      referenceLines: tileFormat.shape.referenceLines,
+    }).strict(),
     z.object({ type: z.literal("query"), id: text, metrics: z.array(z.string().min(1).max(256)).min(1).max(50).optional(), dimensions: z.array(z.string().min(1).max(256)).max(12).optional(), compare: z.enum(["none", "prior", "yoy"]).optional() }).strict(),
     z.object({ type: z.literal("place"), id: text, layout: tileSchema.shape.layout, section: text.nullable().optional() }).strict(),
     z.object({ type: z.literal("arrange"), layout: z.enum(LAYOUT_NAMES) }).strict(),
@@ -70,6 +81,17 @@ export function applyProposal(spec: DashboardSpec, canvas: CanvasSpec, raw: unkn
     if (action.type === "chart") {
       if (tile.kind && tile.kind !== "metric") throw new Error("Chart changes require a metric tile");
       tile.chart = action.chart;
+    }
+    if (action.type === "format") {
+      if (tile.kind && tile.kind !== "metric") throw new Error("Format changes require a metric tile");
+      const updates: NonNullable<typeof tile.format> = {};
+      if (action.lineScale !== undefined) updates.lineScale = action.lineScale;
+      if (action.palette !== undefined) updates.palette = action.palette;
+      if (action.targetValue !== undefined) updates.targetValue = action.targetValue;
+      if (action.targetLabel !== undefined) updates.targetLabel = action.targetLabel;
+      if (action.annotations !== undefined) updates.annotations = action.annotations;
+      if (action.referenceLines !== undefined) updates.referenceLines = action.referenceLines;
+      if (Object.keys(updates).length) tile.format = { ...(tile.format ?? {}), ...updates };
     }
     if (action.type === "remove") {
       if (tile.kind === "filter") throw new Error("Remove connected filters with the filter designer");
