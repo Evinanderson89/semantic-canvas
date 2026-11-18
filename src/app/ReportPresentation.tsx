@@ -41,16 +41,17 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
   return <div ref={rootRef} className={`report-presentation ${mode}`} data-poster-theme={posterTheme}>
     {spec.tiles.length > 0 && <div className="report-broadside-masthead">
       <div className="report-broadside-kicker">
-        <span>{mode === "infographic" ? "EXECUTIVE BROADSIDE INFOGRAPHIC" : "BROADSIDE NARRATIVE STORY"}</span>
+        <span>{mode === "infographic" ? "BROADSIDE INFOGRAPHIC" : "EXECUTIVE NARRATIVE STORY"}</span>
         <span aria-hidden="true">·</span>
         <span>{model.name}</span>
+        <span className="masthead-pill" title="SHA-256 checks content integrity, not analytical correctness or authorship.">Snapshot with integrity checksum (SHA-256)</span>
       </div>
       <div className="report-broadside-actions" data-export-ignore>
         <div className="report-broadside-themes" role="group" aria-label="Poster theme">
           {([
             { id: "broadsheet", label: "Warm Broadsheet" },
             { id: "blueprint", label: "Cobalt Blueprint" },
-            { id: "dark", label: "Boardroom Dark" },
+            { id: "dark", label: "Obsidian Dark" },
           ] as const).map(theme => (
             <button
               key={theme.id}
@@ -93,11 +94,12 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
           row += count;
         }
       }
-      const lead = content.find(t => isMetric(t) && !["kpi", "stat"].includes(inferChart(model, t)));
+      const nonHeadlineMetrics = content.filter(t => isMetric(t) && !["kpi", "stat"].includes(inferChart(model, t)));
+      // In infographic mode, pair charts side-by-side in a 2-column architectural poster grid
+      // unless there is an odd trailing chart. In story mode, the first chart leads full-width.
+      const lead = mode === "story" ? nonHeadlineMetrics[0] : (nonHeadlineMetrics.length % 2 === 1 ? nonHeadlineMetrics[0] : undefined);
       const isSupport = (t: TileSpec) => isMetric(t) && t.id !== lead?.id && !["kpi", "stat"].includes(inferChart(model, t));
       const fullWidthSupport = new Set<string>();
-      // Pair adjacent supporting charts. A lone chart (including the last
-      // chart in an odd run) uses the row rather than leaving an empty half.
       for (let i = 0; i < content.length;) {
         if (!isSupport(content[i])) { i++; continue; }
         const start = i;
@@ -110,6 +112,7 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
           const metric = isMetric(t), headline = metric && ["kpi", "stat"].includes(inferChart(model, t));
           const query = metric ? visibleQuery(model, t, [...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])], drills[t.id]) : null;
           const check = checks[t.id];
+          const chartNotes = notes.filter(note => note.charts.some(chart => chart.id === t.id));
           return <article key={t.id} data-report-tile={t.id} style={headline ? { "--headline-span": headlineSpans.get(t.id) } as CSSProperties : undefined} className={`report-item ${metric ? headline ? "headline" : t.id === lead?.id ? "lead-chart" : `support-chart${fullWidthSupport.has(t.id) ? " full-row" : ""}` : "authored-content"}`}>
             {t.kind === "filter" ? <div className="report-filter-note"><strong>{t.title ?? spec.filters?.find(f => f.id === t.filterId)?.label ?? "Dashboard filter"}</strong><p>Selections are captured in each chart’s scope below. Change them on the dashboard.</p></div>
               : <div className={`report-tile ${metric ? headline ? "headline-tile" : inferChart(model, t) === "table" ? "table-tile" : "chart-tile" : "content-tile"}`} style={t.kind === "image" ? { height: Math.max(180, t.layout.h) } : undefined}>
@@ -117,22 +120,35 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
                   <Tile model={model} spec={t} locked presentation queryContext={queryContext} crossFilters={[...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])]} drill={drills[t.id]} scopeWarnings={scopeWarnings[t.id]} onReadiness={onReadiness} onRemove={() => {}} />
                 </TileBoundary>
               </div>}
-            {query && <div className="report-chart-context">
-              <p>{query.dimensions.length ? query.dimensions.map(d => {
-                const [grain] = d.split(":");
-                return d.includes(":") ? `${grain[0].toUpperCase()}${grain.slice(1)} periods` : d.split(".").at(-1)!.replace(/_/g, " ");
-              }).join(" · ") : "Aggregate · no breakdown"}{check?.window ? ` · Returned bucket dates: ${check.window.start} to ${check.window.end}` : ""}</p>
-              {query.where.length > 0 && <ul aria-label="Chart filters">{query.where.map((f, i) => <li key={`${f.id}:${i}`}>{describeFilter(f)}</li>)}</ul>}
-              {!!check?.rowRules?.length && <p>Access rules applied: {check.rowRules.join(", ")}.</p>}
-              {!!scopeWarnings[t.id]?.length && <p className="err">Not filtered by {scopeWarnings[t.id].join(", ")}</p>}
-              {notes.some(note => note.charts.some(chart => chart.id === t.id)) && <ul className="report-finding-summary" aria-label="Data notes for this chart">
-                {notes.filter(note => note.charts.some(chart => chart.id === t.id)).map(note => <li key={note.number} className={isScopeNote(note.finding) ? "report-scope-summary" : undefined}>
-                  <a href={`#${noteId(note.number)}`} onClick={event => { event.preventDefault(); document.getElementById(noteId(note.number))?.focus(); }}>
-                    Data note {note.number}: {findingTitle(note.finding, model)}
-                  </a>
-                </li>)}
-              </ul>}
-            </div>}
+            {query && <details className="report-evidence-drawer">
+              <summary className="report-evidence-summary">
+                <span>ⓘ Supporting Evidence & SQL Lineage</span>
+                <span className="report-evidence-meta">
+                  {query.dimensions.length ? query.dimensions.map(d => {
+                    const [grain] = d.split(":");
+                    return d.includes(":") ? `${grain[0].toUpperCase()}${grain.slice(1)} grain` : d.split(".").at(-1)!.replace(/_/g, " ");
+                  }).join(" · ") : "Aggregate"}
+                  {check?.window ? ` · ${check.window.start} → ${check.window.end}` : ""}
+                </span>
+              </summary>
+              <div className="report-chart-context">
+                <p><strong>Governed metric IDs:</strong> <code className="mono">{t.metrics.join(", ")}</code>{t.metrics[0] && model.metrics[t.metrics[0]]?.expression ? <> · <code className="mono">{model.metrics[t.metrics[0]].expression}</code></> : null}</p>
+                <p>{query.dimensions.length ? query.dimensions.map(d => {
+                  const [grain] = d.split(":");
+                  return d.includes(":") ? `${grain[0].toUpperCase()}${grain.slice(1)} periods` : d.split(".").at(-1)!.replace(/_/g, " ");
+                }).join(" · ") : "Aggregate · no breakdown"}{check?.window ? ` · Returned bucket dates: ${check.window.start} to ${check.window.end}` : ""}</p>
+                {query.where.length > 0 && <ul aria-label="Chart filters">{query.where.map((f, i) => <li key={`${f.id}:${i}`}>{describeFilter(f)}</li>)}</ul>}
+                {!!check?.rowRules?.length && <p>Access rules applied: {check.rowRules.join(", ")}.</p>}
+                {!!scopeWarnings[t.id]?.length && <p className="err">Not filtered by {scopeWarnings[t.id].join(", ")}</p>}
+                {chartNotes.length > 0 && <ul className="report-finding-summary" aria-label="Data notes for this chart">
+                  {chartNotes.map(note => <li key={note.number} className={isScopeNote(note.finding) ? "report-scope-summary" : undefined}>
+                    <a href={`#${noteId(note.number)}`} onClick={event => { event.preventDefault(); document.getElementById(noteId(note.number))?.focus(); }}>
+                      Data note {note.number}: {findingTitle(note.finding, model)}
+                    </a>
+                  </li>)}
+                </ul>}
+              </div>
+            </details>}
           </article>;
         })}</div>
       </section>;
@@ -147,8 +163,8 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
     </aside>}
     {spec.tiles.length > 0 && <footer className="report-broadside-colophon">
       <span>Model: {model.name} ({model.source})</span>
-      <span>Metrics verified: {spec.tiles.filter(t => (t.kind ?? "metric") === "metric").length} chart tiles</span>
-      <span>Scope & honesty notes: {notes.length} consolidated</span>
+      <span>Snapshot with integrity checksum (SHA-256) · Checks content integrity, not analytical correctness</span>
+      <span>Governed evidence: {spec.tiles.filter(t => (t.kind ?? "metric") === "metric").length} chart tiles · {notes.length} scope & honesty notes</span>
     </footer>}
     {!spec.tiles.length && <p>Add charts or commentary to create a presentation.</p>}
   </div>;

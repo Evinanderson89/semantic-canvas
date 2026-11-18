@@ -9,7 +9,7 @@ Analytics teams rarely live in a single metadata format. Warehouse tables may be
 Semantic Canvas provides a bidirectional 5-dialect semantic converter and an automated **Semantic Layer Coach** so teams can:
 
 1. **Translate semantic models** between `duckglue`, `snowflake`, `metricflow`, `glue`, and `cube` without hand-rewriting YAML boilerplate.
-2. **Audit analytical readiness** across five governance dimensions—time-series honesty, driver attribution joins, unit-economics ratios, cohorts/cumulative windows, and AI/MCP synonyms—receiving copy-pasteable fixes in whichever dialect their repository uses.
+2. **Audit structural readiness** across five governance dimensions—time-series honesty, driver attribution joins, unit-economics ratios, cohorts & rolling/trailing-window totals, and AI/MCP synonyms—receiving copy-pasteable fixes in whichever dialect their repository uses. The `0–100` score is a **heuristic structural check based on declared fields and joins (not a quality certification)**; always run a live query to validate against warehouse data. True cohort analysis requires grouping by an acquisition/signup period dimension (e.g. `signup_date` or `cohort_month`) alongside retention or activity measures (a trailing `cumulative` metric alone measures rolling volume, not cohort retention).
 3. **Enforce CI/CD Semantic Quality Gates** in pull requests with `npm run semantic -- coach --fail-under <score>`.
 
 ---
@@ -104,10 +104,10 @@ npm run semantic -- coach \
 | `--input <path>` | Required | Path to semantic model file (any of the 5 dialects; parsed via `parseSemanticLayerText`) |
 | `--from <dialect>` | `auto` (default) or dialect ID | Optional explicit input dialect |
 | `--goal <category>` | `all` (default), `time_series`, `driver_attribution`, `ratios_and_funnels`, `cohorts_and_cumulative`, `agent_readiness` | Restrict findings to a specific readiness category |
-| `--question "<text>"` | Optional | Evaluate whether the model can answer a natural-language business question now, and generate missing metric/join YAML recipes |
+| `--question "<text>"` | Optional | Evaluate whether the model appears to support a natural-language business question (validate with a live query), and generate missing metric/join YAML recipes |
 | `--format <dialect>` | `duckglue` (default), `snowflake`, `metricflow`, `glue`, `cube` | Render coaching YAML snippets in the chosen semantic dialect |
 | `--json` | Boolean flag | Output the complete `SemanticCoachReport` JSON payload to `stdout` |
-| `--fail-under <0-100>` | Optional numeric threshold | Exit with status code `1` when `report.overallScore < threshold` (`0` otherwise) |
+| `--fail-under <0-100>` | Optional numeric threshold | Exit with status code `1` when `report.overallScore < threshold` (`0` otherwise; note that `overallScore` is a structural heuristic check, not a data quality certification) |
 
 ### CI/CD Semantic Quality Gate (GitHub Actions)
 
@@ -151,7 +151,7 @@ Open **Semantic Layer Coach** from **Metric Registry**, **Data Model**, the dash
 Press **`⌘K`** (macOS) or **`Ctrl+K`** (Windows/Linux)—or click the **`⌘K`** button in the workspace header or dashboard topbar—to open the accessible keyboard launcher:
 
 - **Semantic Metrics (Synonym-Aware):** Search across metric `name`, `label`, `baseTable`, and domain `synonyms` (e.g., typing `"arr"`, `"top line"`, or `"attrition"` surfaces the governed metric). Selecting a metric while editing an unlocked dashboard places a prepared chart tile directly onto the canvas.
-- **Actions:** Launch *Semantic Layer Coach & Dialect Converter*, *Executive digest & SHA-256 verified brief*, *Dashboard-as-Code (YAML sync & diff)*, *Review and share (Dashboard, Story & Infographic)*, *Improve dashboard with AI*, *Vector SVG / PNG export*, or *Operations, ROI & audit log*.
+- **Actions:** Launch *Semantic Layer Coach & Dialect Converter*, *Executive Digest · Snapshot with integrity checksum (SHA-256)*, *Dashboard-as-Code (YAML sync & diff)*, *Review and share (Dashboard, Story & Infographic)*, *Improve dashboard with AI*, *Vector SVG / PNG export*, or *Operations, ROI & audit log*.
 - **Themes:** Switch live canvas themes between `editorial-warm`, `executive-slate`, `high-contrast-print`, and `boardroom-dark`.
 - **Navigate:** Jump directly to *Workspace Home*, *CoreCanvas Library*, *Metric Registry*, *Data Model*, *Modeler*, or *Connections*.
 

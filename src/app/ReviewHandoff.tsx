@@ -3,7 +3,7 @@ import { useEvidenceDigest } from "./useEvidenceDigest.ts";
 import { briefReviewStatus } from "./evidenceFingerprint.ts";
 import { DataFindings, describeFilter } from "./MetricEvidence.tsx";
 import { visibleQuery } from "./query.ts";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { DashboardSpec, FilterSpec, PresentationBrief } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
 import type { CanvasSpec } from "../canvas/presets.ts";
@@ -20,19 +20,25 @@ import { BriefEvidence } from "./BriefEvidence.tsx";
 import { cardComparison, CARD_COMPARISONS } from "../charts/cardComparison.ts";
 import { resolvedChartKind } from "../suggest/chartRules.ts";
 
-export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope, filtersByTile, drills, scopeWarnings, dirty, canSave, canEdit, activeTabId, onKeepBrief, onClose, onSave, onWatch }: {
+export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope, filtersByTile, drills, scopeWarnings, dirty, canSave, canEdit, activeTabId, initialMode = "dashboard", onKeepBrief, onClose, onSave, onWatch, onLoadMessyDraft, onImproveArrange }: {
   spec: DashboardSpec; canvas: CanvasSpec; model: Model; queryContext: string; evidenceScope: string;
   filtersByTile: Record<string, FilterSpec[]>; drills: Record<string, DrillEntry[]>;
   scopeWarnings: Record<string, string[]>; dirty: boolean; canSave: boolean; canEdit: boolean; activeTabId: string;
+  initialMode?: PresentationMode;
   onKeepBrief: (brief: PresentationBrief) => void;
   onClose: () => void; onSave: (brief: PresentationBrief) => Promise<void>; onWatch: () => void;
+  onLoadMessyDraft?: () => void; onImproveArrange?: () => void;
 }) {
   const [checks, setChecks] = useState<Record<string, Readiness>>({});
   const [message, setMessage] = useState("");
   const [brief, setBrief] = useState<PresentationBrief>(() => structuredClone(currentTab(spec, activeTabId).brief ?? emptyBrief()));
   const [savingBrief, setSavingBrief] = useState(false);
   const { question, takeaway, nextStep } = brief;
-  const [mode, setMode] = useState<PresentationMode>("dashboard"), [expanded, setExpanded] = useState(false);
+  const [mode, setMode] = useState<PresentationMode>(initialMode), [expanded, setExpanded] = useState(initialMode !== "dashboard");
+  useEffect(() => {
+    setMode(initialMode);
+    if (initialMode !== "dashboard") setExpanded(true);
+  }, [initialMode]);
   const [exporting, setExporting] = useState(false), [preparedAt] = useState(() => new Date().toISOString());
   const busy = exporting || savingBrief;
   const close = () => { if (!busy) { if (canEdit) onKeepBrief(brief); onClose(); } };
@@ -110,8 +116,14 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
   };
   return <StudioDialog title="Review and share" onClose={close} className={`ai-redesign-dialog report-dialog${expanded ? " report-expanded" : ""}`}>
     <div className="report-toolbar">
+      <div className="journey-bar" role="group" aria-label="End-to-end analytics journey">
+        {onLoadMessyDraft && <button type="button" className="journey-step" disabled={busy} onClick={() => { if (canEdit) onKeepBrief(brief); onLoadMessyDraft(); }}><span className="journey-num">1</span>Messy Draft</button>}
+        {onImproveArrange && <button type="button" className="journey-step" disabled={busy} onClick={() => { if (canEdit) onKeepBrief(brief); onImproveArrange(); }}><span className="journey-num">2</span>Improve &amp; Arrange</button>}
+        <button type="button" className="journey-step" aria-pressed={mode === "story"} disabled={busy} onClick={() => changeMode("story")}><span className="journey-num">3</span>Executive Story</button>
+        <button type="button" className="journey-step" aria-pressed={mode === "infographic"} disabled={busy} onClick={() => changeMode("infographic")}><span className="journey-num">4</span>Broadside Infographic</button>
+      </div>
       <div role="group" aria-label="Presentation format">{PRESENTATIONS.map(p => <button className="review-action" key={p.id} aria-pressed={mode === p.id} disabled={busy} onClick={() => changeMode(p.id)}>{p.label}</button>)}</div>
-      <button className="review-action" disabled={busy} onClick={() => setExpanded(v => !v)}>{expanded ? "Show review details" : "Expand presentation"}</button>
+      <button className="review-action" disabled={busy} onClick={() => setExpanded(v => !v)}>{expanded ? "Edit brief & evidence" : "Expand presentation"}</button>
       <button className="primary" disabled={!ready || busy} onClick={() => void exportPresentation()}>{exporting ? "Exporting…" : `Export ${presentation.label.toLowerCase()} as PNG`}</button>
       {message && <p role="status">{message}</p>}
     </div>
@@ -160,16 +172,19 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
         <div className="report-scroll" ref={previewScroll}>
           <article className={`report-document report-${mode}`} ref={report} aria-label={`${presentation.label} presentation`}>
             <header className="report-cover doc-head"><span className="eyebrow">Semantic Canvas · {presentation.label}</span>
-              <div className="broadside-eyebrow mono">GOVERNED SEMANTIC WORKSPACE · PARAMETERIZED SQL</div>
+              {(question.trim() || spec.description) && (
+                <div className="report-question">
+                  <span>Business question</span>
+                  <h2>{question.trim() || spec.description}</h2>
+                </div>
+              )}
               <h1>{spec.title}</h1>
-              {spec.description && <p className="report-description">{spec.description}</p>}
+              {spec.description && question.trim() && <p className="report-description">{spec.description}</p>}
               <div className="report-masthead-pills">
-                <span className="masthead-pill">Settled + Lag Hatched</span>
-                <span className="masthead-pill">SHA-256 Verified Brief</span>
+                <span className="masthead-pill">Partial periods hatched</span>
+                <span className="masthead-pill" title="SHA-256 checks content integrity, not analytical correctness or authorship.">Snapshot with integrity checksum (SHA-256)</span>
               </div>
-              <p className="report-model">Model: {model.name} · Current tab and viewing scope</p>
-              {model.calendar?.today && <p className="report-model">Reporting date: {model.calendar.today} (fixed model clock)</p>}
-              {question.trim() && <div className="report-question"><span>Business question</span><h2>{question}</h2></div>}
+              <p className="report-model">Model: {model.name} · Current tab and viewing scope{model.calendar?.today ? ` · Reporting date: ${model.calendar.today} (fixed model clock)` : ""}</p>
               {takeaway.trim() && <div className="report-takeaway"><strong>Author’s takeaway</strong><p>{takeaway}</p></div>}
               {hasInterpretation && <p className={`report-review-note ${reviewStatus === "matches" ? "review-matches" : "review-needed"}`}>{reviewNotice} This is an author acknowledgement, not a certification of the conclusion or source freshness.</p>}
               {mode === "infographic" && evidence.omitted.length > 0 && <p className="report-selection">Selected evidence · {shownCharts.length} of {charts.length} charts from this tab. Full coverage is available in Dashboard and Story.</p>}

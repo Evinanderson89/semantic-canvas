@@ -15,16 +15,38 @@ const pack = (title: string, question: string, copy: string, tiles: TileSpec[]):
 const M = "fct_saas_monthly.month", R = "fct_mrr_movements.movement_date", W = "fct_web_sessions.session_date", A = "fct_marketing_spend.spend_date", U = "dim_users.signup_date", E = "fct_events.event_date";
 
 export const showcaseStarters = (): Record<string, DashboardSpec> => ({
-  "SaaS overview": pack("SaaS overview", "Growth, with retention in view.",
-    "SAMPLE WAREHOUSE · MARCH–AUGUST 2026\nStart with August’s position. Separate the revenue trend from retention, then inspect the signed movements behind the change.", [
-    kpi("ending-mrr","Ending MRR","ending_mrr",24,M), kpi("retention","Net revenue retention","nrr",388,M), kpi("acquisition-cost","Customer acquisition cost","cac",752,M),
-    chart("revenue-trend","Recurring revenue · monthly closing balance",["ending_mrr"],[`month:${M}`],"area",box(24,384,640,350),M,"cool"),
-    { ...chart("retention-trend","Net vs. gross retention",["nrr","grr"],[`month:${M}`],"line",box(688,384,408,350),M), format: { padding: 18, lineScale: "fit" } },
-    heading("drivers","What is driving the change?",762),
-    { ...chart("revenue-bridge","August MRR movements · signed contribution",["net_new_mrr"],["fct_mrr_movements.movement_type"],"waterfall",box(24,852,640,360),R), where:period(R,"2026-08-01") },
-    chart("plan-mix","Active base-subscription MRR by plan",["mrr"],["dim_plans.plan_name"],"barH",box(688,852,408,360),undefined,"warm"),
-    note("scope-note","READ THE SCOPE · Retention excludes new business. The movement bridge shows August changes; the plan ranking shows current active base subscriptions, excluding add-ons.",box(24,1232,1072,86)),
-  ]),
+  "SaaS overview": {
+    ...pack("SaaS overview", "Growth, with retention in view.",
+      "SAMPLE WAREHOUSE · MARCH–AUGUST 2026\nStart with August’s position. Separate the revenue trend from retention, then inspect the signed movements behind the change.", [
+      kpi("ending-mrr","Ending MRR","ending_mrr",24,M), kpi("retention","Net revenue retention","nrr",388,M), kpi("acquisition-cost","Customer acquisition cost","cac",752,M),
+      {
+        ...chart("revenue-trend","Recurring revenue · monthly closing balance",["ending_mrr"],[`month:${M}`],"area",box(24,384,640,350),M,"cool"),
+        format: {
+          palette: "cool",
+          padding: 18,
+          targetValue: 180000,
+          targetLabel: "Q3 Goal · $180k",
+          annotations: [
+            { at: "2026-05-01", label: "May 12 · Enterprise tier cutover", kind: "policy" },
+          ],
+        },
+      },
+      { ...chart("retention-trend","Net vs. gross retention",["nrr","grr"],[`month:${M}`],"line",box(688,384,408,350),M), format: { padding: 18, lineScale: "fit", targetValue: 1, targetLabel: "100% parity" } },
+      heading("drivers","What is driving the change?",762),
+      { ...chart("revenue-bridge","August MRR movements · signed contribution",["net_new_mrr"],["fct_mrr_movements.movement_type"],"waterfall",box(24,852,640,360),R), where:period(R,"2026-08-01") },
+      chart("plan-mix","Active base-subscription MRR by plan",["mrr"],["dim_plans.plan_name"],"barH",box(688,852,408,360),undefined,"warm"),
+      note("scope-note","READ THE SCOPE · Retention excludes new business. The movement bridge shows August changes; the plan ranking shows current active base subscriptions, excluding add-ons.",box(24,1232,1072,86)),
+    ]),
+    tabs: [{
+      id: "main",
+      title: "Overview",
+      brief: {
+        question: "Is recurring revenue growth durable, and what drove August’s +$25.5k net gain?",
+        takeaway: "August ending MRR reached $203.3k (+14.3% MoM, +$23.3k above the $180k Q3 goal) while net revenue retention held above parity at 102.8%. Expansion and new enterprise tiers after the May 12 packaging cutover outweighed gross churn.",
+        nextStep: "Inspect the August MRR movement bridge and active plan mix before finalizing Q4 enterprise expansion targets.",
+      },
+    }],
+  },
   "MRR movements": pack("MRR movements", "See what adds—and erodes—revenue.",
     "SAMPLE WAREHOUSE · MARCH–AUGUST 2026\nA contribution bridge, a monthly mix and a movement heatmap reveal different parts of the same revenue story. Losses keep their negative sign.", [
     kpi("net-new","Net new MRR","net_new_mrr",24,R), kpi("gross-new","Gross additions","gross_new_mrr",388,R), kpi("lost","Lost MRR","lost_mrr",752,R),

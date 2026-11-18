@@ -75,8 +75,12 @@ export function SemanticCoachPanel({
         : localReport.findings.filter((f) => f.category === goal);
     return {
       ...serverReport,
+      overallScore: localReport.overallScore,
+      categoryScores: localReport.categoryScores,
+      summary: localReport.summary,
+      strengths: localReport.strengths,
       findings,
-      questionAnalysis: serverReport.questionAnalysis ?? localReport.questionAnalysis,
+      questionAnalysis: localReport.questionAnalysis ?? serverReport.questionAnalysis,
     };
   }, [localReport, serverReport, model.name, goal]);
 
@@ -247,9 +251,12 @@ export function SemanticCoachPanel({
         <div>
           <div className="eyebrow">Semantic Layer Coach & Multi-Dialect Converter</div>
           <h3>
-            Overall Readiness Score: <strong>{report.overallScore}/100</strong>
+            Heuristic Readiness Score: <strong>{report.overallScore}/100</strong>
           </h3>
           <p className="muted sm">{report.summary}</p>
+          <p className="muted sm">
+            Structural heuristic based on declared fields and joins — run a query to validate against warehouse data; not a quality certification.
+          </p>
         </div>
         <div className="story-actions">
           <button
@@ -461,13 +468,16 @@ export function SemanticCoachPanel({
           <div className="mrow-top">
             <b>
               {report.questionAnalysis.canAnswerNow
-                ? "✓ Ready to answer now"
+                ? "✓ Model appears to support this question (validate with a live query)"
                 : "Coaching needed to unlock this analysis"}
             </b>
             <span className={`active-badge ${report.questionAnalysis.canAnswerNow ? "modeler-status" : "warn"}`}>
-              {report.questionAnalysis.canAnswerNow ? "Ready" : "Needs model update"}
+              {report.questionAnalysis.canAnswerNow ? "Model appears to support this question" : "Needs model update"}
             </span>
           </div>
+          <p className="muted sm">
+            Heuristic Readiness Score: <b>{report.overallScore}/100</b> · Structural heuristic based on declared fields and joins — run a query to validate against warehouse data; not a quality certification.
+          </p>
           <p className="sm">
             <b>Question:</b> “{report.questionAnalysis.question}”
           </p>
@@ -533,6 +543,12 @@ export function SemanticCoachPanel({
         ))}
       </div>
 
+      {goal === "cohorts_and_cumulative" && (
+        <p className="muted sm">
+          True cohort analysis requires grouping by an acquisition/signup period dimension alongside retention or activity measures (a trailing cumulative total alone only measures rolling volume, not cohort retention).
+        </p>
+      )}
+
       <div className="mlist coach-findings-list">
         {report.findings.map((finding) => {
           const displayedSnippet =
@@ -587,7 +603,7 @@ export function SemanticCoachPanel({
         })}
         {report.findings.length === 0 && (
           <div className="empty">
-            No coaching findings for this goal — your semantic model is ready!
+            No structural coaching findings for this goal — model appears to support these checks (validate with a live query against warehouse data).
           </div>
         )}
       </div>

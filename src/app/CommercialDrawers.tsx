@@ -51,16 +51,19 @@ export function buildLocalDigestPreview(spec: DashboardSpec, model: Model): Norm
   }
   const headline = `${spec.title} — ${metricTiles.length} metric ${metricTiles.length === 1 ? "tile" : "tiles"} (${highlights.length} governed ${highlights.length === 1 ? "measure" : "measures"})`;
   const scopeNotes = [
-    "Unsaved draft preview. Save the dashboard to compute warehouse-verified values and a SHA-256 signature.",
+    "Unsaved draft preview. Save the dashboard to compute warehouse values and a Snapshot with integrity checksum (SHA-256). The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship.",
   ];
   const markdown = [
-    `# ${spec.title} — Executive Digest (Draft)`,
+    `# ${spec.title} — Executive Digest · Snapshot with integrity checksum (Draft)`,
     "",
     `## Headline Summary`,
     `- ${headline}`,
     ...highlights.map((h) => `- ${h.title} (${h.label}): ${h.formattedValue}`),
+    "",
+    "---",
+    "_The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship._",
   ].join("\n");
-  const html = `<article class="executive-digest"><h1>${spec.title} — Executive Digest</h1><p>${headline}</p></article>`;
+  const html = `<article class="executive-digest"><h1>${spec.title} — Executive Digest · Snapshot with integrity checksum</h1><p>${headline}</p><p class="digest-integrity-note">The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship.</p></article>`;
   return {
     headline,
     briefFingerprint: null,
@@ -117,16 +120,24 @@ export function normalizeDigestPayload(
       : Array.isArray(d.caveats)
         ? d.caveats.map(String)
         : [];
-  const markdown = String(
+  const integrityDisclaimer =
+    "The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship.";
+  const rawMarkdown = String(
     d.markdown ??
       raw?.markdown ??
-      `# ${spec.title} — Executive Digest\n\n${headline}`,
+      `# ${spec.title} — Executive Digest · Snapshot with integrity checksum\n\n${headline}`,
   );
-  const html = String(
+  const markdown = rawMarkdown.includes("verifies snapshot content integrity")
+    ? rawMarkdown
+    : `${rawMarkdown}\n\n---\nExecutive Digest · Snapshot with integrity checksum (SHA-256)${briefFingerprint ? `: \`${briefFingerprint}\`` : ""}\n_${integrityDisclaimer}_`;
+  const rawHtml = String(
     d.html ??
       raw?.html ??
-      `<article class="executive-digest"><h1>${spec.title} — Executive Digest</h1><p>${headline}</p></article>`,
+      `<article class="executive-digest"><h1>${spec.title} — Executive Digest · Snapshot with integrity checksum</h1><p>${headline}</p></article>`,
   );
+  const html = rawHtml.includes("verifies snapshot content integrity")
+    ? rawHtml
+    : `${rawHtml}\n<footer class="digest-integrity-note"><p><strong>Snapshot with integrity checksum (SHA-256):</strong> ${integrityDisclaimer}</p></footer>`;
   const bundle = raw?.bundle ?? raw;
   return {
     headline,
@@ -207,14 +218,14 @@ export function ExecutiveDigestDialog({
   };
 
   return (
-    <StudioDialog title="Executive Digest & Verified Brief" wide onClose={onClose}>
+    <StudioDialog title="Executive Digest · Snapshot with integrity checksum" wide onClose={onClose}>
       <div className="commercial-drawer digest-drawer">
         {!dashboardId && (
           <p className="muted sm" role="status">
-            Save this dashboard once to generate a server-verified SHA-256 Executive Digest, or preview the local summary below.
+            Save this dashboard once to generate an Executive Digest · Snapshot with integrity checksum (SHA-256), or preview the local summary below.
           </p>
         )}
-        {loading && <p className="muted sm" role="status">Computing governed KPIs and SHA-256 provenance…</p>}
+        {loading && <p className="muted sm" role="status">Computing governed KPIs and snapshot integrity checksum (SHA-256)…</p>}
         {error && <p className="sm" role="alert">{error}</p>}
 
         <section className="ins-sec">
@@ -222,11 +233,14 @@ export function ExecutiveDigestDialog({
             <h5>Headline Summary</h5>
             {digest.briefFingerprint && (
               <span className="badge sha256-badge" title={digest.briefFingerprint}>
-                SHA-256 · {digest.briefFingerprint.slice(0, 12)}…
+                Snapshot with integrity checksum (SHA-256) · {digest.briefFingerprint.slice(0, 12)}…
               </span>
             )}
           </div>
           <p><b>{digest.headline}</b></p>
+          <p className="muted sm">
+            The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship.
+          </p>
         </section>
 
         <section className="ins-sec">
@@ -274,10 +288,10 @@ export function ExecutiveDigestDialog({
           <button
             className="primary"
             onClick={() =>
-              downloadJsonBundle(`${slugForFilename(spec.title)}-verified-brief.json`, digest.bundle)
+              downloadJsonBundle(`${slugForFilename(spec.title)}-snapshot-brief.json`, digest.bundle)
             }
           >
-            Download Verified Brief (.json)
+            Download Snapshot with integrity checksum (.json)
           </button>
         </footer>
       </div>
