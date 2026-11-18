@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.3.3 (2026-11-18)
+
+### Multi-Table Prompt-to-Executive-Story Composer (`src/suggest/match.ts`, `src/suggest/suggest.ts`)
+- Expanded synonym and stem normalization in `matchModel` (`arr -> mrr`, `bookings -> mrr`, `expansion -> net_new_mrr`, `bridge/drivers/drove/driving -> movement`, `plans -> plan`, `tiers -> tier`, `channels -> channel`, `cac -> cost`, `funnel -> conversion`) and added `companionTables: string[]` and `matchedByTable: Record<string, Metric[]>` to `Matches` for cross-table prompt matching.
+- Exported `composeExecutiveBrief` and upgraded `suggestDashboard`:
+  - **Retention parity scale (`lineScale: "fit"` + `100% parity`):** Automatically sets `format: { lineScale: "fit", referenceLines: [{ label: "100% parity", value: 1 }] }` on retention (`nrr`, `grr`, `retention`) trend charts so curves aren't squashed against a zero baseline.
+  - **Automatic movement waterfall & cross-table companion charts (`"What is driving the change?"`):** Adds up to 2 governed companion charts from secondary matched tables, including a `waterfall` chart (`"MRR movements · signed contribution"`, `net_new_mrr` by `fct_mrr_movements.movement_type`) and plan/tier/channel breakdowns (`"Active base-subscription MRR by plan"` `barH` on `dim_plans.plan_name`, `donut` on `dim_plans.plan_tier`, `barH` on `channel`).
+  - **Closing Scope & Methodology Note (`kind: "text"`):** Appends a self-documenting `"Scope & methodology note"` summarizing base tables, joined dimensions, time grains, and snapshot/reconciliation rules.
+- Added 7 unit tests in `test/agenticComposer.test.ts`.
+
+### Format Proposal Actions, Blank-Canvas Research Budget & Structured Trace (`src/canvas/proposals.ts`, `src/agent/redesignSchema.ts`, `src/suggest/redesign.ts`, `src/agent/loop.ts`)
+- Added the `format` action to `proposalSchema` and `redesignToolSchema` (compatible with `strictToolSchema` provider grammar bounds) supporting `lineScale` (`"zero" | "fit"`), `palette`, `targetValue`, `targetLabel`, `annotations` (`{ at, label, kind? }[]`), and `referenceLines` (`{ label, value }[]`), and updated `applyProposal` to merge `format` fields into `tile.format`.
+- Included `tile.format` in `validateRedesign`'s `analyticalShape` so format upgrades count as analytical improvements.
+- Increased `max_iterations` to `5` when `mode === "redesign"` on a blank canvas (`active && active.spec.tiles.length === 0`) and recorded structured `trace: AgentTraceStep[]` telemetry across tool calls (`describe_model`, `profile_field`, `query_metric`, `propose_canvas_changes`, etc.) with human-readable summaries and `rowsChecked`.
+- Added unit tests in `test/agentLoopProposals.test.ts`.
+
+### Agentic Dashboard Builder UI & Research Ledger (`src/app/AiRedesign.tsx`, `src/app/Interview.tsx`, `src/app/styles.css`)
+- Added a live 4-step **Agentic Research Progress Stepper** (`<ol className="ai-redesign-steps">`), a collapsible **Verified Research Ledger** (`<details className="ai-redesign-ledger">`) showing governed queries checked, agent research trace, and rationale verification status, and an **Instant Deterministic Composer Fallback** (`"Generate deterministic draft from prompt"`) plus a `"Revenue & retention drivers"` preset in `src/app/AiRedesign.tsx`.
+- Enriched `step === 0` (`"What should this dashboard tell you?"`) in `src/app/Interview.tsx` to display cross-table companion metrics matched across secondary tables and added a 1-click **`Build instant draft →`** button inside `.readback`.
+- Styled `.ai-redesign-steps`, `.ai-redesign-ledger`, `.ai-redesign-deterministic`, `.readback-companions`, and `.instant-draft-btn` in `src/app/styles.css` and added 5 unit tests in `test/agentUiExperience.test.ts`.
+
 ## v0.3.1 (2026-11-17)
 
 ### Vibrant Broadside UI Overhaul

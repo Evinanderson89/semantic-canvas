@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import type { Model } from "../semantic/model.ts";
+import type { Metric, Model } from "../semantic/model.ts";
 import { metricsByTable } from "../semantic/model.ts";
-import { matchModel, DEFAULT_BRIEF, type Brief } from "../suggest/match.ts";
+import { matchModel, DEFAULT_BRIEF, type Brief, type Matches } from "../suggest/match.ts";
 import { prettyTable } from "./Sidebar.tsx";
 
 const PREF_KEY = "semantic-canvas:prefs";
@@ -25,17 +25,115 @@ const GRAINS = [
   { id: "month", label: "Monthly" }, { id: "quarter", label: "Quarterly" },
 ];
 
+export function crossTableCompanions(model: Model, matches: Matches): {
+  companionMetrics: Metric[];
+  companionTables: string[];
+} {
+  if (!matches.subject) return { companionMetrics: [], companionTables: [] };
+  const byTable = metricsByTable(model);
+  const seenMetrics = new Set<string>();
+  const companionMetrics: Metric[] = [];
+
+  for (const hit of matches.metrics) {
+    if (hit.metric.baseTable !== matches.subject && !seenMetrics.has(hit.metric.name)) {
+      seenMetrics.add(hit.metric.name);
+      companionMetrics.push(hit.metric);
+    }
+  }
+
+  const matchedByTable = (matches as { matchedByTable?: Record<string, Metric[]> }).matchedByTable;
+  if (matchedByTable) {
+    for (const [table, ms] of Object.entries(matchedByTable)) {
+      if (table === matches.subject) continue;
+      for (const m of ms) {
+        if (!seenMetrics.has(m.name)) {
+          seenMetrics.add(m.name);
+          companionMetrics.push(m);
+        }
+      }
+    }
+  }
+
+  const extraTables = (matches as { companionTables?: string[] }).companionTables ?? [];
+  const tableCandidates = [
+    ...extraTables,
+    ...matches.tables.map((t) => t.table.name),
+  ].filter((name) => name !== matches.subject);
+
+  for (const table of tableCandidates) {
+    if (!companionMetrics.some((m) => m.baseTable === table)) {
+      const top = [...(byTable[table] ?? [])].sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0))[0];
+      if (top && !seenMetrics.has(top.name)) {
+        seenMetrics.add(top.name);
+        companionMetrics.push(top);
+      }
+    }
+  }
+
+  const companionTables = Array.from(
+    new Set([...companionMetrics.map((m) => m.baseTable), ...tableCandidates]),
+  ).filter((name) => name !== matches.subject);
+
+  return { companionMetrics, companionTables };
+}
+
+export function InterviewReadback({
+  model,
+  matches,
+  onInstantDraft,
+}: {
+  model: Model;
+  matches: Matches;
+  onInstantDraft?: () => void;
+}) {
+  const { companionMetrics, companionTables } = useMemo(
+    () => crossTableCompanions(model, matches),
+    [model, matches],
+  );
+  const subjectMetrics = matches.subject
+    ? matches.metrics.filter((m) => m.metric.baseTable === matches.subject)
+    : matches.metrics;
+  const primaryDisplay = (subjectMetrics.length ? subjectMetrics : matches.metrics).slice(0, 4);
+  const companionBadges = [
+    ...companionMetrics.slice(0, 4).map((m) => `${m.label} (${prettyTable(m.baseTable)})`),
+    ...companionTables
+      .filter((t) => !companionMetrics.some((m) => m.baseTable === t))
+      .slice(0, 2)
+      .map((t) => prettyTable(t)),
+  ];
+
+  return (
+    <div className="readback">
+      <div className="readback-main">
+        <b>Reading that as:</b>{" "}
+        {matches.subject ? <>subject <code>{prettyTable(matches.subject)}</code></> : "no strong subject yet"}
+        {primaryDisplay.length > 0 && <> · {primaryDisplay.map((m) => m.metric.label).join(", ")}</>}
+        {companionBadges.length > 0 && (
+          <span className="readback-companions">
+            {" · "}<b>Cross-table companions:</b> {companionBadges.join(", ")}
+          </span>
+        )}
+      </div>
+      {matches.metrics.length > 0 && onInstantDraft && (
+        <button type="button" className="instant-draft-btn" onClick={onInstantDraft}>
+          Build instant draft →
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * Scoping, not guessing. "Suggest a dashboard" used to generate instantly from
  * the model's shape alone, which produces something plausible and generic. The
  * interview trades ten seconds for a dashboard that reflects who it is for and
  * what it is about -- and the answers persist, so the second one is faster.
  */
-export function Interview({ model, onCancel, onDone }: {
-  model: Model; onCancel: () => void; onDone: (b: Brief) => void;
+export function Interview({ model, onCancel, onDone, initialText = "" }: {
+  model: Model; onCancel: () => void; onDone: (b: Brief) => void; initialText?: string;
 }) {
   const [step, setStep] = useState(0);
-  const [text, setText] = useState("");
+  const [text, setText] = useState(initialText);
   const [brief, setBrief] = useState<Brief>({ ...DEFAULT_BRIEF, ...loadPrefs() });
   const [remember, setRemember] = useState(true);
 
@@ -85,12 +183,7 @@ export function Interview({ model, onCancel, onDone }: {
             ))}
           </div>
           {text.trim() && (
-            <div className="readback">
-              <b>Reading that as:</b>{" "}
-              {matches.subject ? <>subject <code>{prettyTable(matches.subject)}</code></> : "no strong subject yet"}
-              {matches.metrics.length > 0 && <> · {matches.metrics.slice(0, 4)
-                .map((m) => m.metric.label).join(", ")}</>}
-            </div>
+            <InterviewReadback model={model} matches={matches} onInstantDraft={finish} />
           )}
         </section>
       )}
