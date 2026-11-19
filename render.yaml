@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: semantic-canvas-sandbox
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /readyz
+    envVars:
+      - key: SC_SERVE_UI
+        value: "true"
+      - key: SC_SANDBOX_MODE
+        value: "true"
+      - key: SC_DATA_DIR
+        value: "/tmp/semantic-canvas-sandbox"

@@ -35,7 +35,7 @@ export function Modeler({ sources, onPublished, onImportSpreadsheet }: { sources
     <div className="explore modeler">
       <span className="eyebrow">Modeler</span>
       <h1>A semantic model, from the warehouse itself.</h1>
-      <p className="lede">Drop an Excel or CSV sheet for a 3-question plain-English setup, or point the Modeler at a Parquet lake or Snowflake warehouse. It measures what is unique and what joins to what, and proposes tables, joins, and metrics with evidence beside each.</p>
+      <p className="lede">Drop an Excel or CSV sheet for a 3-question plain-English setup, or point the Modeler at a Parquet lake, PostgreSQL, BigQuery, or Snowflake warehouse. It measures what is unique and what joins to what, and proposes tables, joins, and metrics with evidence beside each.</p>
       {onImportSpreadsheet && (
         <div className="story-actions" style={{ marginBottom: 16 }}>
           <button type="button" className="primary small" onClick={onImportSpreadsheet}>
@@ -65,16 +65,21 @@ export function Modeler({ sources, onPublished, onImportSpreadsheet }: { sources
 
 function NewDraft({ sources, onCreated }: { sources: SourceRow[]; onCreated: (d: Draft) => void }) {
   const ready = sources.filter((s) => s.status === "ready");
-  const [mode, setMode] = useState<"extend" | "source" | "lake" | "snowflake">(ready.length ? "extend" : "lake");
+  const [mode, setMode] = useState<"extend" | "source" | "lake" | "snowflake" | "postgres" | "bigquery">(ready.length ? "extend" : "lake");
   const [label, setLabel] = useState(""), [id, setId] = useState(""), [idTouched, setIdTouched] = useState(false);
   const [fromSource, setFromSource] = useState(ready[0]?.id ?? "");
   const [lake, setLake] = useState({ lakeRoot: "", awsProfile: "", awsRegion: "" });
   const [snow, setSnow] = useState({ account: "", username: "", password: "", privateKey: "", role: "", warehouse: "COMPUTE_WH", database: "", schema: "PUBLIC" });
+  const [pg, setPg] = useState({ host: "localhost", port: "5432", database: "", schema: "public", username: "", password: "", ssl: false });
+  const [bq, setBq] = useState({ projectId: "", dataset: "", location: "US", clientEmail: "", privateKey: "" });
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setBusy(true); setError(null);
     const connector = mode === "lake" ? { type: "duckdb", lakeRoot: lake.lakeRoot, awsProfile: lake.awsProfile || undefined, awsRegion: lake.awsRegion || undefined, poolSize: 2 }
-      : mode === "snowflake" ? { type: "snowflake", ...Object.fromEntries(Object.entries(snow).filter(([, v]) => v)), poolSize: 2 } : undefined;
+      : mode === "snowflake" ? { type: "snowflake", ...Object.fromEntries(Object.entries(snow).filter(([, v]) => v)), poolSize: 2 }
+      : mode === "postgres" ? { type: "postgres", host: pg.host, port: Number(pg.port) || 5432, database: pg.database, schema: pg.schema || "public", username: pg.username, password: pg.password || undefined, ssl: pg.ssl, poolSize: 2 }
+      : mode === "bigquery" ? { type: "bigquery", projectId: bq.projectId, dataset: bq.dataset, location: bq.location || undefined, clientEmail: bq.clientEmail, privateKey: bq.privateKey }
+      : undefined;
     try {
       const d = await fetch("/api/modeler/drafts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, label: label || id, ...(mode === "source" ? { fromSource } : mode === "extend" ? { extend: fromSource } : { connector }) }) }).then(readResponse);
       onCreated(d);
@@ -90,6 +95,8 @@ function NewDraft({ sources, onCreated }: { sources: SourceRow[]; onCreated: (d:
             {ready.length > 0 && <option value="extend">Extend a source's model: propose only what it is missing</option>}
             {ready.length > 0 && <option value="source">Model the warehouse behind an existing source, as a new source</option>}
             <option value="lake">A Parquet lake (a directory, or s3://)</option>
+            <option value="postgres">A PostgreSQL database and schema</option>
+            <option value="bigquery">A Google BigQuery project and dataset</option>
             <option value="snowflake">A Snowflake database and schema</option>
           </select>
         </label>
@@ -103,6 +110,24 @@ function NewDraft({ sources, onCreated }: { sources: SourceRow[]; onCreated: (d:
             <label className="ctl"><span>AWS profile</span><input value={lake.awsProfile} placeholder="lake-reader" onChange={(e) => setLake({ ...lake, awsProfile: e.target.value })} /></label>
             <label className="ctl"><span>Bucket region</span><input value={lake.awsRegion} placeholder="us-east-2" onChange={(e) => setLake({ ...lake, awsRegion: e.target.value })} /></label>
           </>}
+        </>}
+        {mode === "postgres" && <>
+          <label className="ctl"><span>Host</span><input required value={pg.host} placeholder="db.example.com" onChange={(e) => setPg({ ...pg, host: e.target.value })} /></label>
+          <label className="ctl"><span>Port</span><input value={pg.port} placeholder="5432" onChange={(e) => setPg({ ...pg, port: e.target.value })} /></label>
+          <label className="ctl"><span>Database</span><input required value={pg.database} placeholder="analytics" onChange={(e) => setPg({ ...pg, database: e.target.value })} /></label>
+          <label className="ctl"><span>Schema</span><input value={pg.schema} placeholder="public" onChange={(e) => setPg({ ...pg, schema: e.target.value })} /></label>
+          <label className="ctl"><span>Username</span><input required value={pg.username} placeholder="readonly_user" onChange={(e) => setPg({ ...pg, username: e.target.value })} /></label>
+          <label className="ctl"><span>Password</span><input type="password" value={pg.password} onChange={(e) => setPg({ ...pg, password: e.target.value })} /></label>
+          <label className="ctl span2"><span style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={pg.ssl} onChange={(e) => setPg({ ...pg, ssl: e.target.checked })} /> Require TLS / SSL (recommended for Neon, Supabase, RDS)</span></label>
+          <p className="span2 conn-meta">Read-only transactions enforced on every query. Credentials go to the server's .env and never return to the browser.</p>
+        </>}
+        {mode === "bigquery" && <>
+          <label className="ctl"><span>GCP Project ID</span><input required value={bq.projectId} placeholder="my-analytics-prod" onChange={(e) => setBq({ ...bq, projectId: e.target.value })} /></label>
+          <label className="ctl"><span>Dataset</span><input required value={bq.dataset} placeholder="mart_revenue" onChange={(e) => setBq({ ...bq, dataset: e.target.value })} /></label>
+          <label className="ctl"><span>Location</span><input value={bq.location} placeholder="US" onChange={(e) => setBq({ ...bq, location: e.target.value })} /></label>
+          <label className="ctl"><span>Service Account Email</span><input required value={bq.clientEmail} placeholder="reader@my-project.iam.gserviceaccount.com" onChange={(e) => setBq({ ...bq, clientEmail: e.target.value })} /></label>
+          <PrivateKeyInput label="Service Account Private Key (PEM)" value={bq.privateKey} onChange={value => setBq({ ...bq, privateKey: value })} />
+          <p className="span2 conn-meta">Uses read-only BigQuery OAuth scope. Private keys stay in the server's .env and never return to the browser.</p>
         </>}
         {mode === "snowflake" && <>
           <label className="ctl"><span>Account</span><input required value={snow.account} onChange={(e) => setSnow({ ...snow, account: e.target.value })} /></label>

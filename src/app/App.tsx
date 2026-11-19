@@ -132,6 +132,8 @@ export function App() {
   const chartPreferences = useChartPreferences(session.user ? `team:${session.user.id}` : `local:${asWho}`);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sources, setSources] = useState<SourceInfo[]>([]);
+  const [sandboxMode, setSandboxMode] = useState(false);
+  const [sandboxDismissed, setSandboxDismissed] = useState(false);
   const [autoSourceId, setAutoSourceId] = useState<string | null>(null);
   const [sourceId, setSourceId] = useState<string>(() => {
     try { return storage.getItem(sourceStorageKey) ?? ""; } catch { return ""; }
@@ -168,6 +170,7 @@ export function App() {
   const refreshSources = useCallback(() =>
     fetch("/api/sources").then((r) => r.json())
       .then((d) => { setSources(d.sources ?? []); setAutoSourceId(d.active ?? null); setSourcesLoaded(true);
+        if (typeof d.sandbox === "boolean") setSandboxMode(d.sandbox);
         if (!sourceRef.current) sourceRef.current = d.active ?? "";
         if (localStorage.getItem("sc:principal") === null && d.defaultPrincipal) {
           asWhoRef.current = d.defaultPrincipal; setAsWho(d.defaultPrincipal);
@@ -856,6 +859,21 @@ export function App() {
                sources={sources} activeSource={activeSource} />
 
       <main className="main" ref={mainRef}>
+        {sandboxMode && !sandboxDismissed && (
+          <div className="sandbox-banner" role="status">
+            <span>
+              <strong>Public Sandbox</strong> · Explore the sample SaaS warehouse or drop your own Excel/CSV file (temporary session).
+            </span>
+            <div className="sandbox-banner-actions">
+              <a href="https://github.com/Evinanderson89/semantic-canvas#quick-start" target="_blank" rel="noreferrer">
+                Self-host in 60s ↗
+              </a>
+              <button type="button" className="link" aria-label="Dismiss sandbox banner" onClick={() => setSandboxDismissed(true)}>
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
         <input ref={backupInput} type="file" accept="application/json,.json" hidden aria-label="Import dashboard backup" onChange={async e => {
           const file = e.target.files?.[0]; e.target.value = ""; if (!file) return; const epoch = documentEpoch.current;
           try {

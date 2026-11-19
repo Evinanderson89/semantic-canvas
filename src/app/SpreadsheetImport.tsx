@@ -6,6 +6,7 @@ import {
   SAMPLE_SPREADSHEET_NAME,
   type SpreadsheetColumnProfile,
   type SpreadsheetColumnRole,
+  type SpreadsheetDetectedJoin,
   type SpreadsheetPreview,
 } from "../modeler/spreadsheetTypes.ts";
 
@@ -61,6 +62,8 @@ export function SpreadsheetImport({
 
   const [payload, setPayload] = useState<{ fileName: string; format: "csv" | "xlsx"; content: string } | null>(null);
   const [preview, setPreview] = useState<SpreadsheetPreview | null>(null);
+  const [activeSheetIdx, setActiveSheetIdx] = useState(0);
+  const [joins, setJoins] = useState<SpreadsheetDetectedJoin[]>([]);
   const [label, setLabel] = useState("");
   const [grain, setGrain] = useState("");
   const [timeColumn, setTimeColumn] = useState<string>("");
@@ -78,6 +81,8 @@ export function SpreadsheetImport({
       }).then(readResponse)) as SpreadsheetPreview;
       setPayload(next);
       setPreview(data);
+      setActiveSheetIdx(0);
+      setJoins(data.detectedJoins ?? []);
       setLabel(data.label);
       setGrain(data.suggestedGrain);
       setTimeColumn(data.suggestedTimeColumn ?? "");
@@ -137,6 +142,7 @@ export function SpreadsheetImport({
           timeColumn: timeColumn || null,
           reportingLag,
           choices,
+          joins,
         }),
       }).then(readResponse);
       onImported({
@@ -152,6 +158,12 @@ export function SpreadsheetImport({
     }
   };
 
+  const sheets = preview?.sheets && preview.sheets.length > 0 ? preview.sheets : null;
+  const shownSheet = sheets ? sheets[Math.min(activeSheetIdx, sheets.length - 1)] : null;
+  const shownColumns = shownSheet ? shownSheet.columns : (preview?.columns ?? []);
+  const shownRows = shownSheet ? shownSheet.previewRows : (preview?.previewRows ?? []);
+  const isPrimarySheet = !sheets || activeSheetIdx === 0;
+  const includedJoinCount = joins.filter((j) => j.include).length;
   const dateCols = preview?.columns.filter((c) => c.sqlType === "DATE") ?? [];
   const metricCount = preview
     ? preview.columns.filter((c) => (roles[c.name] ?? c.role) === "metric" && (c.sqlType === "DOUBLE" || c.sqlType === "BIGINT")).length
@@ -208,7 +220,11 @@ export function SpreadsheetImport({
             <div className="mrow-top">
               <div>
                 <strong>{preview.label}</strong>
-                <span className="muted sm"> · {preview.rowCount.toLocaleString()} rows · {preview.columns.length} columns · Click any column pill below to adjust its role</span>
+                <span className="muted sm">
+                  {" "}· {sheets && sheets.length > 1 ? `${sheets.length} sheets · ` : ""}
+                  {(shownSheet?.rowCount ?? preview.rowCount).toLocaleString()} rows · {shownColumns.length} columns
+                  {isPrimarySheet ? " · Click any column pill below to adjust its role" : " · Lookup / related sheet"}
+                </span>
               </div>
               <button
                 type="button"
@@ -217,6 +233,8 @@ export function SpreadsheetImport({
                 onClick={() => {
                   setPreview(null);
                   setPayload(null);
+                  setJoins([]);
+                  setActiveSheetIdx(0);
                   setError(null);
                 }}
               >
@@ -224,12 +242,31 @@ export function SpreadsheetImport({
               </button>
             </div>
 
+            {sheets && sheets.length > 1 && (
+              <div className="sheet-tabs" role="tablist" aria-label="Workbook sheets">
+                {sheets.map((sh, idx) => (
+                  <button
+                    key={sh.tableName}
+                    type="button"
+                    role="tab"
+                    className={`sheet-tab${activeSheetIdx === idx ? " active" : ""}`}
+                    aria-selected={activeSheetIdx === idx}
+                    onClick={() => setActiveSheetIdx(idx)}
+                  >
+                    <span>{sh.sheetName}</span>
+                    <span className="muted sm">({sh.rowCount.toLocaleString()})</span>
+                    {idx === 0 && <span className="sheet-tab-badge">Primary</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div className="sheet-preview-wrap" aria-label="First 5 rows preview">
               <table className="sheet-preview-table">
                 <thead>
                   <tr>
-                    {preview.columns.map((col) => {
-                      const role = roles[col.name] ?? col.role;
+                    {shownColumns.map((col) => {
+                      const role = isPrimarySheet ? (roles[col.name] ?? col.role) : col.role;
                       const meta = ROLE_META[role];
                       return (
                         <th key={col.name}>
@@ -238,8 +275,10 @@ export function SpreadsheetImport({
                             <button
                               type="button"
                               className={`sheet-role-pill ${meta.badge}`}
-                              title="Click to change how this column is used"
+                              disabled={!isPrimarySheet}
+                              title={isPrimarySheet ? "Click to change how this column is used" : "Detected automatically for related sheet"}
                               onClick={() => {
+                                if (!isPrimarySheet) return;
                                 const next = nextRoleFor(col, role);
                                 setRoles((prev) => ({ ...prev, [col.name]: next }));
                                 if (next === "date") setTimeColumn(col.name);
@@ -254,7 +293,7 @@ export function SpreadsheetImport({
                   </tr>
                 </thead>
                 <tbody>
-                  {preview.previewRows.map((row, rIdx) => (
+                  {shownRows.map((row, rIdx) => (
                     <tr key={rIdx}>
                       {row.map((cell, cIdx) => (
                         <td key={cIdx}>{cell || <span className="muted">—</span>}</td>
@@ -264,6 +303,30 @@ export function SpreadsheetImport({
                 </tbody>
               </table>
             </div>
+
+            {joins.length > 0 && (
+              <div className="sheet-joins-box" aria-label="Detected cross-sheet joins">
+                <div className="sheet-joins-head">
+                  <strong>Auto-detected cross-sheet joins ({includedJoinCount}/{joins.length})</strong>
+                  <span className="muted sm">Measured by matching exact key values across your Excel tabs</span>
+                </div>
+                <div className="sheet-joins-list">
+                  {joins.map((j, idx) => (
+                    <label key={`${j.leftTable}.${j.leftColumn}->${j.rightTable}.${j.rightColumn}`} className="sheet-join-item">
+                      <input
+                        type="checkbox"
+                        checked={j.include}
+                        onChange={(e) => setJoins((prev) => prev.map((x, k) => k === idx ? { ...x, include: e.target.checked } : x))}
+                      />
+                      <span className="mono">{j.leftTable}.{j.leftColumn}</span>
+                      <span className="muted">→</span>
+                      <span className="mono">{j.rightTable}.{j.rightColumn}</span>
+                      <span className="sheet-join-rate">{Math.round(j.matchRate * 100)}% matched</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="sheet-questions">
               <div className="sheet-q-card">
@@ -337,7 +400,10 @@ export function SpreadsheetImport({
 
             <div className="sheet-footer">
               <span className="muted sm">
-                Ready to govern <b>{metricCount + 1} metrics</b> ({metricCount} numeric + record count) · Stored locally in DuckDB
+                Ready to govern <b>{metricCount + 1} metrics</b>
+                {sheets && sheets.length > 1 ? ` across ${sheets.length} sheets` : ""}
+                {includedJoinCount > 0 ? ` (${includedJoinCount} auto-join${includedJoinCount === 1 ? "" : "s"})` : ""}
+                {" "}· Stored locally in DuckDB
               </span>
               <div className="story-actions">
                 <button type="button" className="link" disabled={busy !== null} onClick={onClose}>

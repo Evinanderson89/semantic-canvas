@@ -10,6 +10,8 @@ import { cubeAdapter } from "../semantic/cube.ts";
 import { pooledDuckdb } from "../connectors/pool.ts";
 import { sqliteConnector } from "../connectors/sqlite.ts";
 import { snowflakeConnector } from "../connectors/snowflake.ts";
+import { postgresConnector } from "../connectors/postgres.ts";
+import { bigqueryConnector } from "../connectors/bigquery.ts";
 import { mergeOverlay, readOverlay } from "./connected.ts";
 import { mergeExtension, readExtension } from "./extensions.ts";
 import { readAiConfig, type AiConfig } from "./ai.ts";
@@ -71,6 +73,27 @@ export async function connectConnector(c: Record<string, any>): Promise<Connecto
       role: c.role, warehouse: String(c.warehouse ?? "COMPUTE_WH"),
       database: String(c.database ?? ""), schema: String(c.schema ?? "PUBLIC"),
       poolSize: Number(c.poolSize ?? 6),
+    });
+  if (type === "postgres")
+    return postgresConnector({
+      connectionString: c.connectionString ? expand(String(c.connectionString)) : undefined,
+      host: c.host ? expand(String(c.host)) : undefined,
+      port: c.port ? Number(expand(String(c.port))) : undefined,
+      database: c.database ? expand(String(c.database)) : undefined,
+      username: c.username ? expand(String(c.username)) : undefined,
+      password: c.password ? expand(String(c.password)) : undefined,
+      schema: c.schema ? expand(String(c.schema)) : "public",
+      ssl: c.ssl !== undefined ? expand(String(c.ssl)) : undefined,
+      poolSize: Number(c.poolSize ?? 6),
+    });
+  if (type === "bigquery")
+    return bigqueryConnector({
+      projectId: expand(String(c.projectId ?? c.project ?? "")),
+      dataset: expand(String(c.dataset ?? c.schema ?? "")),
+      location: c.location ? expand(String(c.location)) : undefined,
+      credentialsJson: c.credentialsJson ? expand(String(c.credentialsJson)) : undefined,
+      clientEmail: c.clientEmail ? expand(String(c.clientEmail)) : undefined,
+      privateKey: c.privateKey ? expand(String(c.privateKey)) : undefined,
     });
   throw new Error(`unknown connector type "${type}"`);
 }

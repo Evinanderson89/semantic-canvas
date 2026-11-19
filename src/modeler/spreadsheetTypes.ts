@@ -14,6 +14,27 @@ export interface SpreadsheetColumnProfile {
   samples: string[];
 }
 
+export interface SpreadsheetDetectedJoin {
+  leftTable: string;
+  leftColumn: string;
+  rightTable: string;
+  rightColumn: string;
+  matchRate: number;
+  include: boolean;
+}
+
+export interface SpreadsheetSheetPreview {
+  sheetName: string;
+  tableName: string;
+  rowCount: number;
+  columns: SpreadsheetColumnProfile[];
+  previewRows: string[][];
+  suggestedGrain: string;
+  suggestedTimeColumn: string | null;
+  suggestedPrimaryKey: string | null;
+  kind: "fact" | "dimension";
+}
+
 export interface SpreadsheetPreview {
   sourceId: string;
   label: string;
@@ -25,12 +46,24 @@ export interface SpreadsheetPreview {
   suggestedGrain: string;
   suggestedTimeColumn: string | null;
   suggestedPrimaryKey: string | null;
+  /** All sheets in the workbook (1 for CSV, 1..N for multi-sheet .xlsx). */
+  sheets?: SpreadsheetSheetPreview[];
+  /** Auto-detected cross-sheet foreign-key joins (when workbook has 2+ sheets). */
+  detectedJoins?: SpreadsheetDetectedJoin[];
 }
 
 export interface SpreadsheetColumnChoice {
   name: string;
   role: SpreadsheetColumnRole;
   label?: string;
+}
+
+export interface SpreadsheetSheetChoice {
+  tableName: string;
+  grain?: string;
+  timeColumn?: string | null;
+  reportingLag?: number;
+  choices?: SpreadsheetColumnChoice[];
 }
 
 export interface ParsedSpreadsheet {

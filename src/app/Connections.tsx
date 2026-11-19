@@ -31,6 +31,43 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [refreshingSheet, setRefreshingSheet] = useState<string | null>(null);
+  const [sheetRefreshMsg, setSheetRefreshMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
+
+  const refreshSpreadsheet = async (sourceId: string, file?: File | null) => {
+    if (!file) return;
+    setRefreshingSheet(sourceId);
+    setSheetRefreshMsg((prev) => ({ ...prev, [sourceId]: { ok: true, text: "Updating spreadsheet data…" } }));
+    try {
+      const lower = file.name.toLowerCase();
+      let format: "csv" | "xlsx";
+      let content: string;
+      if (lower.endsWith(".xlsx")) {
+        format = "xlsx";
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        content = btoa(binary);
+      } else {
+        format = "csv";
+        content = await file.text();
+      }
+      const res = await fetch(`/api/modeler/spreadsheet/refresh/${encodeURIComponent(sourceId)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fileName: file.name, format, content }),
+      }).then(readResponse);
+      setSheetRefreshMsg((prev) => ({
+        ...prev,
+        [sourceId]: { ok: true, text: `Refreshed ${res.rowsUpdated} rows across ${(res.tablesUpdated ?? []).join(", ")}.` },
+      }));
+      onRefresh();
+    } catch (e: any) {
+      setSheetRefreshMsg((prev) => ({ ...prev, [sourceId]: { ok: false, text: String(e?.message ?? e) } }));
+    } finally {
+      setRefreshingSheet(null);
+    }
+  };
 
   const remove = async (id: string) => {
     setRemoving(id);
@@ -75,6 +112,21 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
               {s.status === "error" && <span className="active-badge err">Unavailable</span>}
               {canAdmin && form === null && confirmRemove !== s.id && (
                 <>
+                  {s.connector?.toLowerCase().includes("duckdb") && s.id !== "sample-warehouse" && (
+                    <label className="link conn-action" style={{ cursor: "pointer" }} title="Upload an updated .xlsx or .csv file to refresh this source in place">
+                      {refreshingSheet === s.id ? "Refreshing…" : "↻ Refresh sheet"}
+                      <input
+                        type="file"
+                        accept=".xlsx,.csv,.tsv"
+                        hidden
+                        disabled={refreshingSheet !== null}
+                        onChange={(e) => {
+                          void refreshSpreadsheet(s.id, e.target.files?.[0]);
+                          e.target.value = "";
+                        }}
+                      />
+                    </label>
+                  )}
                   <button className="link conn-action"
                           onClick={() => setForm({ kind: "edit", id: s.id })}>Edit</button>
                   <button className="link conn-action"
@@ -82,6 +134,11 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
                 </>
               )}
             </div>
+            {sheetRefreshMsg[s.id] && (
+              <p className={sheetRefreshMsg[s.id].ok ? "conn-meta" : "conn-err"} role="status">
+                {sheetRefreshMsg[s.id].text}
+              </p>
+            )}
             {s.status === "ready" ? (
               <p className="mono conn-meta">
                 {s.tables} tables · {s.metrics} metrics{s.connected ? ` · ${s.connected} connected by Ingest${s.unreviewed ? ` (${s.unreviewed} unreviewed)` : ""}` : ""}{s.connectMs != null && Number.isFinite(s.connectMs) ? ` · connected in ${s.connectMs}ms` : ""}
@@ -397,7 +454,7 @@ const slugify = (s: string) =>
   s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
 
 type Adapter = "duckglue" | "dbt" | "snowflake-semantic";
-type ConnectorType = "duckdb" | "snowflake";
+type ConnectorType = "duckdb" | "snowflake" | "postgres" | "bigquery";
 interface FormState {
   id: string; label: string; adapter: Adapter; model: string;
   connectorType: ConnectorType;
@@ -405,6 +462,8 @@ interface FormState {
   account: string; username: string; authMethod: "key" | "password";
   privateKey: string; privateKeyPass: string; password: string;
   role: string; warehouse: string; database: string; schema: string;
+  connectionString: string; host: string; port: string; ssl: boolean;
+  projectId: string; dataset: string; location: string; credentialsJson: string;
 }
 const BLANK_FORM: FormState = {
   id: "", label: "", adapter: "duckglue", model: "",
@@ -412,16 +471,20 @@ const BLANK_FORM: FormState = {
   account: "", username: "", authMethod: "key",
   privateKey: "", privateKeyPass: "", password: "",
   role: "", warehouse: "COMPUTE_WH", database: "", schema: "PUBLIC",
+  connectionString: "", host: "", port: "5432", ssl: true,
+  projectId: "", dataset: "", location: "US", credentialsJson: "",
 };
 const sourceConfigSchema = z.object({
   id: z.string().min(1), label: z.string().optional(), model: z.string().min(1),
   adapter: z.enum(["duckglue", "dbt", "snowflake-semantic"]),
   connector: z.object({
-    type: z.enum(["duckdb", "snowflake"]).default("duckdb"),
+    type: z.enum(["duckdb", "snowflake", "postgres", "bigquery"]).default("duckdb"),
     poolSize: z.union([z.number(), z.string().trim().min(1)]).transform(Number).pipe(z.number().int().positive()).optional(),
     lakeRoot: z.string().optional(), awsProfile: z.string().optional(), awsRegion: z.string().optional(),
     account: z.string().optional(), username: z.string().optional(), role: z.string().optional(),
     warehouse: z.string().optional(), database: z.string().optional(), schema: z.string().optional(),
+    host: z.string().optional(), port: z.union([z.number(), z.string()]).optional(), ssl: z.union([z.boolean(), z.string()]).optional(),
+    projectId: z.string().optional(), dataset: z.string().optional(), location: z.string().optional(),
   }),
 });
 
@@ -466,7 +529,10 @@ function SourceForm({ editId, onCancel, onSaved }: {
         awsProfile: c.awsProfile ?? "", awsRegion: c.awsRegion ?? "",
         account: c.account ?? "", username: c.username ?? "",
         role: c.role ?? "", warehouse: c.warehouse ?? f.warehouse, database: c.database ?? "",
-        schema: c.schema ?? f.schema,
+        schema: c.schema ?? (c.type === "postgres" ? "public" : f.schema),
+        host: c.host ?? "", port: c.port != null ? String(c.port) : "5432",
+        ssl: c.ssl === true || c.ssl === "true" || c.ssl === "require",
+        projectId: c.projectId ?? "", dataset: c.dataset ?? "", location: c.location ?? "US",
       }));
       setIdTouched(true);
     }).catch((e) => { if (!controller.signal.aborted) setLoadError(String(e?.message ?? e)); })
@@ -482,6 +548,24 @@ function SourceForm({ editId, onCancel, onSaved }: {
     if (form.connectorType === "duckdb") {
       connector.lakeRoot = form.lakeRoot;
       if (form.lakeRoot.startsWith("s3://") || form.awsProfile) { connector.awsProfile = form.awsProfile || undefined; connector.awsRegion = form.awsRegion || undefined; }
+    } else if (form.connectorType === "postgres") {
+      Object.assign(connector, {
+        connectionString: form.connectionString || undefined,
+        host: form.host || undefined,
+        port: form.port || undefined,
+        database: form.database || undefined,
+        username: form.username || undefined,
+        password: form.password || undefined,
+        schema: form.schema || "public",
+        ssl: form.ssl ? "true" : "false",
+      });
+    } else if (form.connectorType === "bigquery") {
+      Object.assign(connector, {
+        projectId: form.projectId,
+        dataset: form.dataset,
+        location: form.location || undefined,
+        credentialsJson: form.credentialsJson || undefined,
+      });
     } else {
       Object.assign(connector, {
         account: form.account, username: form.username,
@@ -560,9 +644,16 @@ function SourceForm({ editId, onCancel, onSaved }: {
           <select aria-label="Connector" value={form.connectorType}
                   onChange={(e) => {
                     const t = e.target.value as ConnectorType;
-                    setForm((f) => ({ ...f, connectorType: t, poolSize: t === "snowflake" ? "6" : "4" }));
+                    setForm((f) => ({
+                      ...f,
+                      connectorType: t,
+                      schema: t === "postgres" && f.schema === "PUBLIC" ? "public" : f.schema,
+                      poolSize: t === "snowflake" || t === "postgres" ? "6" : "4",
+                    }));
                   }}>
-            <option value="duckdb">DuckDB</option>
+            <option value="duckdb">DuckDB (Parquet / CSV / S3)</option>
+            <option value="postgres">PostgreSQL (Supabase / RDS / Neon)</option>
+            <option value="bigquery">Google BigQuery</option>
             <option value="snowflake">Snowflake</option>
           </select>
         </label>
@@ -613,6 +704,70 @@ function SourceForm({ editId, onCancel, onSaved }: {
                        onChange={(e) => set("awsRegion", e.target.value)} />
               </label>
             </>}
+          </>
+        ) : form.connectorType === "postgres" ? (
+          <>
+            <label className="ctl span2">
+              <span>Connection string (optional — or fill host &amp; credentials below)</span>
+              <input type="password" value={form.connectionString}
+                     placeholder={isEdit ? "unchanged if left blank" : "postgres://reader:pass@db.example.com:5432/analytics"}
+                     onChange={(e) => set("connectionString", e.target.value)} />
+            </label>
+            <label className="ctl">
+              <span>Host</span>
+              <input required={!isEdit && !form.connectionString} value={form.host} placeholder="db.example.com"
+                     onChange={(e) => set("host", e.target.value)} />
+            </label>
+            <label className="ctl">
+              <span>Port</span>
+              <input value={form.port} placeholder="5432" onChange={(e) => set("port", e.target.value)} />
+            </label>
+            <label className="ctl">
+              <span>Database</span>
+              <input required={!isEdit && !form.connectionString} value={form.database} placeholder="analytics"
+                     onChange={(e) => set("database", e.target.value)} />
+            </label>
+            <label className="ctl">
+              <span>Schema</span>
+              <input value={form.schema} placeholder="public" onChange={(e) => set("schema", e.target.value)} />
+            </label>
+            <label className="ctl">
+              <span>Username</span>
+              <input required={!isEdit && !form.connectionString} value={form.username} placeholder="analytics_ro"
+                     onChange={(e) => set("username", e.target.value)} />
+            </label>
+            <label className="ctl">
+              <span>Password</span>
+              <input type="password" value={form.password} placeholder={isEdit ? "unchanged if left blank" : ""}
+                     onChange={(e) => set("password", e.target.value)} />
+            </label>
+            <label className="ctl span2" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <input type="checkbox" checked={form.ssl} onChange={(e) => set("ssl", e.target.checked)} />
+              <span>Require TLS / SSL (recommended for Supabase, Neon, and RDS)</span>
+            </label>
+          </>
+        ) : form.connectorType === "bigquery" ? (
+          <>
+            <label className="ctl">
+              <span>GCP Project ID</span>
+              <input required={!isEdit} value={form.projectId} placeholder="my-analytics-prod"
+                     onChange={(e) => set("projectId", e.target.value)} />
+            </label>
+            <label className="ctl">
+              <span>Dataset</span>
+              <input required={!isEdit} value={form.dataset} placeholder="analytics_marts"
+                     onChange={(e) => set("dataset", e.target.value)} />
+            </label>
+            <label className="ctl">
+              <span>Location</span>
+              <input value={form.location} placeholder="US" onChange={(e) => set("location", e.target.value)} />
+            </label>
+            <label className="ctl span2">
+              <span>Service Account JSON (read-only BigQuery Data Viewer + Job User)</span>
+              <textarea rows={4} required={!isEdit} value={form.credentialsJson}
+                        placeholder={isEdit ? "Leave blank to keep saved service account credentials" : '{"type":"service_account","client_email":"...","private_key":"-----BEGIN PRIVATE KEY-----\\n..."}'}
+                        onChange={(e) => set("credentialsJson", e.target.value)} />
+            </label>
           </>
         ) : (
           <>
