@@ -31,7 +31,7 @@ export const showcaseStarters = (): Record<string, DashboardSpec> => ({
           ],
         },
       },
-      { ...chart("retention-trend","Net vs. gross retention",["nrr","grr"],[`month:${M}`],"line",box(688,384,408,350),M), format: { padding: 18, lineScale: "fit", targetValue: 1, targetLabel: "100% parity" } },
+      { ...chart("retention-trend","Net vs. gross retention",["nrr","grr"],[`month:${M}`],"line",box(688,384,408,350),M,"cool"), format: { palette: "cool", padding: 18, lineScale: "fit", targetValue: 1, targetLabel: "100% parity" } },
       heading("drivers","What is driving the change?",762),
       { ...chart("revenue-bridge","August MRR movements · signed contribution",["net_new_mrr"],["fct_mrr_movements.movement_type"],"waterfall",box(24,852,640,360),R), where:period(R,"2026-08-01") },
       chart("plan-mix","Active base-subscription MRR by plan",["mrr"],["dim_plans.plan_name"],"barH",box(688,852,408,360),undefined,"warm"),
@@ -42,7 +42,7 @@ export const showcaseStarters = (): Record<string, DashboardSpec> => ({
       title: "Overview",
       brief: {
         question: "Is recurring revenue growth durable, and what drove August’s +$25.5k net gain?",
-        takeaway: "August ending MRR reached $203.3k (+14.3% MoM, +$23.3k above the $180k Q3 goal) while net revenue retention held above parity at 102.8%. Expansion and new enterprise tiers after the May 12 packaging cutover outweighed gross churn.",
+        takeaway: "August ending MRR reached $202.8k (+14.4% MoM, +$22.8k above the $180k Q3 goal) while net revenue retention held above parity at 102.8%. Expansion and new enterprise tiers after the May 12 packaging cutover outweighed gross churn.",
         nextStep: "Inspect the August MRR movement bridge and active plan mix before finalizing Q4 enterprise expansion targets.",
       },
     }],

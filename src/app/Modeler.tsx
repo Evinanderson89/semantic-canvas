@@ -22,7 +22,7 @@ const publicationSchema = z.object({
 
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^[^a-z]+/, "").slice(0, 40);
 
-export function Modeler({ sources, onPublished }: { sources: SourceRow[]; onPublished: (sourceId: string) => void }) {
+export function Modeler({ sources, onPublished, onImportSpreadsheet }: { sources: SourceRow[]; onPublished: (sourceId: string) => void; onImportSpreadsheet?: () => void }) {
   const [drafts, setDrafts] = useState<DraftSummary[] | null>(null);
   const [open, setOpen] = useState<Draft | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -34,8 +34,15 @@ export function Modeler({ sources, onPublished }: { sources: SourceRow[]; onPubl
   return (
     <div className="explore modeler">
       <span className="eyebrow">Modeler</span>
-      <h1>A semantic model, from the warehouse itself.</h1>
-      <p className="lede">Point the Modeler at a lake or a warehouse. It reads the catalogue, measures what is unique and what joins to what, and proposes tables, joins and metrics with the evidence beside each. You review, correct, and publish; the result is an ordinary model file and a source anyone can chart against. Already have a model? Extend it: the Modeler proposes only what it is missing, and never edits what you wrote.</p>
+      <h1>A semantic model, from your spreadsheets or warehouse.</h1>
+      <p className="lede">Drop an Excel or CSV sheet for a 3-question plain-English setup, or point the Modeler at a Parquet lake or Snowflake warehouse. It measures what is unique and what joins to what, and proposes tables, joins, and metrics with evidence beside each.</p>
+      {onImportSpreadsheet && (
+        <div className="story-actions" style={{ marginBottom: 16 }}>
+          <button type="button" className="primary small" onClick={onImportSpreadsheet}>
+            ⊞ Drop an Excel (.xlsx) or CSV sheet (No-Code Quick Start)
+          </button>
+        </div>
+      )}
       {error && <p className="conn-err" role="alert">{error}</p>}
       <NewDraft sources={sources} onCreated={(d) => { setDrafts(null); setOpen(d); }} />
       <DriftCheck sources={sources} />

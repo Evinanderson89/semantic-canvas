@@ -116,15 +116,15 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
   };
   return <StudioDialog title="Review and share" onClose={close} className={`ai-redesign-dialog report-dialog${expanded ? " report-expanded" : ""}`}>
     <div className="report-toolbar">
-      <div className="journey-bar" role="group" aria-label="End-to-end analytics journey">
-        {onLoadMessyDraft && <button type="button" className="journey-step" disabled={busy} onClick={() => { if (canEdit) onKeepBrief(brief); onLoadMessyDraft(); }}><span className="journey-num">1</span>Messy Draft</button>}
-        {onImproveArrange && <button type="button" className="journey-step" disabled={busy} onClick={() => { if (canEdit) onKeepBrief(brief); onImproveArrange(); }}><span className="journey-num">2</span>Improve &amp; Arrange</button>}
-        <button type="button" className="journey-step" aria-pressed={mode === "story"} disabled={busy} onClick={() => changeMode("story")}><span className="journey-num">3</span>Executive Story</button>
-        <button type="button" className="journey-step" aria-pressed={mode === "infographic"} disabled={busy} onClick={() => changeMode("infographic")}><span className="journey-num">4</span>Broadside Infographic</button>
+      <div className="journey-bar" role="group" aria-label="Presentation format">
+        <button type="button" className="journey-step" aria-pressed={mode === "dashboard"} disabled={busy} onClick={() => changeMode("dashboard")}><span className="journey-num">1</span>Dashboard</button>
+        <button type="button" className="journey-step" aria-pressed={mode === "story"} disabled={busy} onClick={() => changeMode("story")}><span className="journey-num">2</span>Executive Story</button>
+        <button type="button" className="journey-step" aria-pressed={mode === "infographic"} disabled={busy} onClick={() => changeMode("infographic")}><span className="journey-num">3</span>Broadside Infographic</button>
       </div>
-      <div role="group" aria-label="Presentation format">{PRESENTATIONS.map(p => <button className="review-action" key={p.id} aria-pressed={mode === p.id} disabled={busy} onClick={() => changeMode(p.id)}>{p.label}</button>)}</div>
-      <button className="review-action" disabled={busy} onClick={() => setExpanded(v => !v)}>{expanded ? "Edit brief & evidence" : "Expand presentation"}</button>
-      <button className="primary" disabled={!ready || busy} onClick={() => void exportPresentation()}>{exporting ? "Exporting…" : `Export ${presentation.label.toLowerCase()} as PNG`}</button>
+      {onImproveArrange && <button type="button" className="review-action" disabled={busy} onClick={() => { if (canEdit) onKeepBrief(brief); onImproveArrange(); }}>Improve &amp; Arrange</button>}
+      <button type="button" className="review-action" disabled={busy} onClick={() => setExpanded(v => !v)}>{expanded ? "Edit brief & evidence" : "Expand presentation"}</button>
+      <span className="spacer" />
+      <button type="button" className="primary" disabled={!ready || busy} onClick={() => void exportPresentation()}>{exporting ? "Exporting…" : `Export ${presentation.label.toLowerCase()} as PNG`}</button>
       {message && <p role="status">{message}</p>}
     </div>
     <div className="ai-redesign-content">

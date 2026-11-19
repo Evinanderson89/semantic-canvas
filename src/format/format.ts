@@ -55,7 +55,7 @@ export interface EditorialTheme {
 }
 
 export const PALETTES: Record<string, string[]> = {
-  default:   ["#2563eb", "#059669", "#d97706", "#e11d48", "#7c3aed", "#0891b2"],
+  default:   ["#2563eb", "#059669", "#0891b2", "#7c3aed", "#d97706", "#e11d48"],
   cool:      ["#2563eb", "#1d4ed8", "#0284c7", "#059669", "#4f46e5", "#0891b2"],
   warm:      ["#d97706", "#e11d48", "#ea580c", "#be123c", "#b45309", "#dc2626"],
   mono:      ["#1d4ed8", "#2563eb", "#3b82f6", "#60a5fa", "#1e40af", "#1e3a8a"],

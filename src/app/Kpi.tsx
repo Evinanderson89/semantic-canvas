@@ -137,7 +137,15 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
 
   const fmt = format ?? ((n: number) =>
     Math.abs(n) >= 1000 ? d3.format(".4~s")(n).replace("G", "B") : d3.format(",.3~f")(n));
-  const period = (v: unknown) => v instanceof Date && Number.isFinite(+v) ? v.toISOString().slice(0, 10) : String(v ?? "").slice(0, 10);
+  const period = (v: unknown) => {
+    const raw = v instanceof Date && Number.isFinite(+v) ? v.toISOString().slice(0, 10) : String(v ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const dt = new Date(`${raw}T00:00:00Z`);
+    if (!Number.isFinite(+dt)) return raw;
+    if (grain === "month") return dt.toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
+    if (grain === "year") return String(dt.getUTCFullYear());
+    return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+  };
 
   return (
     <div className="kpi">

@@ -100,7 +100,7 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
           <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="M3 6h14M3 14h14" /><circle cx="7" cy="6" r="2" fill="var(--panel)" /><circle cx="13" cy="14" r="2" fill="var(--panel)" /></svg>
           Settings
         </button>
-        <div className="workspace-caption"><span title={session.mode === "team" ? "Access is managed by your company" : "Roles are simulations on this computer, not authentication"}>{session.mode === "team" ? `Company workspace · ${session.user?.role}` : "Local alpha · Role preview"}</span>
+        <div className="workspace-caption"><span title={session.mode === "team" ? "Access is managed by your company" : "Roles are local previews on this computer, not live accounts"}>{session.mode === "team" ? `Company workspace · ${session.user?.role}` : "Demo mode · Viewing as"}</span>
           {session.policy?.length ? <span className="data-policy" title={"Set at the gateway for your groups. Every chart is filtered by it; a chart that cannot apply it is refused.\n" + session.policy.map((r) => `${r.field} ${r.mode === "only" ? "only" : "not"} ${r.values.join(", ")}`).join("\n")}>Data policy: {session.policy.map((r) => `${r.field.split(".").pop()} ${r.mode === "only" ? "in" : "not in"} ${r.values.slice(0, 3).join(", ")}${r.values.length > 3 ? "…" : ""}`).join("; ")}</span> : null}
           <button className="theme-toggle" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} appearance`}
             title={`Switch to ${theme === "light" ? "dark" : "light"} appearance`} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
