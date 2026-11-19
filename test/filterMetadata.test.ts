@@ -1,5 +1,7 @@
 import { expect, it } from "vitest";
 import { filterMetadata, filterValueLabels } from "../src/app/useFilterMetadata.ts";
+import { globalWindowFilterForTile } from "../src/app/filters.ts";
+import type { Model } from "../src/semantic/model.ts";
 
 it("preserves typed values, missing values and the explicit result limit", () => {
   expect(filterMetadata({ values: [{ value: 1, n: "12" }, { value: "1", n: 3 }, { value: null, n: 2 }, { value: false, n: 1 }], truncated: true }, "discrete"))
@@ -40,4 +42,51 @@ it("rejects error bodies and malformed counts rather than presenting an empty li
     expect(() => filterMetadata(body, "discrete")).toThrow("invalid filter values");
   }
   expect(() => filterMetadata({ error: "Denied" }, "range")).toThrow("invalid data range");
+});
+
+it("resolves global header date-window presets onto time-aware metric tiles cleanly", () => {
+  const model: Model = {
+    name: "test",
+    source: "test",
+    tables: {
+      orders: {
+        name: "orders",
+        columns: [
+          { name: "order_date", type: "DATE" },
+          { name: "revenue", type: "DOUBLE" },
+        ],
+        partitionKeys: [],
+        synonyms: [],
+        defaultDateColumn: "order_date",
+      },
+      plans: {
+        name: "plans",
+        columns: [{ name: "plan_name", type: "VARCHAR" }],
+        partitionKeys: [],
+        synonyms: [],
+      },
+    },
+    joins: [],
+    metrics: {
+      rev: { name: "rev", label: "Revenue", baseTable: "orders", expression: "SUM(revenue)", filter: null, synonyms: [] },
+      plan_cnt: { name: "plan_cnt", label: "Plans", baseTable: "plans", expression: "COUNT(*)", filter: null, synonyms: [] },
+    },
+  };
+  const now = new Date("2026-08-31T12:00:00Z");
+  const metricTile = { id: "t1", metrics: ["rev"], dimensions: [], layout: { x: 0, y: 0, w: 300, h: 200 } };
+  const snapTile = { id: "t2", metrics: ["plan_cnt"], dimensions: [], layout: { x: 0, y: 0, w: 300, h: 200 } };
+
+  expect(globalWindowFilterForTile(model, metricTile, "all", now)).toEqual([]);
+  expect(globalWindowFilterForTile(model, snapTile, "last-30-days", now)).toEqual([]);
+  expect(globalWindowFilterForTile(model, metricTile, "this-quarter", now)).toEqual([
+    {
+      id: "window:this-quarter",
+      field: "orders.order_date",
+      source: "dimension",
+      mode: "range",
+      min: "2026-07-01",
+      max: "2026-09-01",
+      maxExclusive: true,
+    },
+  ]);
 });

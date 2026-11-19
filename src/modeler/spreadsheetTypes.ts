@@ -50,6 +50,8 @@ export interface SpreadsheetPreview {
   sheets?: SpreadsheetSheetPreview[];
   /** Auto-detected cross-sheet foreign-key joins (when workbook has 2+ sheets). */
   detectedJoins?: SpreadsheetDetectedJoin[];
+  /** Plain-English summary of automatic messy-spreadsheet cleanups applied. */
+  cleaningNotes?: string[];
 }
 
 export interface SpreadsheetColumnChoice {
@@ -70,6 +72,7 @@ export interface ParsedSpreadsheet {
   sheetName: string;
   headers: string[];
   rows: string[][];
+  cleaningNotes?: string[];
 }
 
 export const SAMPLE_SPREADSHEET_NAME = "Q3_Sales_Performance.csv";

@@ -53,8 +53,10 @@ import { readResponse } from "./http.ts";
 import { documentSnapshot, fingerprint, withGrain, parseDrafts, documentGrain, type DocumentSnapshot, type Draft } from "./document.ts";
 import { MAX_DOCUMENT_BYTES } from "../compiler/schema.ts";
 import { currentTab, mergeTab, tabView, tabsOf } from "./tabs.ts";
-import { filtersForTile, validateDashboard } from "./filters.ts";
-import type { FilterValue } from "../compiler/spec.ts";
+import { filtersForTile, globalWindowFilterForTile, validateDashboard } from "./filters.ts";
+import { PRESETS, PRESET_IDS } from "./datePresets.ts";
+import { showcaseStarters } from "../library/showcase.ts";
+import type { DatePreset, FilterValue } from "../compiler/spec.ts";
 
 import { DistributeDialog } from "./DistributeDialog.tsx";
 import { demoDashboard, demoDashboardAvailable } from "../suggest/demo.ts";
@@ -79,6 +81,7 @@ export function App() {
   const [distributing, setDistributing] = useState(false);
   const [filterEditing, setFilterEditing] = useState<string | null>(null);
   const [filterValues, setFilterValues] = useState<Record<string, FilterValue>>({});
+  const [dateWindow, setDateWindow] = useState<DatePreset | "all">("all");
   const dash = React.useMemo(() => book ? tabView(book, activeTabId) : null, [book, activeTabId]);
   const setDash = useCallback((update: React.SetStateAction<DashboardSpec | null>) => {
     setBook(previous => {
@@ -134,6 +137,7 @@ export function App() {
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [sandboxMode, setSandboxMode] = useState(false);
   const [sandboxDismissed, setSandboxDismissed] = useState(false);
+  const sandboxAutoOpened = React.useRef(false);
   const [autoSourceId, setAutoSourceId] = useState<string | null>(null);
   const [sourceId, setSourceId] = useState<string>(() => {
     try { return storage.getItem(sourceStorageKey) ?? ""; } catch { return ""; }
@@ -330,7 +334,7 @@ export function App() {
     past.current = []; future.current = [];
     const surface = { ...DEFAULT_CANVAS, ...options.canvas, locked: !session.canEdit };
     if (next?.tiles.length && !options.canvas) surface.height = Math.max(surface.height, ...next.tiles.map((t) => t.layout.y + t.layout.h + 24));
-    setBook(next); setActiveTabId(next ? tabsOf(next)[0].id : "main"); setFilterValues({});
+    setBook(next); setActiveTabId(next ? tabsOf(next)[0].id : "main"); setFilterValues({}); setDateWindow("all");
     setCanvas(surface); setDashId(options.id ?? null); setRevision(options.revision ?? 0);
     setSavedFingerprint(next && options.saved ? fingerprint(next, surface) : null);
     setGrain(documentGrain(next));
@@ -564,6 +568,20 @@ export function App() {
     fetch("/api/model").then(readResponse).then((m) => { if (documentEpoch.current === epoch) { setModel(m); setBootError(""); } })
       .catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
   }, []);
+
+  // In Public Sandbox mode, open the flagship SaaS overview dashboard immediately on first visit
+  // so visitors land directly inside a live, populated executive dashboard rather than a blank menu.
+  useEffect(() => {
+    if (!sandboxMode || sandboxAutoOpened.current || !model || book || view !== "home" || link.current) return;
+    const starter = showcaseStarters()["SaaS overview"];
+    if (!starter || !model.metrics.ending_mrr) return;
+    sandboxAutoOpened.current = true;
+    const fitted = fitStarter(starter, DEFAULT_CANVAS, freshCanvas().width);
+    if (beginDocument(fitted.spec, { canvas: fitted.canvas })) {
+      setTemplateId("starter:SaaS overview");
+      pendingFit.current = true;
+    }
+  }, [sandboxMode, model, book, view, freshCanvas, beginDocument]);
 
   const build = useCallback((brief: Brief) => {
     setInterview(false);
@@ -862,9 +880,14 @@ export function App() {
         {sandboxMode && !sandboxDismissed && (
           <div className="sandbox-banner" role="status">
             <span>
-              <strong>Public Sandbox</strong> · Explore the sample SaaS warehouse or drop your own Excel/CSV file (temporary session).
+              <strong>Public Sandbox</strong> · Live sample warehouse loaded — toggle Story &amp; Infographic below, or upload your own file.
             </span>
             <div className="sandbox-banner-actions">
+              {session.canAdmin && (
+                <button type="button" className="sandbox-upload-btn" onClick={() => setSpreadsheetImport(true)}>
+                  ⊞ Drop Excel / CSV
+                </button>
+              )}
               <a href="https://github.com/Evinanderson89/semantic-canvas#quick-start" target="_blank" rel="noreferrer">
                 Self-host in 60s ↗
               </a>
@@ -958,6 +981,13 @@ export function App() {
                 </div>
               </div>
               <div className="dashboard-actions">
+              <label className="period-control window-control">
+                <span>Window</span>
+                <select aria-label="Date window" value={dateWindow} onChange={(e) => { setDateWindow(e.target.value as DatePreset | "all"); setDrillSessions({}); }}>
+                  <option value="all">All dates</option>
+                  {PRESET_IDS.map((pid) => <option key={pid} value={pid}>{PRESETS[pid].label}</option>)}
+                </select>
+              </label>
               <label className="period-control">
                 <span>Period</span>
                 <select aria-label="Period" disabled={canvas.locked} value={documentGrain(dash)} onChange={(e) => { const next = withGrain(dash, e.target.value); const issues = next.tiles.flatMap(t => validateTile(model, t)); if (issues.length) { setNotice(issues[0].problem); return; } setNotice(""); setGrain(e.target.value); setDrillSessions({}); commit(next); }}>
@@ -1103,7 +1133,7 @@ export function App() {
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
                        beautify={<DashboardBeautify key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} dash={dash} canvas={canvas} model={model} activeTabId={currentTab(book!, activeTabId).id}
-                                                     aiAvailable={aiAvailable} canConfigureAi={session.canAdmin} onConnections={() => setView("connections")} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))} />} />
+                                                     aiAvailable={aiAvailable} canConfigureAi={session.canAdmin} onConnections={() => setView("connections")} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, [...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))} />} />
             )}
 
 
@@ -1148,7 +1178,7 @@ export function App() {
                       <TileBoundary label={t.title ?? t.metrics.join(", ")}>
                       <Tile key={`${activeSourceId}:${asWho}:${refreshToken}`} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} model={model} spec={t} locked={canvas.locked}
                             scopeWarnings={unappliedFilters(book!, t, filterValues, model)}
-                            crossFilters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]}
+                            crossFilters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]}
                             onCrossFilter={(f) => setDash((d) => !d ? d : ({
                               ...d,
                               crossFilters: [
@@ -1277,7 +1307,7 @@ export function App() {
       {investigating && dash?.tiles.some(t => t.id === investigating.id) && <Investigation
         key={JSON.stringify([activeSourceId, asWho, refreshToken, dash, filterValues, drills, investigating.id])}
         source={dash.tiles.find(t => t.id === investigating.id)!} result={investigating.result} model={model}
-        filters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, dash.tiles.find(t => t.id === investigating.id)!, filterValues, todayOf(model), calendarOf(model))]}
+        filters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, dash.tiles.find(t => t.id === investigating.id)!, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, dash.tiles.find(t => t.id === investigating.id)!, dateWindow, todayOf(model), calendarOf(model))]}
         drill={drills[investigating.id] ?? []} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`}
         scopeWarnings={unappliedFilters(book!, dash.tiles.find(t => t.id === investigating.id)!, filterValues, model)}
         canKeep={session.canEdit && !canvas.locked} onClose={() => setInvestigating(null)}
@@ -1291,7 +1321,7 @@ export function App() {
       {handoff && dash && <ReviewHandoff canEdit={session.canEdit} activeTabId={activeTabId} canSave={session.canEdit && !saving} initialMode={handoffMode} key={`${activeSourceId}:${asWho}:${refreshToken}:${activeTabId}:${draftKey.current}:${presentationContentKey(dash)}:${JSON.stringify([filterValues, drills])}`} spec={dash} canvas={canvas} model={model} dirty={dirty}
         evidenceScope={JSON.stringify({ source: activeSourceId, principal: asWho, user: session.user?.id, policy: session.policy })}
         queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills}
-        filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))}
+        filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, [...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))}
         scopeWarnings={Object.fromEntries(dash.tiles.map(t => [t.id, unappliedFilters(book!, t, filterValues, model)]))}
         onClose={() => setHandoff(false)} onKeepBrief={brief => { if (book && session.canEdit) { const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); } }}
         onSave={async brief => { if (!book || !session.canEdit || saving) throw new Error("Saving is unavailable"); const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); await save(false, true, next); }}
@@ -1301,10 +1331,10 @@ export function App() {
           if (canvas.locked) changeCanvas({ ...canvas, locked: false });
           setAiRedesign(true);
         } : undefined} />}
-      {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify(filterValues)} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model))]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
+      {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify([filterValues, dateWindow])} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, [...filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
         resolveScopeWarnings={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, unappliedFilters(proposed, t, filterValues, model)]))}
         onClose={() => setAiRedesign(false)} onConfigure={() => { setAiRedesign(false); setView("connections"); }}
-        queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model))]))}
+        queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, [...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))}
         onApply={(proposal, expected) => {
           if (!session.canEdit || canvas.locked || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Generate a fresh redesign first."); return false; }
           try { const next = validateRedesign(dash, canvas, proposal, model, currentTab(book!, activeTabId).id); compose(next.spec, next.canvas); setNotice("Redesign applied. One undo restores the previous version.", "success"); return true; }

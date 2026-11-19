@@ -124,6 +124,7 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
       {onImproveArrange && <button type="button" className="review-action" disabled={busy} onClick={() => { if (canEdit) onKeepBrief(brief); onImproveArrange(); }}>Improve &amp; Arrange</button>}
       <button type="button" className="review-action" disabled={busy} onClick={() => setExpanded(v => !v)}>{expanded ? "Edit brief & evidence" : "Expand presentation"}</button>
       <span className="spacer" />
+      <button type="button" className="review-action" disabled={!ready || busy} onClick={() => window.print()}>Print / Save PDF</button>
       <button type="button" className="primary" disabled={!ready || busy} onClick={() => void exportPresentation()}>{exporting ? "Exporting…" : `Export ${presentation.label.toLowerCase()} as PNG`}</button>
       {message && <p role="status">{message}</p>}
     </div>

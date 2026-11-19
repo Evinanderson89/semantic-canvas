@@ -10,6 +10,7 @@ import {
   normalizeDateValue,
   parseCsv,
   parseNumericValue,
+  parseWidePeriodHeader,
   parseXlsxBuffer,
   parseXlsxWorkbook,
   profileSpreadsheet,
@@ -260,6 +261,54 @@ describe("spreadsheet parser, profiler & DuckDB Parquet writer", () => {
           ["Enterprise", 16500],
           ["Growth", 8500],
         ]);
+      } finally {
+        await conn.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("auto-cleans messy corporate spreadsheets: skips title banners, scrubs #N/A errors, strips Total rows, and unpivots wide monthly columns", async () => {
+    expect(parseWidePeriodHeader("Jan 2026")).toBe("2026-01-01");
+    expect(parseWidePeriodHeader("Mar-26")).toBe("2026-03-01");
+    expect(parseWidePeriodHeader("Q3 2026")).toBe("2026-07-01");
+    expect(parseWidePeriodHeader("2026-Q4")).toBe("2026-10-01");
+    expect(parseWidePeriodHeader("05/2026")).toBe("2026-05-01");
+    expect(parseWidePeriodHeader("Region")).toBeNull();
+
+    const messyCsv = [
+      "Acme Corp — Q1 Regional Revenue Pack,,,",
+      "Prepared by Finance · Confidential,,,",
+      "Region,Segment,Jan 2026,Feb 2026,Mar 2026",
+      "North America,Enterprise,$40000,$45000,$50000",
+      "Europe,Growth,$20000,#N/A,$25000",
+      "Grand Total,,$60000,$45000,$75000",
+    ].join("\n");
+
+    const parsed = parseCsv(messyCsv, "Regional Revenue");
+    expect(parsed.headers).toEqual(["Region", "Segment", "Period Date", "Revenue ($)"]);
+    // 2 regions * 3 months - 1 #N/A cell = 5 tidy rows; Grand Total row was stripped!
+    expect(parsed.rows).toHaveLength(5);
+    expect(parsed.cleaningNotes).toEqual([
+      "Skipped 2 leading title/banner rows",
+      "Excluded 1 Total/Subtotal summary row to prevent double-counting",
+      "Cleaned 1 formula error cell (#N/A, #DIV/0!)",
+      "Unpivoted 3 wide period columns into tidy time-series rows",
+    ]);
+
+    const preview = profileSpreadsheet("Regional_Revenue.csv", parsed);
+    expect(preview.suggestedTimeColumn).toBe("period_date");
+    expect(preview.cleaningNotes).toHaveLength(4);
+
+    const dir = await mkdtemp(join(tmpdir(), "sc-messy-sheet-"));
+    try {
+      await writeSpreadsheetParquet(dir, preview.tableName, preview.columns, parsed.rows);
+      const conn = await duckdbConnector(dir);
+      try {
+        const res = await conn.execute(`SELECT SUM(revenue) FROM ${conn.relation(preview.tableName)}`);
+        // Exact sum without double-counting Grand Total: 40k+45k+50k+20k+25k = 180,000 (NOT 360,000!)
+        expect(Number(res.rows[0][0])).toBe(180000);
       } finally {
         await conn.close();
       }

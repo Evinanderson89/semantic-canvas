@@ -242,6 +242,13 @@ export function SpreadsheetImport({
               </button>
             </div>
 
+            {preview.cleaningNotes && preview.cleaningNotes.length > 0 && (
+              <div className="sheet-cleaning-banner" role="status">
+                <strong>✨ Auto-cleaned messy spreadsheet:</strong>{" "}
+                <span>{preview.cleaningNotes.join(" · ")}</span>
+              </div>
+            )}
+
             {sheets && sheets.length > 1 && (
               <div className="sheet-tabs" role="tablist" aria-label="Workbook sheets">
                 {sheets.map((sh, idx) => (

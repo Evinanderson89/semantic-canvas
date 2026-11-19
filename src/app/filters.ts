@@ -1,5 +1,5 @@
-import type { DashboardFilter, DashboardSpec, FilterSpec, FilterValue, TileSpec } from "../compiler/spec.ts";
-import { metricOf, fieldReachable, isTemporal, isNumeric, DEFAULT_CALENDAR, type Calendar, type Model } from "../semantic/model.ts";
+import type { DashboardFilter, DashboardSpec, DatePreset, FilterSpec, FilterValue, TileSpec } from "../compiler/spec.ts";
+import { metricOf, fieldReachable, isTemporal, isNumeric, timeColumnOf, DEFAULT_CALENDAR, type Calendar, type Model } from "../semantic/model.ts";
 import { validateTile } from "../compiler/compile.ts";
 import { tabOf, tabsOf } from "./tabs.ts";
 import { resolvePreset } from "./datePresets.ts";
@@ -26,6 +26,37 @@ export function filtersForTile(spec: DashboardSpec, tile: TileSpec, values: Reco
     return [{ id: `control:${f.id}`, field: b.field, source: "dimension" as const,
       mode: f.control === "select" ? "discrete" as const : "range" as const, ...range }];
   });
+}
+
+/** Global header date-window quick filter ("Last 30 days", "This quarter", "Year to date", etc.) applied across time-aware metric tiles. */
+export function globalWindowFilterForTile(
+  model: Model,
+  tile: TileSpec,
+  windowPreset: DatePreset | "all",
+  now = new Date(),
+  calendar: Calendar = DEFAULT_CALENDAR,
+): FilterSpec[] {
+  if (windowPreset === "all" || (tile.kind ?? "metric") !== "metric" || !tile.metrics.length) return [];
+  const m = metricOf(model, tile.metrics[0]);
+  if (!m) return [];
+  const rawField = m.timeDimension
+    ? (m.timeDimension.includes(".") ? m.timeDimension : `${m.baseTable}.${m.timeDimension}`)
+    : timeColumnOf(model, m.baseTable);
+  if (!rawField) return [];
+  const [table, col] = rawField.split(".");
+  if (!model.tables[table]?.columns.some((c) => c.name === col)) return [];
+  const resolved = resolvePreset({ preset: windowPreset }, now, calendar);
+  if (typeof resolved.min !== "string" || typeof resolved.max !== "string") return [];
+  const maxPlusOne = new Date(Date.parse(resolved.max) + 86_400_000).toISOString().slice(0, 10);
+  return [{
+    id: `window:${windowPreset}`,
+    field: rawField,
+    source: "dimension",
+    mode: "range",
+    min: resolved.min,
+    max: maxPlusOne,
+    maxExclusive: true,
+  }];
 }
 /** Shared save/import validation: a filter can never claim to affect an unrelated chart. */
 export function validateDashboard(model: Model, spec: DashboardSpec) {

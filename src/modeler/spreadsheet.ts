@@ -66,27 +66,213 @@ export function friendlyLabel(raw: string): string {
   return "Column";
 }
 
-function detectDelimiter(headerLine: string): "," | "\t" | ";" {
-  let commas = 0, tabs = 0, semis = 0, inQuotes = false;
-  for (let i = 0; i < headerLine.length; i++) {
-    const ch = headerLine[i];
-    if (ch === '"') inQuotes = !inQuotes;
-    else if (!inQuotes) {
-      if (ch === ",") commas++;
-      else if (ch === "\t") tabs++;
-      else if (ch === ";") semis++;
+function detectDelimiter(sampleText: string): "," | "\t" | ";" {
+  const lines = sampleText.split(/\r?\n/).slice(0, 10);
+  let bestDelim: "," | "\t" | ";" = ",";
+  let bestScore = 0;
+  for (const line of lines) {
+    let commas = 0, tabs = 0, semis = 0, inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') inQuotes = !inQuotes;
+      else if (!inQuotes) {
+        if (ch === ",") commas++;
+        else if (ch === "\t") tabs++;
+        else if (ch === ";") semis++;
+      }
+    }
+    const top = Math.max(commas, tabs, semis);
+    if (top > bestScore) {
+      bestScore = top;
+      bestDelim = tabs > commas && tabs >= semis ? "\t" : semis > commas && semis > tabs ? ";" : ",";
     }
   }
-  if (tabs > commas && tabs >= semis) return "\t";
-  if (semis > commas && semis > tabs) return ";";
-  return ",";
+  return bestDelim;
+}
+
+const EXCEL_ERROR_RE = /^#(N\/A|DIV\/0!|VALUE!|REF!|NAME\?|NUM!|NULL!|SPILL!|CALC!)$/i;
+const SUMMARY_ROW_LABEL_RE = /^(grand\s+total|sub\s*-?\s*total|total|totals|net\s+total|ytd\s+total|overall\s+total)(\s*:.*)?$/i;
+const MONTH_MAP: Record<string, string> = {
+  jan: "01", january: "01",
+  feb: "02", february: "02",
+  mar: "03", march: "03",
+  apr: "04", april: "04",
+  may: "05",
+  jun: "06", june: "06",
+  jul: "07", july: "07",
+  aug: "08", august: "08",
+  sep: "09", sept: "09", september: "09",
+  oct: "10", october: "10",
+  nov: "11", november: "11",
+  dec: "12", december: "12",
+};
+
+/** Parses wide spreadsheet period headers like "Jan 2026", "2026-03", "Q2 2026", "Mar-26" into YYYY-MM-DD. */
+export function parseWidePeriodHeader(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return normalizeDateValue(s);
+  if (/^\d{4}-\d{2}$/.test(s)) return normalizeDateValue(s);
+  const slashYm = s.match(/^(\d{1,2})\/(\d{4})$/);
+  if (slashYm) {
+    const m = Number(slashYm[1]), y = Number(slashYm[2]);
+    if (m >= 1 && m <= 12 && y >= 1990 && y <= 2100) return `${y}-${String(m).padStart(2, "0")}-01`;
+  }
+  const m1 = s.match(/^([A-Za-z]{3,9})[\s\-_'/]+(\d{2}|\d{4})$/);
+  if (m1) {
+    const mon = MONTH_MAP[m1[1].toLowerCase()];
+    if (mon) {
+      const yr = m1[2].length === 2 ? 2000 + Number(m1[2]) : Number(m1[2]);
+      if (yr >= 1990 && yr <= 2100) return `${yr}-${mon}-01`;
+    }
+  }
+  const q1 = s.match(/^(?:Q([1-4])[\s\-_'/]+(\d{2}|\d{4})|(\d{4})[\s\-_]*Q([1-4]))$/i);
+  if (q1) {
+    const q = Number(q1[1] ?? q1[4]);
+    const rawYr = q1[2] ?? q1[3];
+    const yr = rawYr.length === 2 ? 2000 + Number(rawYr) : Number(rawYr);
+    if (yr >= 1990 && yr <= 2100) {
+      const mon = String((q - 1) * 3 + 1).padStart(2, "0");
+      return `${yr}-${mon}-01`;
+    }
+  }
+  return null;
+}
+
+function inferWideValueHeader(sheetName: string): string {
+  const lower = sheetName.toLowerCase();
+  if (/rev|mrr|arr/.test(lower)) return "Revenue ($)";
+  if (/sale/.test(lower)) return "Sales ($)";
+  if (/cost|spend|expense/.test(lower)) return "Spend ($)";
+  if (/headcount|employee|seat/.test(lower)) return "Seats";
+  return "Value";
+}
+
+/**
+ * Cleans real-world "messy corporate spreadsheets":
+ * 1. Scrubs Excel formula errors (#N/A, #DIV/0!, etc.) to empty cells so numeric columns stay numeric.
+ * 2. Skips leading title/banner/metadata rows (when rows 1..N have <=2 cells above a real >=3-col header row).
+ * 3. Strips Total / Subtotal / Grand Total summary rows so SUM() never double-counts.
+ * 4. Auto-unpivots wide month/quarter columns (e.g. Region | Jan 2026 | Feb 2026 | Mar 2026) into tidy time-series rows.
+ */
+export function cleanTabularGrid(sheetName: string, rawRecords: string[][], maxCols = MAX_COLS): ParsedSpreadsheet {
+  const cleaningNotes: string[] = [];
+  let scrubbedErrors = 0;
+
+  const cleanedRecords = rawRecords
+    .map((r) =>
+      r.slice(0, maxCols).map((cell) => {
+        const t = (cell ?? "").trim();
+        if (EXCEL_ERROR_RE.test(t) || /^N\/A$/i.test(t)) {
+          scrubbedErrors++;
+          return "";
+        }
+        return t;
+      }),
+    )
+    .filter((r) => r.some((c) => c !== ""));
+
+  if (cleanedRecords.length < 2) {
+    throw Object.assign(new Error("Spreadsheet must include a header row and at least one data row."), { status: 400 });
+  }
+
+  // 1. Detect leading banner/title rows above the true table header.
+  const countNonEmpty = (r: string[]) => r.filter((c) => c !== "").length;
+  const looksLikeHeaderRow = (r: string[]) => {
+    const nonEmpty = r.filter((c) => c !== "");
+    if (nonEmpty.length < 3) return false;
+    // Headers should be mostly text labels or wide period headers, not raw standalone numbers.
+    const validHeaderCells = nonEmpty.filter((c) => parseWidePeriodHeader(c) !== null || parseNumericValue(c) === null);
+    return validHeaderCells.length / nonEmpty.length >= 0.8 && new Set(nonEmpty.map((x) => x.toLowerCase())).size >= nonEmpty.length - 1;
+  };
+
+  let headerIdx = 0;
+  if (countNonEmpty(cleanedRecords[0]) <= 2) {
+    const maxScan = Math.min(8, cleanedRecords.length - 2);
+    for (let k = 1; k <= maxScan; k++) {
+      const candidateCols = countNonEmpty(cleanedRecords[k]);
+      const nextRowCols = countNonEmpty(cleanedRecords[k + 1] ?? []);
+      if (
+        candidateCols >= Math.max(3, countNonEmpty(cleanedRecords[0]) + 2) &&
+        looksLikeHeaderRow(cleanedRecords[k]) &&
+        nextRowCols >= Math.max(2, candidateCols - 2)
+      ) {
+        headerIdx = k;
+        break;
+      }
+    }
+  }
+  if (headerIdx > 0) {
+    cleaningNotes.push(`Skipped ${headerIdx} leading title/banner row${headerIdx === 1 ? "" : "s"}`);
+  }
+
+  const width = Math.min(
+    maxCols,
+    Math.max(...cleanedRecords.slice(headerIdx, headerIdx + 25).map((r) => r.length)),
+  );
+  let headers = Array.from({ length: width }, (_, i) => cleanedRecords[headerIdx][i] || `Column ${i + 1}`);
+  let rows = cleanedRecords
+    .slice(headerIdx + 1, headerIdx + 1 + MAX_ROWS)
+    .map((r) => Array.from({ length: width }, (_, i) => r[i] ?? ""));
+
+  // 2. Strip Total / Subtotal / Grand Total summary rows so aggregations never double-count.
+  let droppedTotals = 0;
+  const filteredRows = rows.filter((r) => {
+    const firstText = r.find((c) => c !== "" && parseNumericValue(c) === null) ?? "";
+    const hasNumeric = r.some((c) => parseNumericValue(c) !== null);
+    if (hasNumeric && SUMMARY_ROW_LABEL_RE.test(firstText.trim())) {
+      droppedTotals++;
+      return false;
+    }
+    return true;
+  });
+  if (filteredRows.length >= 1 && droppedTotals > 0) {
+    rows = filteredRows;
+    cleaningNotes.push(`Excluded ${droppedTotals} Total/Subtotal summary row${droppedTotals === 1 ? "" : "s"} to prevent double-counting`);
+  }
+
+  if (scrubbedErrors > 0) {
+    cleaningNotes.push(`Cleaned ${scrubbedErrors} formula error cell${scrubbedErrors === 1 ? "" : "s"} (#N/A, #DIV/0!)`);
+  }
+
+  // 3. Auto-unpivot wide period columns (e.g. Region | Segment | Jan 2026 | Feb 2026 | Mar 2026).
+  const periodByCol = headers.map((h) => parseWidePeriodHeader(h));
+  const periodIndices = periodByCol.map((iso, idx) => (iso ? idx : -1)).filter((idx) => idx >= 0);
+  const dimIndices = periodByCol.map((iso, idx) => (iso ? -1 : idx)).filter((idx) => idx >= 0);
+  const existingDateCol = dimIndices.some((idx) => {
+    const nonEmpty = rows.slice(0, 30).map((r) => r[idx]).filter(Boolean);
+    return nonEmpty.length > 0 && nonEmpty.filter((v) => normalizeDateValue(v) !== null).length / nonEmpty.length >= 0.8;
+  });
+
+  if (periodIndices.length >= 3 && dimIndices.length >= 1 && !existingDateCol) {
+    const unpivotedRows: string[][] = [];
+    for (const r of rows) {
+      const dimVals = dimIndices.map((idx) => r[idx] ?? "");
+      for (const pIdx of periodIndices) {
+        const cellVal = (r[pIdx] ?? "").trim();
+        if (cellVal === "") continue;
+        unpivotedRows.push([...dimVals, periodByCol[pIdx]!, cellVal]);
+        if (unpivotedRows.length >= MAX_ROWS) break;
+      }
+      if (unpivotedRows.length >= MAX_ROWS) break;
+    }
+    if (unpivotedRows.length >= 2) {
+      headers = [...dimIndices.map((idx) => headers[idx]), "Period Date", inferWideValueHeader(sheetName)];
+      rows = unpivotedRows;
+      cleaningNotes.push(`Unpivoted ${periodIndices.length} wide period columns into tidy time-series rows`);
+    }
+  }
+
+  if (rows.length === 0) {
+    throw Object.assign(new Error("Spreadsheet must include at least one non-summary data row."), { status: 400 });
+  }
+
+  return { sheetName, headers, rows, ...(cleaningNotes.length ? { cleaningNotes } : {}) };
 }
 
 export function parseCsv(rawText: string, sheetName = "Sheet1"): ParsedSpreadsheet {
   const text = rawText.replace(/^\uFEFF/, "");
-  const firstBreak = text.search(/\r?\n/);
-  const firstLine = firstBreak === -1 ? text : text.slice(0, firstBreak);
-  const delimiter = detectDelimiter(firstLine);
+  const delimiter = detectDelimiter(text);
 
   const records: string[][] = [];
   let row: string[] = [];
@@ -119,7 +305,7 @@ export function parseCsv(rawText: string, sheetName = "Sheet1"): ParsedSpreadshe
       field = "";
       if (row.some((cell) => cell !== "")) {
         records.push(row);
-        if (records.length > MAX_ROWS + 1) break;
+        if (records.length > MAX_ROWS + 12) break;
       }
       row = [];
     } else {
@@ -127,16 +313,11 @@ export function parseCsv(rawText: string, sheetName = "Sheet1"): ParsedSpreadshe
     }
   }
   row.push(field.trim());
-  if (row.some((cell) => cell !== "") && records.length <= MAX_ROWS + 1) {
+  if (row.some((cell) => cell !== "") && records.length <= MAX_ROWS + 12) {
     records.push(row);
   }
 
-  if (records.length < 2) {
-    throw Object.assign(new Error("Spreadsheet must include a header row and at least one data row."), { status: 400 });
-  }
-  const headers = records[0].slice(0, MAX_COLS);
-  const rows = records.slice(1, MAX_ROWS + 1).map((r) => headers.map((_, i) => r[i] ?? ""));
-  return { sheetName, headers, rows };
+  return cleanTabularGrid(sheetName, records, MAX_COLS);
 }
 
 function decodeXmlEntities(input: string): string {
@@ -287,15 +468,16 @@ function parseWorksheetXml(
     }
     if (rowValues.some((v) => v !== undefined && v !== "")) {
       rawRows.push(rowValues);
-      if (rawRows.length > MAX_ROWS + 1) break;
+      if (rawRows.length > MAX_ROWS + 12) break;
     }
   }
 
   if (rawRows.length < 2 || maxCol === 0) return null;
-  const width = Math.min(maxCol, MAX_COLS);
-  const headers = Array.from({ length: width }, (_, i) => rawRows[0][i] || `Column ${i + 1}`);
-  const rows = rawRows.slice(1, MAX_ROWS + 1).map((r) => Array.from({ length: width }, (_, i) => r[i] ?? ""));
-  return { sheetName, headers, rows };
+  try {
+    return cleanTabularGrid(sheetName, rawRows, Math.min(maxCol, MAX_COLS));
+  } catch {
+    return null;
+  }
 }
 
 export function parseXlsxWorkbook(bytes: Uint8Array): ParsedSpreadsheet[] {
@@ -503,6 +685,7 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
     suggestedGrain,
     suggestedTimeColumn: dateCol,
     suggestedPrimaryKey: idCol,
+    ...(parsed.cleaningNotes?.length ? { cleaningNotes: parsed.cleaningNotes } : {}),
   };
 }
 
@@ -612,6 +795,9 @@ export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadshee
     kind: rightSideTargets.has(p.tableName) ? "dimension" : "fact",
   }));
 
+  const allCleaningNotes = parsedSheets.flatMap((s) =>
+    (s.cleaningNotes ?? []).map((n) => (parsedSheets.length > 1 ? `${s.sheetName}: ${n}` : n)),
+  );
   const primary = sheets.find((s) => s.kind === "fact") ?? sheets[0];
   return {
     sourceId,
@@ -626,6 +812,7 @@ export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadshee
     suggestedPrimaryKey: primary.suggestedPrimaryKey,
     sheets,
     detectedJoins,
+    ...(allCleaningNotes.length ? { cleaningNotes: allCleaningNotes } : {}),
   };
 }
 

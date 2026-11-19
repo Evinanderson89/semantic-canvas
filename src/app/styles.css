@@ -2531,18 +2531,35 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
   display:flex;
   align-items:center;
   justify-content:space-between;
-  gap:12px;
+  flex-wrap:wrap;
+  gap:8px 12px;
   padding:7px 14px;
   background:var(--accent-soft);
   border-bottom:1px solid var(--line);
   color:var(--ink);
   font-size:12px;
 }
+.shell.narrow .sandbox-banner{
+  padding-left:52px;
+}
 .sandbox-banner-actions{
   display:flex;
   align-items:center;
   gap:10px;
   white-space:nowrap;
+}
+.sandbox-upload-btn{
+  padding:3px 9px;
+  border-radius:999px;
+  border:1px solid var(--accent);
+  background:var(--accent);
+  color:#ffffff;
+  font-size:11.5px;
+  font-weight:650;
+  cursor:pointer;
+}
+.sandbox-upload-btn:hover{
+  filter:brightness(1.06);
 }
 .sandbox-banner-actions a{
   color:var(--accent);
@@ -2551,4 +2568,51 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 }
 .sandbox-banner-actions a:hover{
   text-decoration:underline;
+}
+.sheet-cleaning-banner{
+  padding:8px 12px;
+  border-radius:var(--r-m);
+  border:1px solid #059669;
+  background:color-mix(in srgb, #10b981 12%, var(--surface));
+  color:var(--ink);
+  font-size:12px;
+  line-height:1.45;
+}
+@media (max-width: 1120px){
+  .window-control > span{display:none}
+}
+@media print{
+  .sidebar,.reveal,.sandbox-banner,.topbar,.document-state-bar,.edit-bar,.insert-bar,
+  .report-dialog > header,.report-toolbar,.ai-redesign-brief,.report-dialog > footer,
+  .ai-redesign-preview-caption{
+    display:none!important;
+  }
+  body,html,.shell,.main{
+    height:auto!important;
+    overflow:visible!important;
+    background:#ffffff!important;
+  }
+  dialog.report-dialog{
+    position:static!important;
+    width:100%!important;
+    max-width:none!important;
+    max-height:none!important;
+    margin:0!important;
+    padding:0!important;
+    border:none!important;
+    box-shadow:none!important;
+    overflow:visible!important;
+  }
+  .ai-redesign-content,.ai-redesign-preview,.report-scroll,.report-document{
+    display:block!important;
+    height:auto!important;
+    max-height:none!important;
+    overflow:visible!important;
+    padding:0!important;
+    border:none!important;
+    box-shadow:none!important;
+  }
+  .report-tile,.report-takeaway,.report-next-step{
+    break-inside:avoid;
+  }
 }
