@@ -172,8 +172,7 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
           <span
             className={"kpi-label" + (onRename ? " is-editable" : "")}
             title={onRename ? `${label} · Double-click to rename` : label}
-            onPointerDown={onRename ? (e) => e.stopPropagation() : undefined}
-            onMouseDown={onRename ? (e) => e.preventDefault() : undefined}
+            onMouseDown={onRename ? (e) => { if (e.detail >= 2) e.preventDefault(); } : undefined}
             onDoubleClick={onRename ? (e) => { e.stopPropagation(); setLabelDraft(label); setEditingLabel(true); } : undefined}
           >
             {label}

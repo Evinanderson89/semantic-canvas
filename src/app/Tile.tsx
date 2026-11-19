@@ -511,8 +511,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
             <h4
               className={!locked && onUpdate ? "is-editable" : undefined}
               title={!locked && onUpdate ? `${title} · Double-click to rename` : title}
-              onPointerDown={!locked && onUpdate ? (e) => e.stopPropagation() : undefined}
-              onMouseDown={!locked && onUpdate ? (e) => e.preventDefault() : undefined}
+              onMouseDown={!locked && onUpdate ? (e) => { if (e.detail >= 2) e.preventDefault(); } : undefined}
               onDoubleClick={!locked && onUpdate ? (e) => { e.stopPropagation(); setTitleDraft(title); setEditingTitle(true); } : undefined}
             >
               {title}
