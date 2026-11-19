@@ -34,7 +34,7 @@ export function Modeler({ sources, onPublished, onImportSpreadsheet }: { sources
   return (
     <div className="explore modeler">
       <span className="eyebrow">Modeler</span>
-      <h1>A semantic model, from your spreadsheets or warehouse.</h1>
+      <h1>A semantic model, from the warehouse itself.</h1>
       <p className="lede">Drop an Excel or CSV sheet for a 3-question plain-English setup, or point the Modeler at a Parquet lake or Snowflake warehouse. It measures what is unique and what joins to what, and proposes tables, joins, and metrics with evidence beside each.</p>
       {onImportSpreadsheet && (
         <div className="story-actions" style={{ marginBottom: 16 }}>

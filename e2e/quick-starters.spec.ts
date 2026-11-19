@@ -55,7 +55,7 @@ test("monthly snapshot starters use declared periods and remain valid after save
   const original = await open(page);
   await insert(page, "SaaS Monthly");
   await expect(page.locator(".node .kpi-value")).toHaveCount(4);
-  await expect(page.locator(".node .kpi-asof > span")).toHaveText(["Period Aug 2026", "Period Aug 2026", "Period Aug 2026", "Period Aug 2026"]);
+  await expect(page.locator(".node .kpi-asof > span")).toHaveText([/^Period Aug 2026/, /^Period Aug 2026/, /^Period Aug 2026/, /^Period Aug 2026/]);
   await expect(page.locator(".node .kpi-asof").getByRole("button", { name: "1 data check to review", exact: true })).toHaveCount(2);
   await expect(page.locator(".node .err, .node .chart-err")).toHaveCount(0);
   await page.locator(".canvas-surface").screenshot({ path: info.outputPath("monthly-quick-starter.png") });

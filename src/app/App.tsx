@@ -1064,9 +1064,9 @@ export function App() {
                   Broadside Infographic
                 </button>
               </div>
-              {dashId && <span className="state-version"><strong>v{revision}</strong> · {session.mode === "team" ? "Workspace" : "Local"}</span>}
+              <span className="state-version"><strong>{dashId ? `Saved version ${revision}` : "Not saved yet"}</strong>{canvas.locked ? " · Preview does not publish" : ""}</span>
               <span className="spacer" />
-              <button disabled={!dashId} title={!dashId ? "Save once to start version history" : "Browse and restore saved dashboard designs"} onClick={() => setHistoryOpen(true)}>History</button>
+              <button disabled={!dashId} title={!dashId ? "Save once to start version history" : "Browse and restore saved dashboard designs"} onClick={() => setHistoryOpen(true)}>Version history</button>
               {session.canEdit && <div className="mode-switch" aria-label="Dashboard viewing mode">
                 <button aria-label="Edit dashboard" aria-pressed={!canvas.locked} onClick={() => changeCanvas({ ...canvas, locked: false })}>Edit</button>
                 <button aria-label="Preview dashboard" aria-pressed={canvas.locked} onClick={() => changeCanvas({ ...canvas, locked: true })}>Preview</button>

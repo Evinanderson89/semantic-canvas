@@ -1166,8 +1166,8 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 .chart-activity-buttons{display:inline-flex;align-items:center;gap:0;flex:none;margin-left:auto}
 .chart-activity-buttons button{position:relative;display:grid;place-items:center;width:24px;height:24px;border:0;background:transparent;color:color-mix(in srgb,var(--ink-3) 85%,var(--surface));border-radius:var(--r-s);padding:0;cursor:pointer}
 .chart-activity-buttons svg{width:11px;height:11px;stroke-width:1.4;flex:none;opacity:1;transition:opacity .12s}
-.chart-activity-buttons .has-activity svg{opacity:.75}
-.chart-activity-buttons .is-watching svg{opacity:.65}
+.chart-activity-buttons .has-activity svg{opacity:.92}
+.chart-activity-buttons .is-watching svg{opacity:.92}
 .chart-activity-buttons .has-alert svg,.tile:hover .chart-activity-buttons svg,.tile:focus-within .chart-activity-buttons svg{opacity:1}
 .chart-activity-buttons button:hover,.chart-activity-buttons button:focus-visible{color:var(--accent);background:var(--surface-2)}
 .chart-activity-buttons .has-activity,.chart-activity-buttons .is-watching{color:var(--accent)}
@@ -1768,7 +1768,7 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
   gap:6px 10px;
   margin-top:6px;
 }
-.kpi-value,.stat .v{
+.kpi-value{
   font-family:var(--font-display);
   font-size:30px;
   font-weight:750;
@@ -1776,6 +1776,13 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
   font-variant-numeric:tabular-nums;
   color:var(--ink);
   margin-top:0;
+}
+.stat .v{
+  font-family:var(--font-display);
+  font-weight:750;
+  letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;
+  color:var(--ink);
 }
 .kpi-asof{
   font-family:var(--font-sans);
@@ -2143,12 +2150,19 @@ button.primary:not(.icon), .agent-chat-msg.user { color:var(--panel); }
 
 /* ---------------- Document state bar, Coach pills & Spreadsheet Importer -- */
 .document-state-bar{
-  flex-wrap:wrap;
-  row-gap:6px;
+  flex-wrap:nowrap;
   column-gap:10px;
   padding-left:18px;
   padding-right:18px;
   overflow-x:auto;
+}
+@media (max-width: 960px){
+  .topbar.doc-head{padding-top:4px;padding-bottom:4px;min-height:40px;row-gap:4px}
+  .document-state-bar{padding:2px 12px;min-height:30px}
+  .document-state-bar .journey-bar{display:none}
+  .tab-strip{padding-top:0;padding-bottom:0;min-height:30px}
+  .dashboard-tabs [role=tab]{padding-top:6px;padding-bottom:6px}
+  .editbar{flex-wrap:nowrap;overflow-x:auto;padding:2px 12px;min-height:32px}
 }
 .document-state-bar .mode-label{
   flex-shrink:0;

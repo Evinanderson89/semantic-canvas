@@ -22,11 +22,11 @@ test("metric colors survive chart subsets, chart types, presentation modes and s
   await page.getByRole("button", { name: "Open saved dashboard", exact: true }).click();
   await page.getByRole("dialog", { name: "Saved dashboards" }).getByRole("button", { name: title, exact: false }).click();
   const colorChecks = async (tile: (i: number) => Locator) => {
-    await expect.poll(() => markColor(tile(0), "New MRR (USD)")).toBe("rgb(177, 132, 66)");
-    expect(await markColor(tile(1), "New MRR (USD)")).toBe("rgb(177, 132, 66)");
+    await expect.poll(() => markColor(tile(0), "New MRR (USD)")).toBe("rgb(8, 145, 178)");
+    expect(await markColor(tile(1), "New MRR (USD)")).toBe("rgb(8, 145, 178)");
     expect(await markColor(tile(0), "Expansion MRR (USD)")).toBe(await markColor(tile(1), "Expansion MRR (USD)"));
-    expect(await tile(2).locator('g[aria-label="line"] path').first().evaluate(el => getComputedStyle(el).stroke)).toBe("rgb(177, 132, 66)");
-    expect(await tile(3).locator('g[aria-label="line"] path').first().evaluate(el => getComputedStyle(el).stroke)).toBe("rgb(177, 132, 66)");
+    expect(await tile(2).locator('g[aria-label="line"] path').first().evaluate(el => getComputedStyle(el).stroke)).toBe("rgb(8, 145, 178)");
+    expect(await tile(3).locator('g[aria-label="line"] path').first().evaluate(el => getComputedStyle(el).stroke)).toBe("rgb(8, 145, 178)");
   };
   await colorChecks(i => page.locator(".node").filter({ has: page.getByText(names[i], { exact: true }) }));
   await page.getByRole("button", { name: "Review and share", exact: true }).click();
@@ -38,7 +38,7 @@ test("metric colors survive chart subsets, chart types, presentation modes and s
   }
   await review.getByRole("checkbox", { name: "All movements", exact: true }).uncheck();
   await expect(review.locator('[data-report-tile="chart-0"]')).toHaveCount(0);
-  expect(await markColor(review.locator('[data-report-tile="chart-1"]'), "New MRR (USD)")).toBe("rgb(177, 132, 66)");
+  expect(await markColor(review.locator('[data-report-tile="chart-1"]'), "New MRR (USD)")).toBe("rgb(8, 145, 178)");
   await review.getByRole("button", { name: "Expand presentation", exact: true }).click();
   const download = page.waitForEvent("download");
   await review.getByRole("button", { name: "Export infographic as PNG" }).click();

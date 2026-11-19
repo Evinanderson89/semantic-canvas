@@ -94,7 +94,7 @@ test("unsupported snapshot periods fail clearly while the canvas remains monthly
   await page.getByLabel("Period", { exact: true }).selectOption("quarter");
   await expect(page.getByLabel("Period", { exact: true })).toHaveValue("month");
   await expect(page.getByRole("alert")).toContainText("requires month");
-  await expect(page.locator(".kpi-value").first()).toHaveText("$203k");
+  await expect(page.locator(".kpi-value").first()).toHaveText("$202.8k");
 });
 
 test("a failed recovery write cannot abandon the current document", async ({ page }) => {

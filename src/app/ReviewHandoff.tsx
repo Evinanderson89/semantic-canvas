@@ -117,9 +117,9 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
   return <StudioDialog title="Review and share" onClose={close} className={`ai-redesign-dialog report-dialog${expanded ? " report-expanded" : ""}`}>
     <div className="report-toolbar">
       <div className="journey-bar" role="group" aria-label="Presentation format">
-        <button type="button" className="journey-step" aria-pressed={mode === "dashboard"} disabled={busy} onClick={() => changeMode("dashboard")}><span className="journey-num">1</span>Dashboard</button>
-        <button type="button" className="journey-step" aria-pressed={mode === "story"} disabled={busy} onClick={() => changeMode("story")}><span className="journey-num">2</span>Executive Story</button>
-        <button type="button" className="journey-step" aria-pressed={mode === "infographic"} disabled={busy} onClick={() => changeMode("infographic")}><span className="journey-num">3</span>Broadside Infographic</button>
+        <button type="button" className="journey-step" aria-pressed={mode === "dashboard"} disabled={busy} onClick={() => changeMode("dashboard")}><span className="journey-num" aria-hidden="true">1</span>Dashboard</button>
+        <button type="button" className="journey-step" aria-pressed={mode === "story"} disabled={busy} onClick={() => changeMode("story")}><span className="journey-num" aria-hidden="true">2</span>Story</button>
+        <button type="button" className="journey-step" aria-pressed={mode === "infographic"} disabled={busy} onClick={() => changeMode("infographic")}><span className="journey-num" aria-hidden="true">3</span>Infographic</button>
       </div>
       {onImproveArrange && <button type="button" className="review-action" disabled={busy} onClick={() => { if (canEdit) onKeepBrief(brief); onImproveArrange(); }}>Improve &amp; Arrange</button>}
       <button type="button" className="review-action" disabled={busy} onClick={() => setExpanded(v => !v)}>{expanded ? "Edit brief & evidence" : "Expand presentation"}</button>
