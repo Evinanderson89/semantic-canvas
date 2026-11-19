@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSandboxMode, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason } from "../src/security/sandbox.ts";
+import { isSandboxMode, isSandboxOriginAllowed, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason } from "../src/security/sandbox.ts";
 
 describe("Public Sandbox guard (SC_SANDBOX_MODE)", () => {
   it("parses SC_SANDBOX_MODE safely", () => {
@@ -30,5 +30,18 @@ describe("Public Sandbox guard (SC_SANDBOX_MODE)", () => {
     expect(sandboxBlockReason("POST", "/api/setup/model")).toMatch(/public sandbox/i);
     expect(sandboxBlockReason("POST", "/api/modeler/drafts")).toMatch(/public sandbox/i);
     expect(sandboxBlockReason("POST", "/api/scim/v2/Users")).toMatch(/public sandbox/i);
+  });
+
+  it("enforces same-origin CSRF checks and optional SC_SANDBOX_ORIGINS allowlist in sandbox mode", () => {
+    expect(isSandboxOriginAllowed("try.semanticcanvas.ai", undefined, {})).toBe(true);
+    expect(isSandboxOriginAllowed("try.semanticcanvas.ai", "https://try.semanticcanvas.ai", {})).toBe(true);
+    expect(isSandboxOriginAllowed("try.semanticcanvas.ai", "https://evil.example.com", {})).toBe(false);
+    expect(isSandboxOriginAllowed("", undefined, {})).toBe(false);
+
+    const env = { SC_SANDBOX_ORIGINS: "https://try.semanticcanvas.ai, sandbox.up.railway.app" };
+    expect(isSandboxOriginAllowed("try.semanticcanvas.ai", "https://try.semanticcanvas.ai", env)).toBe(true);
+    expect(isSandboxOriginAllowed("sandbox.up.railway.app", undefined, env)).toBe(true);
+    expect(isSandboxOriginAllowed("localhost:5174", "http://localhost:5174", env)).toBe(true);
+    expect(isSandboxOriginAllowed("other.example.com", "https://other.example.com", env)).toBe(false);
   });
 });

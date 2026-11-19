@@ -4,7 +4,7 @@ import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
-import { isSandboxMode, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason } from "./security/sandbox.ts";
+import { isSandboxMode, isSandboxOriginAllowed, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason } from "./security/sandbox.ts";
 import { createScimRouter } from "./security/scim.ts";
 import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
 import { budgetFailure, loadQueryTimeoutMs, requestBudget } from "./connectors/queryBudget.ts";
@@ -158,7 +158,8 @@ app.use((req, res, next) => {
   if (req.path === "/healthz" || req.path === "/readyz") return next();
   const local = (value: string) => { try { return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(value).hostname); } catch { return false; } };
   const host = req.headers.host ?? "", origin = req.headers.origin;
-  if (auth.config.mode === "local" ? !local(`http://${host}`) || origin && !local(origin)
+  if (auth.config.mode === "local"
+    ? (isSandboxMode() ? !isSandboxOriginAllowed(host, origin) : !local(`http://${host}`) || origin && !local(origin))
     : host !== new URL(auth.config.publicUrl!).host || origin && origin !== auth.config.publicUrl) return res.status(403).json({ error: "Request origin is not allowed" });
   next();
 });

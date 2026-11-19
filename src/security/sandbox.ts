@@ -44,3 +44,59 @@ export function sandboxBlockReason(method: string, path: string): string | null 
 
   return null;
 }
+
+/**
+ * Validates Host / Origin headers when running in Public Sandbox mode
+ * (`SC_SANDBOX_MODE=true`) without OIDC login.
+ *
+ * - Always rejects cross-origin browser requests (`Origin` host !== `Host`).
+ * - When `SC_SANDBOX_ORIGINS` is set (comma-separated URLs or hostnames),
+ *   only those origins (plus localhost for health/dev checks) are allowed.
+ */
+export function isSandboxOriginAllowed(
+  host: string,
+  origin: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const cleanHost = host.trim().toLowerCase();
+  if (!cleanHost) return false;
+
+  const isLocalHost = (h: string) => {
+    try {
+      return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(`http://${h}`).hostname);
+    } catch {
+      return false;
+    }
+  };
+
+  let originHost: string | null = null;
+  if (origin) {
+    try {
+      originHost = new URL(origin).host.toLowerCase();
+    } catch {
+      return false;
+    }
+    if (originHost !== cleanHost) return false;
+  }
+
+  const configured = String(env.SC_SANDBOX_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (configured.length === 0) return true;
+  if (isLocalHost(cleanHost)) return true;
+
+  const allowedHosts = new Set(
+    configured
+      .map((entry) => {
+        try {
+          return new URL(entry.includes("://") ? entry : `https://${entry}`).host.toLowerCase();
+        } catch {
+          return "";
+        }
+      })
+      .filter(Boolean),
+  );
+  return allowedHosts.has(cleanHost);
+}
