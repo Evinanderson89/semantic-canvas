@@ -4,7 +4,7 @@ import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
-import { isSandboxMode, isSandboxOriginAllowed, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason } from "./security/sandbox.ts";
+import { createSandboxRateLimiter, isSandboxMode, isSandboxOriginAllowed, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason, sandboxClientKey } from "./security/sandbox.ts";
 import { createScimRouter } from "./security/scim.ts";
 import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
 import { budgetFailure, loadQueryTimeoutMs, requestBudget } from "./connectors/queryBudget.ts";
@@ -53,7 +53,7 @@ import { proposalProblems } from "./modeler/proposals.ts";
 import { buildWorkbookProposal, parseCsv, parseXlsxWorkbook, profileWorkbook, slugifySourceId, writeSpreadsheetParquet } from "./modeler/spreadsheet.ts";
 import { draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
 import { existsSync, statSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import YAML from "yaml";
 import { describe as describeSource, connectOne, expand, loadSources, type AiConfig, type Source } from "./sources/registry.ts";
 import { listDashboardVersions, loadDashboardVersion, exportLibrary, closeStore, deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources, recordAuditEvent, listAuditEvents, type DashboardScope } from "./store/store.ts";
@@ -175,9 +175,22 @@ auth.mount(app);
 app.use("/api/scim/v2", createScimRouter({ auth, onAudit: (event, data) => telemetry.log(event, data ?? {}) }));
 app.use("/api", auth.guard);
 if (isSandboxMode()) {
+  const checkSandboxRate = createSandboxRateLimiter();
   app.use("/api", (req, res, next) => {
     const blocked = sandboxBlockReason(req.method, req.path);
     if (blocked) return res.status(403).json({ error: blocked, sandbox: true });
+    const clientKey = sandboxClientKey(req.headers, req.socket?.remoteAddress);
+    const rate = checkSandboxRate(clientKey, req.method, req.path);
+    if (!rate.allowed) {
+      telemetry.log("audit.sandbox_rate_limited", { bucket: rate.bucket, path: req.path }, "warn");
+      res.setHeader("Retry-After", String(rate.retryAfterSeconds));
+      return res.status(429).json({
+        error: rate.bucket === "upload"
+          ? "Public sandbox spreadsheet upload limit reached for your connection. Please try again in a few minutes."
+          : "Public sandbox rate limit reached for your connection. Please slow down and try again shortly.",
+        sandbox: true,
+      });
+    }
     next();
   });
 }
@@ -186,7 +199,7 @@ if (isSandboxMode()) {
 if (auth.config.mode !== "local") app.use("/api", rateLimitMiddleware(loadRateLimits(), req => identityOf(req)?.id,
   (kind, actor) => telemetry.log("audit.rate_limited", { actor, operation: kind }, "warn")));
 app.use("/api", (_req, res, next) => {
-  if (auth.config.mode !== "local") {
+  if (auth.config.mode !== "local" || isSandboxMode()) {
     const json = res.json.bind(res);
     res.json = (body: any) => json(res.statusCode >= 500 ? { error: "The request failed. Contact your administrator with this request ID.", requestId: res.locals.requestId } : body);
   }
@@ -815,10 +828,43 @@ app.post("/api/modeler/spreadsheet/preview", safe(async (req, res) => {
   res.json({ ...preview, sourceId: candidateId });
 }));
 
+const sandboxUploadedSources: string[] = [];
+
+async function evictOldestSandboxSpreadsheets(dataDir: string) {
+  const sheetsRoot = resolve(dataDir, "spreadsheets");
+  const activeSheetIds = () => {
+    const onDisk = sources
+      .map((s) => s.id)
+      .filter((id) => existsSync(resolve(sheetsRoot, id)));
+    const ordered = [
+      ...sandboxUploadedSources.filter((id) => onDisk.includes(id)),
+      ...onDisk.filter((id) => !sandboxUploadedSources.includes(id)),
+    ];
+    return ordered;
+  };
+  let current = activeSheetIds();
+  while (current.length >= SANDBOX_MAX_SPREADSHEET_SOURCES) {
+    const victim = current.shift()!;
+    const idx = sandboxUploadedSources.indexOf(victim);
+    if (idx !== -1) sandboxUploadedSources.splice(idx, 1);
+    const existing = await readExistingBlock(victim);
+    if (!("error" in existing)) {
+      const { block } = existing;
+      block.lines.splice(block.startLine, block.endLine - block.startLine);
+      await writeConfig(SOURCES_PATH, block.lines.join("\n")).catch(() => {});
+      await hotReload().catch(() => {});
+    }
+    await rm(resolve(sheetsRoot, victim), { recursive: true, force: true }).catch(() => {});
+    await rm(resolve(dataDir, "models", `${victim}.yaml`), { force: true }).catch(() => {});
+    current = activeSheetIds();
+  }
+}
+
 app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
   const input = spreadsheetImportSchema.parse(req.body ?? {});
-  if (isSandboxMode() && sources.length >= SANDBOX_MAX_SPREADSHEET_SOURCES + 1) {
-    return res.status(429).json({ error: `Public sandbox is limited to ${SANDBOX_MAX_SPREADSHEET_SOURCES} temporary spreadsheet uploads at a time.` });
+  const dataDir = process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
+  if (isSandboxMode()) {
+    await evictOldestSandboxSpreadsheets(dataDir);
   }
   const parsedSheets = parseUploadedWorkbook(input);
   const preview = profileWorkbook(input.fileName, parsedSheets);
@@ -828,7 +874,6 @@ app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
     sourceId = `${sourceId.slice(0, 32)}-${suffix++}`;
   }
 
-  const dataDir = process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
   const lakeRoot = resolve(dataDir, "spreadsheets", sourceId);
   const sheetPreviews = preview.sheets ?? [];
   for (let i = 0; i < sheetPreviews.length; i++) {
@@ -858,6 +903,7 @@ app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
     connector: { type: "duckdb", lakeRoot, poolSize: 2 },
   });
   if ("error" in added) return res.status(added.status).json({ error: added.error });
+  if (isSandboxMode()) sandboxUploadedSources.push(sourceId);
 
   const source = sources.find((s) => s.id === sourceId);
   telemetry.log("audit.spreadsheet_imported", {
