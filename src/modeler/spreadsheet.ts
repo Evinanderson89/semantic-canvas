@@ -10,8 +10,11 @@ import {
   type SpreadsheetColumnChoice,
   type SpreadsheetColumnProfile,
   type SpreadsheetColumnRole,
+  type SpreadsheetDetectedJoin,
   type SpreadsheetFormatHint,
   type SpreadsheetPreview,
+  type SpreadsheetSheetChoice,
+  type SpreadsheetSheetPreview,
   type SpreadsheetValueType,
 } from "./spreadsheetTypes.ts";
 
@@ -22,8 +25,11 @@ export {
   type SpreadsheetColumnChoice,
   type SpreadsheetColumnProfile,
   type SpreadsheetColumnRole,
+  type SpreadsheetDetectedJoin,
   type SpreadsheetFormatHint,
   type SpreadsheetPreview,
+  type SpreadsheetSheetChoice,
+  type SpreadsheetSheetPreview,
   type SpreadsheetValueType,
 };
 
@@ -234,38 +240,12 @@ function extractDateStyleIndices(stylesXml: string): Set<number> {
   return dateStyleIndices;
 }
 
-export function parseXlsxBuffer(bytes: Uint8Array): ParsedSpreadsheet {
-  const entries = readZipEntries(bytes);
-  const decoder = new TextDecoder("utf-8");
-
-  const workbookXml = entries.get("xl/workbook.xml") ? decoder.decode(entries.get("xl/workbook.xml")) : "";
-  const firstSheetNameMatch = workbookXml.match(/<sheet\b[^>]*name="([^"]+)"/);
-  const sheetName = firstSheetNameMatch ? decodeXmlEntities(firstSheetNameMatch[1]) : "Sheet1";
-
-  const sharedStrings: string[] = [];
-  const ssBytes = entries.get("xl/sharedStrings.xml");
-  if (ssBytes) {
-    const ssXml = decoder.decode(ssBytes);
-    for (const si of ssXml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) {
-      const parts: string[] = [];
-      for (const t of si[1].matchAll(/<t(?:\s+[^>]*)?>([\s\S]*?)<\/t>/g)) {
-        parts.push(decodeXmlEntities(t[1]));
-      }
-      sharedStrings.push(parts.join(""));
-    }
-  }
-
-  const stylesXml = entries.get("xl/styles.xml") ? decoder.decode(entries.get("xl/styles.xml")) : "";
-  const dateStyleIndices = stylesXml ? extractDateStyleIndices(stylesXml) : new Set<number>();
-
-  const sheetBytes =
-    entries.get("xl/worksheets/sheet1.xml") ??
-    [...entries.entries()].find(([k]) => /^xl\/worksheets\/sheet\d+\.xml$/.test(k))?.[1];
-  if (!sheetBytes) {
-    throw Object.assign(new Error("No worksheet found inside this .xlsx file."), { status: 400 });
-  }
-  const sheetXml = decoder.decode(sheetBytes);
-
+function parseWorksheetXml(
+  sheetXml: string,
+  sheetName: string,
+  sharedStrings: string[],
+  dateStyleIndices: Set<number>,
+): ParsedSpreadsheet | null {
   const rawRows: string[][] = [];
   let maxCol = 0;
   for (const rowMatch of sheetXml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
@@ -311,13 +291,81 @@ export function parseXlsxBuffer(bytes: Uint8Array): ParsedSpreadsheet {
     }
   }
 
-  if (rawRows.length < 2 || maxCol === 0) {
-    throw Object.assign(new Error("Excel worksheet must include a header row and at least one data row."), { status: 400 });
-  }
+  if (rawRows.length < 2 || maxCol === 0) return null;
   const width = Math.min(maxCol, MAX_COLS);
   const headers = Array.from({ length: width }, (_, i) => rawRows[0][i] || `Column ${i + 1}`);
   const rows = rawRows.slice(1, MAX_ROWS + 1).map((r) => Array.from({ length: width }, (_, i) => r[i] ?? ""));
   return { sheetName, headers, rows };
+}
+
+export function parseXlsxWorkbook(bytes: Uint8Array): ParsedSpreadsheet[] {
+  const entries = readZipEntries(bytes);
+  const decoder = new TextDecoder("utf-8");
+
+  const sharedStrings: string[] = [];
+  const ssBytes = entries.get("xl/sharedStrings.xml");
+  if (ssBytes) {
+    const ssXml = decoder.decode(ssBytes);
+    for (const si of ssXml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) {
+      const parts: string[] = [];
+      for (const t of si[1].matchAll(/<t(?:\s+[^>]*)?>([\s\S]*?)<\/t>/g)) {
+        parts.push(decodeXmlEntities(t[1]));
+      }
+      sharedStrings.push(parts.join(""));
+    }
+  }
+
+  const stylesXml = entries.get("xl/styles.xml") ? decoder.decode(entries.get("xl/styles.xml")) : "";
+  const dateStyleIndices = stylesXml ? extractDateStyleIndices(stylesXml) : new Set<number>();
+
+  const relsXml = entries.get("xl/_rels/workbook.xml.rels")
+    ? decoder.decode(entries.get("xl/_rels/workbook.xml.rels"))
+    : "";
+  const relTargets = new Map<string, string>();
+  for (const rel of relsXml.matchAll(/<Relationship\b[^>]*>/g)) {
+    const id = rel[0].match(/\bId="([^"]+)"/)?.[1];
+    const target = rel[0].match(/\bTarget="([^"]+)"/)?.[1];
+    if (id && target) {
+      const normalized = target.startsWith("/") ? target.slice(1) : target.startsWith("xl/") ? target : `xl/${target}`;
+      relTargets.set(id, normalized);
+    }
+  }
+
+  const workbookXml = entries.get("xl/workbook.xml") ? decoder.decode(entries.get("xl/workbook.xml")) : "";
+  const sheetRefs: { name: string; path: string }[] = [];
+  let sheetIndex = 1;
+  for (const s of workbookXml.matchAll(/<sheet\b[^>]*>/g)) {
+    const name = decodeXmlEntities(s[0].match(/\bname="([^"]+)"/)?.[1] ?? `Sheet${sheetIndex}`);
+    const rid = s[0].match(/\br:id="([^"]+)"/)?.[1];
+    const path = (rid && relTargets.get(rid)) || `xl/worksheets/sheet${sheetIndex}.xml`;
+    sheetRefs.push({ name, path });
+    sheetIndex++;
+  }
+
+  if (sheetRefs.length === 0) {
+    for (const [k] of [...entries.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      if (/^xl\/worksheets\/sheet\d+\.xml$/.test(k)) {
+        sheetRefs.push({ name: `Sheet${sheetRefs.length + 1}`, path: k });
+      }
+    }
+  }
+
+  const parsedSheets: ParsedSpreadsheet[] = [];
+  for (const ref of sheetRefs.slice(0, 8)) {
+    const bytesForSheet = entries.get(ref.path);
+    if (!bytesForSheet) continue;
+    const sheet = parseWorksheetXml(decoder.decode(bytesForSheet), ref.name, sharedStrings, dateStyleIndices);
+    if (sheet) parsedSheets.push(sheet);
+  }
+
+  if (parsedSheets.length === 0) {
+    throw Object.assign(new Error("Excel workbook must include at least one worksheet with a header row and data rows."), { status: 400 });
+  }
+  return parsedSheets;
+}
+
+export function parseXlsxBuffer(bytes: Uint8Array): ParsedSpreadsheet {
+  return parseXlsxWorkbook(bytes)[0];
 }
 
 export function normalizeDateValue(raw: string): string | null {
@@ -455,6 +503,214 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
     suggestedGrain,
     suggestedTimeColumn: dateCol,
     suggestedPrimaryKey: idCol,
+  };
+}
+
+export function detectSheetJoins(
+  sheets: { tableName: string; columns: SpreadsheetColumnProfile[]; rows: string[][] }[],
+): SpreadsheetDetectedJoin[] {
+  const joins: SpreadsheetDetectedJoin[] = [];
+  const seen = new Set<string>();
+
+  for (let li = 0; li < sheets.length; li++) {
+    for (let ri = 0; ri < sheets.length; ri++) {
+      if (li === ri) continue;
+      const left = sheets[li];
+      const right = sheets[ri];
+      const rightKeyCols = right.columns
+        .map((c, idx) => ({ col: c, idx }))
+        .filter(({ col }) => col.nonEmptyCount > 0 && col.uniqueCount / col.nonEmptyCount >= 0.95 && (col.role === "id" || /(^|_)id$|_code$|_key$/.test(col.name)));
+
+      for (const { col: rCol, idx: rIdx } of rightKeyCols) {
+        const rightValues = new Set(right.rows.map((r) => (r[rIdx] ?? "").trim()).filter(Boolean));
+        if (rightValues.size === 0) continue;
+
+        for (let lIdx = 0; lIdx < left.columns.length; lIdx++) {
+          const lCol = left.columns[lIdx];
+          if (lCol.sqlType !== rCol.sqlType) continue;
+          const exactNameMatch = lCol.name === rCol.name;
+          const fkNameMatch =
+            rCol.name === "id" &&
+            (lCol.name === `${right.tableName}_id` || lCol.name === `${right.tableName.replace(/s$/, "")}_id`);
+          if (!exactNameMatch && !fkNameMatch) continue;
+
+          const leftVals = left.rows.map((r) => (r[lIdx] ?? "").trim()).filter(Boolean);
+          if (leftVals.length === 0) continue;
+          let matched = 0;
+          for (const v of leftVals) if (rightValues.has(v)) matched++;
+          const matchRate = Math.round((matched / leftVals.length) * 1000) / 1000;
+          if (matchRate < 0.25) continue;
+
+          // Prefer pointing from the larger / fact-like sheet to the unique lookup sheet.
+          const pairKey = [left.tableName, right.tableName].sort().join("::");
+          if (seen.has(pairKey)) continue;
+          if (left.rows.length < right.rows.length && left.columns[lIdx].uniqueCount === leftVals.length) continue;
+
+          seen.add(pairKey);
+          joins.push({
+            leftTable: left.tableName,
+            leftColumn: lCol.name,
+            rightTable: right.tableName,
+            rightColumn: rCol.name,
+            matchRate,
+            include: matchRate >= 0.5,
+          });
+        }
+      }
+    }
+  }
+  return joins.sort((a, b) => b.matchRate - a.matchRate);
+}
+
+export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadsheet[]): SpreadsheetPreview {
+  if (parsedSheets.length === 1) {
+    const single = profileSpreadsheet(fileName, parsedSheets[0]);
+    const sheetEntry: SpreadsheetSheetPreview = {
+      sheetName: single.sheetName,
+      tableName: single.tableName,
+      rowCount: single.rowCount,
+      columns: single.columns,
+      previewRows: single.previewRows,
+      suggestedGrain: single.suggestedGrain,
+      suggestedTimeColumn: single.suggestedTimeColumn,
+      suggestedPrimaryKey: single.suggestedPrimaryKey,
+      kind: "fact",
+    };
+    return { ...single, sheets: [sheetEntry], detectedJoins: [] };
+  }
+
+  const sourceId = slugifySourceId(fileName);
+  const label = friendlyLabel(fileName.replace(/\.(csv|tsv|xlsx|xls)$/i, "").replace(/[_-]+/g, " "));
+  const usedTableNames = new Set<string>();
+
+  const profiled = parsedSheets.map((sheet, idx) => {
+    const base = profileSpreadsheet(`${sheet.sheetName}.csv`, sheet);
+    let tableName = sanitizeIdentifier(sheet.sheetName, `sheet_${idx + 1}`);
+    if (usedTableNames.has(tableName)) {
+      let s = 2;
+      while (usedTableNames.has(`${tableName}_${s}`)) s++;
+      tableName = `${tableName}_${s}`;
+    }
+    usedTableNames.add(tableName);
+    return { ...base, tableName, rows: sheet.rows };
+  });
+
+  const detectedJoins = detectSheetJoins(
+    profiled.map((p) => ({ tableName: p.tableName, columns: p.columns, rows: p.rows })),
+  );
+  const rightSideTargets = new Set(detectedJoins.filter((j) => j.include).map((j) => j.rightTable));
+
+  const sheets: SpreadsheetSheetPreview[] = profiled.map((p) => ({
+    sheetName: p.sheetName,
+    tableName: p.tableName,
+    rowCount: p.rowCount,
+    columns: p.columns,
+    previewRows: p.previewRows,
+    suggestedGrain: p.suggestedGrain,
+    suggestedTimeColumn: p.suggestedTimeColumn,
+    suggestedPrimaryKey: p.suggestedPrimaryKey,
+    kind: rightSideTargets.has(p.tableName) ? "dimension" : "fact",
+  }));
+
+  const primary = sheets.find((s) => s.kind === "fact") ?? sheets[0];
+  return {
+    sourceId,
+    label,
+    tableName: primary.tableName,
+    sheetName: primary.sheetName,
+    rowCount: primary.rowCount,
+    columns: primary.columns,
+    previewRows: primary.previewRows,
+    suggestedGrain: primary.suggestedGrain,
+    suggestedTimeColumn: primary.suggestedTimeColumn,
+    suggestedPrimaryKey: primary.suggestedPrimaryKey,
+    sheets,
+    detectedJoins,
+  };
+}
+
+export function buildWorkbookProposal(opts: {
+  sourceId: string;
+  label: string;
+  sheets: SpreadsheetSheetPreview[];
+  sheetChoices?: SpreadsheetSheetChoice[];
+  joins?: SpreadsheetDetectedJoin[];
+  primaryGrain?: string;
+  primaryTimeColumn?: string | null;
+  primaryReportingLag?: number;
+  primaryChoices?: SpreadsheetColumnChoice[];
+}): Proposal {
+  if (opts.sheets.length <= 1) {
+    const only = opts.sheets[0];
+    return buildSpreadsheetProposal({
+      sourceId: opts.sourceId,
+      label: opts.label,
+      tableName: only.tableName,
+      rowCount: only.rowCount,
+      grain: opts.primaryGrain ?? only.suggestedGrain,
+      timeColumn: opts.primaryTimeColumn !== undefined ? opts.primaryTimeColumn : only.suggestedTimeColumn,
+      reportingLag: opts.primaryReportingLag,
+      columns: only.columns,
+      choices: opts.primaryChoices,
+    });
+  }
+
+  const choiceByTable = new Map((opts.sheetChoices ?? []).map((c) => [c.tableName, c]));
+  const allTables: Proposal["tables"] = [];
+  const allMetrics: ProposedMetric[] = [];
+  const usedMetricNames = new Set<string>();
+  const primaryTable = opts.sheets.find((s) => s.kind === "fact")?.tableName ?? opts.sheets[0].tableName;
+
+  for (const sheet of opts.sheets) {
+    const isPrimary = sheet.tableName === primaryTable;
+    const sc = choiceByTable.get(sheet.tableName);
+    const single = buildSpreadsheetProposal({
+      sourceId: opts.sourceId,
+      label: sheet.sheetName,
+      tableName: sheet.tableName,
+      rowCount: sheet.rowCount,
+      grain: sc?.grain ?? (isPrimary ? opts.primaryGrain : undefined) ?? sheet.suggestedGrain,
+      timeColumn: sc?.timeColumn !== undefined ? sc.timeColumn : isPrimary && opts.primaryTimeColumn !== undefined ? opts.primaryTimeColumn : sheet.suggestedTimeColumn,
+      reportingLag: sc?.reportingLag ?? (isPrimary ? opts.primaryReportingLag : undefined),
+      columns: sheet.columns,
+      choices: sc?.choices ?? (isPrimary ? opts.primaryChoices : undefined),
+    });
+    const tbl = { ...single.tables[0], kind: sheet.kind };
+    allTables.push(tbl);
+
+    // Emit metrics primarily for fact sheets (and record count for dimensions only if unique name).
+    for (const m of single.metrics) {
+      if (sheet.kind === "dimension" && m.expression.startsWith("SUM(")) continue;
+      let name = m.name;
+      if (usedMetricNames.has(name)) name = `${sheet.tableName}_${m.name}`;
+      usedMetricNames.add(name);
+      allMetrics.push({ ...m, name });
+    }
+  }
+
+  const joins: Proposal["joins"] = (opts.joins ?? [])
+    .filter((j) => j.include)
+    .map((j) => ({
+      left: j.leftTable,
+      leftOn: j.leftColumn,
+      right: j.rightTable,
+      rightOn: j.rightColumn,
+      type: "left",
+      include: true,
+      evidence: `Auto-detected cross-sheet key match (${Math.round(j.matchRate * 100)}% of rows matched).`,
+      resolution: j.matchRate,
+    }));
+
+  const totalRows = opts.sheets.reduce((sum, s) => sum + s.rowCount, 0);
+  return {
+    model: {
+      name: opts.label,
+      description: `Governed multi-sheet semantic model created from workbook "${opts.label}" (${opts.sheets.length} sheets, ${totalRows.toLocaleString()} total rows).`,
+    },
+    tables: allTables,
+    joins,
+    metrics: allMetrics,
+    warnings: [],
   };
 }
 

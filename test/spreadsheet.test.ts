@@ -6,11 +6,14 @@ import writeXlsxFile from "write-excel-file/universal";
 import { duckdbConnector } from "../src/connectors/duckdb.ts";
 import {
   buildSpreadsheetProposal,
+  buildWorkbookProposal,
   normalizeDateValue,
   parseCsv,
   parseNumericValue,
   parseXlsxBuffer,
+  parseXlsxWorkbook,
   profileSpreadsheet,
+  profileWorkbook,
   SAMPLE_SPREADSHEET_CSV,
   SAMPLE_SPREADSHEET_NAME,
   slugifySourceId,
@@ -154,5 +157,114 @@ describe("spreadsheet parser, profiler & DuckDB Parquet writer", () => {
     expect(takeaway).not.toContain("$203.3k");
     // Default neutral palette keeps vermilion red last so positive metrics like NRR don't turn alarm red.
     expect(PALETTES.default.indexOf("#e11d48")).toBe(PALETTES.default.length - 1);
+  });
+
+  it("parses multi-sheet .xlsx workbooks, auto-detects cross-sheet joins, builds multi-table YAML, and executes live cross-sheet DuckDB joins", async () => {
+    const blob = await writeXlsxFile([
+      {
+        sheet: "Orders",
+        data: [
+          [
+            { value: "Order Date", type: String },
+            { value: "Order ID", type: String },
+            { value: "Customer ID", type: String },
+            { value: "Revenue", type: String },
+          ],
+          [
+            { value: new Date("2026-07-04T00:00:00Z"), type: Date, format: "yyyy-mm-dd" },
+            { value: "ORD-1", type: String },
+            { value: "CUST-10", type: String },
+            { value: 12000, type: Number },
+          ],
+          [
+            { value: new Date("2026-07-08T00:00:00Z"), type: Date, format: "yyyy-mm-dd" },
+            { value: "ORD-2", type: String },
+            { value: "CUST-20", type: String },
+            { value: 8500, type: Number },
+          ],
+          [
+            { value: new Date("2026-07-15T00:00:00Z"), type: Date, format: "yyyy-mm-dd" },
+            { value: "ORD-3", type: String },
+            { value: "CUST-10", type: String },
+            { value: 4500, type: Number },
+          ],
+        ],
+      },
+      {
+        sheet: "Customers",
+        data: [
+          [
+            { value: "Customer ID", type: String },
+            { value: "Company", type: String },
+            { value: "Segment", type: String },
+          ],
+          [
+            { value: "CUST-10", type: String },
+            { value: "Acme Corp", type: String },
+            { value: "Enterprise", type: String },
+          ],
+          [
+            { value: "CUST-20", type: String },
+            { value: "Beta Labs", type: String },
+            { value: "Growth", type: String },
+          ],
+        ],
+      },
+    ]).toBlob();
+
+    const parsedSheets = parseXlsxWorkbook(new Uint8Array(await blob.arrayBuffer()));
+    expect(parsedSheets.map((s) => s.sheetName)).toEqual(["Orders", "Customers"]);
+
+    const preview = profileWorkbook("Q3_Workbook.xlsx", parsedSheets);
+    expect(preview.sheets).toHaveLength(2);
+    expect(preview.detectedJoins).toHaveLength(1);
+    expect(preview.detectedJoins![0]).toMatchObject({
+      leftTable: "orders",
+      leftColumn: "customer_id",
+      rightTable: "customers",
+      rightColumn: "customer_id",
+      matchRate: 1,
+      include: true,
+    });
+
+    const proposal = buildWorkbookProposal({
+      sourceId: preview.sourceId,
+      label: preview.label,
+      sheets: preview.sheets!,
+      joins: preview.detectedJoins!,
+      primaryGrain: "One sale or order",
+      primaryTimeColumn: preview.suggestedTimeColumn,
+      primaryReportingLag: 0,
+    });
+    expect(proposalIssues(proposal)).toEqual([]);
+    const yaml = proposalToYaml(proposal);
+    expect(yaml).toContain("orders:");
+    expect(yaml).toContain("customers:");
+    expect(yaml).toContain("left: orders");
+    expect(yaml).toContain("right: customers");
+
+    const dir = await mkdtemp(join(tmpdir(), "sc-multisheet-test-"));
+    try {
+      for (let i = 0; i < preview.sheets!.length; i++) {
+        await writeSpreadsheetParquet(dir, preview.sheets![i].tableName, preview.sheets![i].columns, parsedSheets[i].rows);
+      }
+      const conn = await duckdbConnector(dir);
+      try {
+        const res = await conn.execute(
+          `SELECT c.segment, SUM(o.revenue) AS rev
+           FROM ${conn.relation("orders")} o
+           LEFT JOIN ${conn.relation("customers")} c ON o.customer_id = c.customer_id
+           GROUP BY 1 ORDER BY rev DESC`,
+        );
+        expect(res.rows).toEqual([
+          ["Enterprise", 16500],
+          ["Growth", 8500],
+        ]);
+      } finally {
+        await conn.close();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

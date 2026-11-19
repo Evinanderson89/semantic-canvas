@@ -93,6 +93,8 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   const [state, setState] = useState<any>({ status: "loading" });
   const session = useSession();
   const [explain, setExplain] = useState<{ status: "loading" | "ok" | "error"; text: string } | null>(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const explainRequest = useRef<AbortController | null>(null);
   const closeExplain = () => { explainRequest.current?.abort(); setExplain(null); };
   const [evidenceOpen, setEvidenceOpen] = useState(false);
@@ -479,7 +481,43 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       {kind !== "kpi" && kind !== "table" && spec.compare && spec.compare !== "none" && spec.compareShow && spec.compareShow !== "value" && <div className="result-warning">{showingPercentChange ? "Percentage change" : "Change"} vs. {spec.compare === "yoy" ? "same period last year" : "prior period"}</div>}
       {kind !== "kpi" && (
         <header>
-          <h4 title={title}>{title}</h4>
+          {editingTitle && !locked && onUpdate ? (
+            <input
+              className="tile-title-input"
+              aria-label="Edit tile title"
+              autoFocus
+              value={titleDraft}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={() => {
+                const trimmed = titleDraft.trim();
+                setEditingTitle(false);
+                if (trimmed && trimmed !== title) onUpdate({ ...spec, title: trimmed });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  const trimmed = titleDraft.trim();
+                  setEditingTitle(false);
+                  if (trimmed && trimmed !== title) onUpdate({ ...spec, title: trimmed });
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setEditingTitle(false);
+                }
+              }}
+            />
+          ) : (
+            <h4
+              className={!locked && onUpdate ? "is-editable" : undefined}
+              title={!locked && onUpdate ? `${title} · Double-click to rename` : title}
+              onPointerDown={!locked && onUpdate ? (e) => e.stopPropagation() : undefined}
+              onMouseDown={!locked && onUpdate ? (e) => e.preventDefault() : undefined}
+              onDoubleClick={!locked && onUpdate ? (e) => { e.stopPropagation(); setTitleDraft(title); setEditingTitle(true); } : undefined}
+            >
+              {title}
+            </h4>
+          )}
           <div className="tile-header-actions">
           {state.status === "ok" && <button className="chart-note-button" aria-label="Chart notes and query details" title={[
             `Query ran in ${state.ms}ms`,
@@ -643,6 +681,8 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                        : makeFormatter(fmt)
                    }
                    percent={fmt.number === "percent"}
+                   onRename={onUpdate && !locked ? (next) => onUpdate({ ...spec, title: next }) : undefined}
+                   onDeltaClick={investigate}
                    onOptions={onUpdate && !locked ? (spark) => onUpdate({ ...spec, spark }) : undefined} />
           : kind === "stat" || kind === "kpi"
             ? <Stat value={state.rows?.[0]?.[state.columns.indexOf(spec.metrics[0])]} format={makeFormatter(fmt)} />

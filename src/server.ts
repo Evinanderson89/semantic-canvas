@@ -4,6 +4,7 @@ import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
+import { isSandboxMode, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason } from "./security/sandbox.ts";
 import { createScimRouter } from "./security/scim.ts";
 import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
 import { budgetFailure, loadQueryTimeoutMs, requestBudget } from "./connectors/queryBudget.ts";
@@ -49,7 +50,7 @@ import { proposalIssues, proposalToExtension, proposalToYaml } from "./modeler/y
 import { driftOf, extendProposal, dashboardDriftImpact, type DriftFinding } from "./modeler/extend.ts";
 import { updateExtension, writeExtension } from "./sources/extensions.ts";
 import { proposalProblems } from "./modeler/proposals.ts";
-import { buildSpreadsheetProposal, parseCsv, parseXlsxBuffer, profileSpreadsheet, slugifySourceId, writeSpreadsheetParquet } from "./modeler/spreadsheet.ts";
+import { buildWorkbookProposal, parseCsv, parseXlsxWorkbook, profileWorkbook, slugifySourceId, writeSpreadsheetParquet } from "./modeler/spreadsheet.ts";
 import { draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -172,6 +173,13 @@ app.use((error: any, _req: any, res: any, next: any) => {
 auth.mount(app);
 app.use("/api/scim/v2", createScimRouter({ auth, onAudit: (event, data) => telemetry.log(event, data ?? {}) }));
 app.use("/api", auth.guard);
+if (isSandboxMode()) {
+  app.use("/api", (req, res, next) => {
+    const blocked = sandboxBlockReason(req.method, req.path);
+    if (blocked) return res.status(403).json({ error: blocked, sandbox: true });
+    next();
+  });
+}
 // Company workspaces bound each verified account's AI, query and API request rates.
 // Local mode is one person on loopback and stays unlimited.
 if (auth.config.mode !== "local") app.use("/api", rateLimitMiddleware(loadRateLimits(), req => identityOf(req)?.id,
@@ -208,6 +216,7 @@ const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => 
 };
 
 app.get("/api/sources", safe((req, res) => res.json({
+  sandbox: isSandboxMode(),
   sources: sources.filter(s => canUseSource(identityOf(req), s.id)).map(s => ({ ...describeSource(s), ...(auth.config.mode !== "local" && identityOf(req)?.role !== "admin" && s.error ? { error: "Connection unavailable. Contact your administrator." } : {}) })),
   active: sources.find((x) => x.status === "ready" && canUseSource(identityOf(req), x.id))?.id ?? null,
   defaultPrincipal: auth.config.mode === "local" ? defaultPrincipal : undefined,
@@ -338,12 +347,19 @@ const yamlScalar = (v: string) => JSON.stringify(v);
 const quoteEnvValue = (v: string) =>
   `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n")}"`;
 
-const CONNECTOR_FIELDS = ["account", "username", "privateKey", "privateKeyPass",
-  "password", "role", "warehouse", "database", "schema"] as const;
+const CONNECTOR_FIELDS = [
+  "account", "username", "privateKey", "privateKeyPass",
+  "password", "role", "warehouse", "database", "schema",
+  "connectionString", "host", "port", "ssl",
+  "projectId", "dataset", "location", "credentialsJson", "clientEmail",
+] as const;
 const ENV_VAR_NAME: Record<string, string> = {
   account: "ACCOUNT", username: "USERNAME", privateKey: "PRIVATE_KEY",
   privateKeyPass: "PRIVATE_KEY_PASS", password: "PASSWORD", role: "ROLE",
   warehouse: "WAREHOUSE", database: "DATABASE", schema: "SCHEMA",
+  connectionString: "CONNECTION_STRING", host: "HOST", port: "PORT", ssl: "SSL",
+  projectId: "PROJECT_ID", dataset: "DATASET", location: "LOCATION",
+  credentialsJson: "CREDENTIALS_JSON", clientEmail: "CLIENT_EMAIL",
 };
 
 /**
@@ -370,7 +386,7 @@ function buildConnector(connectorType: string, body: any, existing: Record<strin
     if (awsRegion) connector.awsRegion = awsRegion;
     if (!connector.lakeRoot) return { ok: false, status: 400, error: "lakeRoot is required" };
   } else if (connectorType === "snowflake") {
-    for (const f of CONNECTOR_FIELDS) {
+    for (const f of ["account", "username", "privateKey", "privateKeyPass", "password", "role", "warehouse", "database", "schema"]) {
       const v = resolve(f);
       if (v) connector[f] = v;
     }
@@ -383,6 +399,28 @@ function buildConnector(connectorType: string, body: any, existing: Record<strin
       return { ok: false, status: 400, error: "a private key or a password is required" };
     if (!connector.database)
       return { ok: false, status: 400, error: "database is required" };
+  } else if (connectorType === "postgres") {
+    for (const f of ["connectionString", "host", "port", "database", "username", "password", "schema", "ssl"]) {
+      const v = resolve(f);
+      if (v) connector[f] = v;
+    }
+    connector.poolSize = Number(body?.poolSize ?? existing.poolSize ?? 6);
+    connector.schema ||= "public";
+    if (!connector.connectionString && (!connector.host || !connector.database || !connector.username)) {
+      return { ok: false, status: 400, error: "PostgreSQL requires a connectionString or host, database, and username" };
+    }
+  } else if (connectorType === "bigquery") {
+    for (const f of ["projectId", "dataset", "location", "credentialsJson", "clientEmail", "privateKey"]) {
+      const v = resolve(f);
+      if (v) connector[f] = v;
+    }
+    connector.poolSize = Number(body?.poolSize ?? existing.poolSize ?? 4);
+    if (!connector.projectId || !connector.dataset) {
+      return { ok: false, status: 400, error: "BigQuery projectId and dataset are required" };
+    }
+    if (!connector.credentialsJson && !(connector.clientEmail && connector.privateKey)) {
+      return { ok: false, status: 400, error: "BigQuery requires service account credentialsJson (or clientEmail and privateKey)" };
+    }
   } else {
     return { ok: false, status: 400, error: `unknown connector "${connectorType}"` };
   }
@@ -746,20 +784,28 @@ const spreadsheetImportSchema = spreadsheetUploadSchema.extend({
     role: z.enum(["date", "id", "metric", "category"]),
     label: z.string().max(200).optional(),
   })).max(200).optional(),
+  joins: z.array(z.object({
+    leftTable: z.string().min(1).max(128),
+    leftColumn: z.string().min(1).max(128),
+    rightTable: z.string().min(1).max(128),
+    rightColumn: z.string().min(1).max(128),
+    matchRate: z.number().min(0).max(1),
+    include: z.boolean(),
+  })).max(64).optional(),
 });
 
-function parseUploadedSpreadsheet(input: z.infer<typeof spreadsheetUploadSchema>) {
+function parseUploadedWorkbook(input: z.infer<typeof spreadsheetUploadSchema>) {
   if (input.format === "xlsx") {
     const buf = Buffer.from(input.content, "base64");
-    return parseXlsxBuffer(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
+    return parseXlsxWorkbook(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
   }
-  return parseCsv(input.content, input.fileName.replace(/\.(csv|tsv)$/i, "") || "Sheet1");
+  return [parseCsv(input.content, input.fileName.replace(/\.(csv|tsv)$/i, "") || "Sheet1")];
 }
 
 app.post("/api/modeler/spreadsheet/preview", safe(async (req, res) => {
   const input = spreadsheetUploadSchema.parse(req.body ?? {});
-  const parsed = parseUploadedSpreadsheet(input);
-  const preview = profileSpreadsheet(input.fileName, parsed);
+  const sheets = parseUploadedWorkbook(input);
+  const preview = profileWorkbook(input.fileName, sheets);
   let candidateId = preview.sourceId;
   let suffix = 2;
   while (sources.some((s) => s.id === candidateId)) {
@@ -770,8 +816,11 @@ app.post("/api/modeler/spreadsheet/preview", safe(async (req, res) => {
 
 app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
   const input = spreadsheetImportSchema.parse(req.body ?? {});
-  const parsed = parseUploadedSpreadsheet(input);
-  const preview = profileSpreadsheet(input.fileName, parsed);
+  if (isSandboxMode() && sources.length >= SANDBOX_MAX_SPREADSHEET_SOURCES + 1) {
+    return res.status(429).json({ error: `Public sandbox is limited to ${SANDBOX_MAX_SPREADSHEET_SOURCES} temporary spreadsheet uploads at a time.` });
+  }
+  const parsedSheets = parseUploadedWorkbook(input);
+  const preview = profileWorkbook(input.fileName, parsedSheets);
   let sourceId = input.sourceId ?? slugifySourceId(input.label || input.fileName);
   let suffix = 2;
   while (sources.some((s) => s.id === sourceId)) {
@@ -780,18 +829,20 @@ app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
 
   const dataDir = process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
   const lakeRoot = resolve(dataDir, "spreadsheets", sourceId);
-  await writeSpreadsheetParquet(lakeRoot, preview.tableName, preview.columns, parsed.rows);
+  const sheetPreviews = preview.sheets ?? [];
+  for (let i = 0; i < sheetPreviews.length; i++) {
+    await writeSpreadsheetParquet(lakeRoot, sheetPreviews[i].tableName, sheetPreviews[i].columns, parsedSheets[i].rows);
+  }
 
-  const proposal = buildSpreadsheetProposal({
+  const proposal = buildWorkbookProposal({
     sourceId,
     label: input.label.trim(),
-    tableName: preview.tableName,
-    rowCount: preview.rowCount,
-    grain: input.grain.trim(),
-    timeColumn: input.timeColumn ?? null,
-    reportingLag: input.reportingLag,
-    columns: preview.columns,
-    choices: input.choices,
+    sheets: sheetPreviews,
+    joins: input.joins ?? preview.detectedJoins,
+    primaryGrain: input.grain.trim(),
+    primaryTimeColumn: input.timeColumn ?? null,
+    primaryReportingLag: input.reportingLag,
+    primaryChoices: input.choices,
   });
   const issues = proposalIssues(proposal);
   if (issues.length) return res.status(400).json({ error: issues[0], issues });
@@ -811,6 +862,7 @@ app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
   telemetry.log("audit.spreadsheet_imported", {
     actor: actorOf(req),
     id: sourceId,
+    sheets: sheetPreviews.length,
     rows: preview.rowCount,
     columns: preview.columns.length,
     metrics: proposal.metrics.length,
@@ -818,10 +870,54 @@ app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
   res.json({
     sourceId,
     tableName: preview.tableName,
+    sheets: sheetPreviews.map((s) => s.tableName),
+    joins: (input.joins ?? preview.detectedJoins ?? []).filter((j) => j.include).length,
     source: source ? describeSource(source) : null,
     sources: added.reload.sources,
     metrics: proposal.metrics.filter((m) => m.include).map((m) => m.name),
   });
+}));
+
+app.post("/api/modeler/spreadsheet/refresh/:sourceId", safe(async (req, res) => {
+  const sourceId = String(req.params.sourceId ?? "");
+  if (!SLUG.test(sourceId)) return res.status(400).json({ error: "Invalid source id" });
+  const existing = sources.find((s) => s.id === sourceId);
+  if (!existing || !existing.model) return res.status(404).json({ error: `Source "${sourceId}" not found` });
+
+  const dataDir = process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
+  const lakeRoot = resolve(dataDir, "spreadsheets", sourceId);
+  if (!existsSync(lakeRoot)) {
+    return res.status(400).json({ error: `Source "${sourceId}" is not a spreadsheet-uploaded source and cannot be refreshed by file upload.` });
+  }
+
+  const input = spreadsheetUploadSchema.parse(req.body ?? {});
+  const parsedSheets = parseUploadedWorkbook(input);
+  const preview = profileWorkbook(input.fileName, parsedSheets);
+  const sheetPreviews = preview.sheets ?? [];
+  const expectedTables = Object.keys(existing.model.tables);
+
+  let rowsUpdated = 0;
+  const tablesUpdated: string[] = [];
+  for (let i = 0; i < sheetPreviews.length; i++) {
+    const sp = sheetPreviews[i];
+    const targetTable = expectedTables.includes(sp.tableName)
+      ? sp.tableName
+      : sheetPreviews.length === 1 && expectedTables.length === 1
+        ? expectedTables[0]
+        : null;
+    if (!targetTable) continue;
+    await writeSpreadsheetParquet(lakeRoot, targetTable, sp.columns, parsedSheets[i].rows);
+    rowsUpdated += parsedSheets[i].rows.length;
+    tablesUpdated.push(targetTable);
+  }
+  if (tablesUpdated.length === 0) {
+    return res.status(400).json({
+      error: `Uploaded file sheets (${sheetPreviews.map((s) => s.tableName).join(", ")}) did not match existing tables (${expectedTables.join(", ")}).`,
+    });
+  }
+  const reload = await hotReload();
+  telemetry.log("audit.spreadsheet_refreshed", { actor: actorOf(req), id: sourceId, tables: tablesUpdated, rows: rowsUpdated });
+  res.json({ ok: true, sourceId, tablesUpdated, rowsUpdated, sources: reload.sources });
 }));
 
 /** Non-secret fields only, for the edit form to pre-fill -- privateKey,
@@ -830,7 +926,7 @@ app.get("/api/sources/:id/config", safe(async (req, res) => {
   const existing = await readExistingBlock(req.params.id);
   if ("error" in existing) return res.status(404).json({ error: existing.error });
   const c = existing.parsed.connector ?? {};
-  const SAFE_FIELDS = ["type", "lakeRoot", "awsProfile", "awsRegion", "poolSize", "account", "username", "role", "warehouse", "database", "schema"];
+  const SAFE_FIELDS = ["type", "lakeRoot", "awsProfile", "awsRegion", "poolSize", "account", "username", "role", "warehouse", "database", "schema", "host", "port", "ssl", "projectId", "dataset", "location", "clientEmail"];
   const connector: Record<string, any> = {};
   for (const f of SAFE_FIELDS) {
     if (c[f] === undefined) continue;

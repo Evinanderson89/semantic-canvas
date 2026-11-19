@@ -14,7 +14,7 @@ type Point = { x: unknown; y: number };
  * wants a zero baseline, a retention ratio wants a tight domain or it reads as
  * a flat line.
  */
-export function Kpi({ label, metricSlug, series, options, onOptions, format, grain, previous, comparison, onComparison, direction = "neutral", percent = false, actions, notice, precisionLimited = false, partialWindow, unverifiedPeriods }: {
+export function Kpi({ label, metricSlug, series, options, onOptions, format, grain, previous, comparison, onComparison, direction = "neutral", percent = false, actions, notice, precisionLimited = false, partialWindow, unverifiedPeriods, onRename, onDeltaClick }: {
   metricSlug?: string;
   comparison?: CardComparison; onComparison?: (comparison: CardComparison) => void;
   precisionLimited?: boolean;
@@ -28,6 +28,8 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
   options?: Partial<SparkOptions>;
   onOptions?: (o: Partial<SparkOptions>) => void;
   format?: (n: number) => string;
+  onRename?: (next: string) => void;
+  onDeltaClick?: () => void;
 }) {
   const o: SparkOptions = { ...DEFAULT_SPARK, ...(options ?? {}) };
   const mode = comparison ?? o.compare;
@@ -37,6 +39,15 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
   const [hover, setHover] = useState<{ ratio: number; left: number } | null>(null);
   const [box, setBox] = useState({ width: 240, height: 38 });
   const [open, setOpen] = useState(false);
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [labelDraft, setLabelDraft] = useState(label);
+  useEffect(() => { setLabelDraft(label); if (!onRename) setEditingLabel(false); }, [label, onRename]);
+  const commitRename = () => {
+    const trimmed = labelDraft.trim();
+    setEditingLabel(false);
+    if (onRename && trimmed && trimmed !== label) onRename(trimmed);
+    else setLabelDraft(label);
+  };
 
   const timeline = sparklineTimeline(series, grain);
   const { points, valid, segments, gaps, domain } = timeline;
@@ -142,7 +153,32 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
   return (
     <div className="kpi">
       <div className="kpi-head">
-        <span className="kpi-label" title={label}>{label}</span>
+        {editingLabel && onRename ? (
+          <input
+            className="tile-title-input kpi-title-input"
+            aria-label="Edit KPI title"
+            autoFocus
+            value={labelDraft}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setLabelDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+              else if (e.key === "Escape") { e.preventDefault(); setLabelDraft(label); setEditingLabel(false); }
+            }}
+          />
+        ) : (
+          <span
+            className={"kpi-label" + (onRename ? " is-editable" : "")}
+            title={onRename ? `${label} · Double-click to rename` : label}
+            onPointerDown={onRename ? (e) => e.stopPropagation() : undefined}
+            onMouseDown={onRename ? (e) => e.preventDefault() : undefined}
+            onDoubleClick={onRename ? (e) => { e.stopPropagation(); setLabelDraft(label); setEditingLabel(true); } : undefined}
+          >
+            {label}
+          </span>
+        )}
         {metricSlug && <code className="metric-slug">{metricSlug}</code>}
         {onOptions && (
           <button className="gear" title="Sparkline options"
@@ -162,7 +198,19 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
         <div className="kpi-delta">
           {mode === "none" ? <span className="flat">comparison off</span> : coverageLimited ? <span className="flat" title="Review the ratio's input dates before comparing these periods.">input coverage · no comparison</span> : partialComparison ? <span className="flat" title="Use complete reporting periods or a finer grain before comparing this selected window.">partial period · no comparison</span> : precisionLimited ? <span className="flat" title="Displayed values may round together. Inspect the data check and compare the exact returned values in the warehouse.">precision limited</span> : delta == null ? <span className="flat" title={mode === "first" && series.length < 2 ? "At least two shown periods are needed to compare with the first." : "A valid comparison value is unavailable."}>no comparison</span> : (
             <>
-              <span className={sentiment} title={belowDisplayPrecision ? "A nonzero change below the card’s display precision. Inspect the metric evidence for the detailed comparison." : undefined}>{changeLabel}</span>
+              {onDeltaClick ? (
+                <button
+                  type="button"
+                  className="kpi-delta-btn"
+                  title={belowDisplayPrecision ? "A nonzero change below display precision. Click to investigate what moved." : "Why did this move? Click to investigate"}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); onDeltaClick(); }}
+                >
+                  <span className={sentiment}>{changeLabel}</span>
+                </button>
+              ) : (
+                <span className={sentiment} title={belowDisplayPrecision ? "A nonzero change below the card’s display precision. Inspect the metric evidence for the detailed comparison." : undefined}>{changeLabel}</span>
+              )}
               <span className="vs">vs {mode === "first" ? "first shown period" : mode === "yoy" ? "same period last year" : "prior period"}</span>
             </>
           )}
