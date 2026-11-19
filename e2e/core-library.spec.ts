@@ -43,7 +43,7 @@ test("folders organize saved dashboards and a persisted view can be reused and u
   await dialog.getByRole("searchbox", { name: "Search library" }).fill(viewName);
   await dialog.getByRole("button", { name: `Insert view ${viewName}`, exact: true }).click();
   await expect(page.locator(".node")).toHaveCount(2);
-  await expect(page.locator(".kpi-value")).toContainText("203");
+  await expect(page.locator(".kpi-value")).toContainText("$202.8k");
   await page.keyboard.press("ControlOrMeta+z");
   await expect(page.locator(".node")).toHaveCount(0);
   await page.keyboard.press("ControlOrMeta+Shift+z");

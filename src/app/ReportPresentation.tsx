@@ -120,19 +120,8 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
                   <Tile model={model} spec={t} locked presentation queryContext={queryContext} crossFilters={[...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])]} drill={drills[t.id]} scopeWarnings={scopeWarnings[t.id]} onReadiness={onReadiness} onRemove={() => {}} />
                 </TileBoundary>
               </div>}
-            {query && <details className="report-evidence-drawer">
-              <summary className="report-evidence-summary">
-                <span>ⓘ Supporting Evidence & SQL Lineage</span>
-                <span className="report-evidence-meta">
-                  {query.dimensions.length ? query.dimensions.map(d => {
-                    const [grain] = d.split(":");
-                    return d.includes(":") ? `${grain[0].toUpperCase()}${grain.slice(1)} grain` : d.split(".").at(-1)!.replace(/_/g, " ");
-                  }).join(" · ") : "Aggregate"}
-                  {check?.window ? ` · ${check.window.start} → ${check.window.end}` : ""}
-                </span>
-              </summary>
+            {query && <>
               <div className="report-chart-context">
-                <p><strong>Governed metric IDs:</strong> <code className="mono">{t.metrics.join(", ")}</code>{t.metrics[0] && model.metrics[t.metrics[0]]?.expression ? <> · <code className="mono">{model.metrics[t.metrics[0]].expression}</code></> : null}</p>
                 <p>{query.dimensions.length ? query.dimensions.map(d => {
                   const [grain] = d.split(":");
                   return d.includes(":") ? `${grain[0].toUpperCase()}${grain.slice(1)} periods` : d.split(".").at(-1)!.replace(/_/g, " ");
@@ -148,7 +137,18 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
                   </li>)}
                 </ul>}
               </div>
-            </details>}
+              <details className="report-evidence-drawer">
+                <summary className="report-evidence-summary">
+                  <span>ⓘ Supporting Evidence &amp; SQL Lineage</span>
+                  <span className="report-evidence-meta">
+                    {t.metrics.length} governed {t.metrics.length === 1 ? "metric" : "metrics"}
+                  </span>
+                </summary>
+                <div className="report-lineage-body">
+                  <p><strong>Governed metric IDs:</strong> <code className="mono">{t.metrics.join(", ")}</code>{t.metrics[0] && model.metrics[t.metrics[0]]?.expression ? <> · <code className="mono">{model.metrics[t.metrics[0]].expression}</code></> : null}</p>
+                </div>
+              </details>
+            </>}
           </article>;
         })}</div>
       </section>;

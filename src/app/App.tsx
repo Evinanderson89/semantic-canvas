@@ -36,6 +36,7 @@ import { Inspector } from "./Inspector.tsx";
 import { MetricRegistry, DataModel } from "./Explore.tsx";
 import { Connections, type Principal, type RlsPolicy, type SourceInfo } from "./Connections.tsx";
 import { Modeler } from "./Modeler.tsx";
+import { SpreadsheetImport } from "./SpreadsheetImport.tsx";
 import type { Brief } from "../suggest/match.ts";
 import { DEFAULT_CANVAS, THEME_PRESETS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
@@ -74,6 +75,7 @@ export function App() {
   const [book, setBook] = useState<DashboardSpec | null>(null);
   const [activeTabId, setActiveTabId] = useState("main");
   const [referenceImport, setReferenceImport] = useState(false);
+  const [spreadsheetImport, setSpreadsheetImport] = useState(false);
   const [distributing, setDistributing] = useState(false);
   const [filterEditing, setFilterEditing] = useState<string | null>(null);
   const [filterValues, setFilterValues] = useState<Record<string, FilterValue>>({});
@@ -904,9 +906,9 @@ export function App() {
         ) : !dash && view === "model" ? (
           <DataModel model={model} sourceId={activeSourceId ?? ""} onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} />
         ) : !dash && view === "modeler" ? (
-          <Modeler sources={sources} onPublished={() => refreshSources()} />
+          <Modeler sources={sources} onPublished={() => refreshSources()} onImportSpreadsheet={session.canAdmin ? () => setSpreadsheetImport(true) : undefined} />
         ) : !dash ? (
-          <>{session.canEdit ? <Entry model={model} onDemo={demoDashboardAvailable(model) ? () => { const c = freshCanvas(); if (beginDocument(demoDashboard(c.width), { canvas: c })) { pendingFit.current = true; setView("home"); } } : undefined} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)}
+          <>{session.canEdit ? <Entry model={model} onDemo={demoDashboardAvailable(model) ? () => { const c = freshCanvas(); if (beginDocument(demoDashboard(c.width), { canvas: c })) { pendingFit.current = true; setView("home"); } } : undefined} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)} onSpreadsheet={session.canAdmin ? () => setSpreadsheetImport(true) : undefined}
                  onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} /> : <div className="explore"><span className="eyebrow">Company workspace</span><h1>Your metrics, in focus.</h1><p className="lede">Open a shared dashboard below, or browse CoreCanvas Library. Filters and drill-downs follow your company’s data permissions.</p></div>}
         <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>{session.mode === "team" ? "Shared dashboards and your drafts in this tab" : "Saved dashboards and drafts on this computer"}</span></div>
           <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
@@ -1005,23 +1007,15 @@ export function App() {
                     type="button"
                     className="journey-step"
                     aria-pressed={!canvas.locked && !handoff && !aiRedesign}
-                    title="Start from a messy draft dashboard or edit the canvas"
+                    title="Edit tiles, layout, and chart formatting on the canvas"
                     onClick={() => {
                       setHandoff(false);
                       setAiRedesign(false);
-                      if (demoDashboardAvailable(model) && dash.title !== "Growth & acquisition (draft)") {
-                        const c = { ...freshCanvas(), locked: false };
-                        if (beginDocument(demoDashboard(c.width), { canvas: c })) {
-                          pendingFit.current = true;
-                          setView("home");
-                        }
-                      } else if (canvas.locked) {
-                        changeCanvas({ ...canvas, locked: false });
-                      }
+                      if (canvas.locked) changeCanvas({ ...canvas, locked: false });
                     }}
                   >
                     <span className="journey-num">1</span>
-                    Messy Draft
+                    Edit Canvas
                   </button>
                 )}
                 {session.canEdit && (
@@ -1029,14 +1023,12 @@ export function App() {
                     type="button"
                     className="journey-step"
                     disabled={!dash.tiles.length}
-                    title="Run deterministic chart checks, Smart Arrange, and AI design improvements"
+                    aria-pressed={aiRedesign}
+                    title="Open the before/after AI & deterministic redesign studio"
                     onClick={() => {
                       setHandoff(false);
                       if (canvas.locked) changeCanvas({ ...canvas, locked: false });
-                      requestAnimationFrame(() => {
-                        const btn = document.querySelector<HTMLButtonElement>('.editbar button[aria-haspopup="dialog"]');
-                        if (btn && btn.getAttribute("aria-expanded") !== "true") btn.click();
-                      });
+                      setAiRedesign(true);
                     }}
                   >
                     <span className="journey-num">2</span>
@@ -1072,7 +1064,7 @@ export function App() {
                   Broadside Infographic
                 </button>
               </div>
-              <span><strong>{dashId ? `Saved version ${revision}` : "Not saved yet"}</strong> · {session.mode === "team" ? "Workspace access" : "Local workspace"}</span>
+              <span className="state-version"><strong>{dashId ? `Saved version ${revision}` : "Not saved yet"}</strong>{canvas.locked ? " · Preview does not publish" : ""}</span>
               <span className="spacer" />
               <button disabled={!dashId} title={!dashId ? "Save once to start version history" : "Browse and restore saved dashboard designs"} onClick={() => setHistoryOpen(true)}>Version history</button>
               {session.canEdit && <div className="mode-switch" aria-label="Dashboard viewing mode">
@@ -1196,6 +1188,34 @@ export function App() {
         onInsert={v => { try { addSavedView(v); } catch (e: any) { setViewPreview(null); setNotice(e.message); } }}
         onOpen={v => { const issues = validateDashboard(model, v.spec); if (issues.length) { setViewPreview(null); setNotice(issues[0].problem); return; } if (beginDocument({ ...v.spec, title: v.name }, { canvas: v.canvas })) { setView("home"); pendingFit.current = true; } }} />}
 
+      {spreadsheetImport && session.canAdmin && (
+        <SpreadsheetImport
+          onClose={() => setSpreadsheetImport(false)}
+          onImported={({ sourceId, label, tableName, metrics }) => {
+            setSpreadsheetImport(false);
+            refreshSources();
+            sourceRef.current = sourceId;
+            setSourceId(sourceId);
+            setLibraryFolder(null);
+            try { storage.setItem(sourceStorageKey, sourceId); } catch {}
+            setView("home");
+            const epoch = documentEpoch.current;
+            fetch("/api/model").then(readResponse).then((nextModel) => {
+              if (documentEpoch.current !== epoch) return;
+              setModel(nextModel);
+              setBootError("");
+              build({
+                table: tableName,
+                metrics: metrics.slice(0, 4),
+                audience: "operator",
+                grain: "month",
+                text: `Overview of ${label}`,
+              });
+              setNotice(`Imported "${label}" and built an instant governed dashboard.`, "success");
+            }).catch((e) => setNotice(e.message));
+          }}
+        />
+      )}
       {referenceImport && <ReferenceImport key={`${activeSourceId}:${asWho}`} model={model} width={freshCanvas().width} aiAvailable={aiAvailable} onClose={() => setReferenceImport(false)} onConnections={() => { if (beginDocument(null)) setView("connections"); }} onCreate={(spec, height) => {
         if (beginDocument(spec, { canvas: { ...freshCanvas(), height } })) { setView("home"); pendingFit.current = true; setNotice("Reference recreated with live catalogue metrics. Review the matches and save when ready.", "success"); }
       }} />}
@@ -1258,25 +1278,10 @@ export function App() {
         onClose={() => setHandoff(false)} onKeepBrief={brief => { if (book && session.canEdit) { const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); } }}
         onSave={async brief => { if (!book || !session.canEdit || saving) throw new Error("Saving is unavailable"); const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); await save(false, true, next); }}
         onWatch={() => { chartPreferences.update("alerts", true); setHandoff(false); setNotice("Chart alerts are visible. Choose a chart’s bell to preview a watch. Save edits first; watches use saved filter defaults.", "info"); }}
-        onLoadMessyDraft={session.canEdit ? () => {
-          setHandoff(false);
-          if (demoDashboardAvailable(model) && dash.title !== "Growth & acquisition (draft)") {
-            const c = { ...freshCanvas(), locked: false };
-            if (beginDocument(demoDashboard(c.width), { canvas: c })) {
-              pendingFit.current = true;
-              setView("home");
-            }
-          } else if (canvas.locked) {
-            changeCanvas({ ...canvas, locked: false });
-          }
-        } : undefined}
         onImproveArrange={session.canEdit ? () => {
           setHandoff(false);
           if (canvas.locked) changeCanvas({ ...canvas, locked: false });
-          requestAnimationFrame(() => {
-            const btn = document.querySelector<HTMLButtonElement>('.editbar button[aria-haspopup="dialog"]');
-            if (btn && btn.getAttribute("aria-expanded") !== "true") btn.click();
-          });
+          setAiRedesign(true);
         } : undefined} />}
       {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify(filterValues)} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model))]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
         resolveScopeWarnings={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, unappliedFilters(proposed, t, filterValues, model)]))}
@@ -1308,15 +1313,22 @@ export function App() {
   );
 }
 
-function Entry({ model, onSuggest, onScratch, onReference, onDemo }: any) {
+function Entry({ model, onSuggest, onScratch, onReference, onSpreadsheet, onDemo }: any) {
   return (
     <div className="entry">
       <div className="eyebrow">Semantic Canvas</div>
       <h2>Dashboards from<br /><em>governed metrics.</em></h2>
-      <p className="lede">Ask a question, sketch a layout, or start blank. Every chart comes from a metric your team published, and the review says what it leaves out.</p>
+      <p className="lede">Drop an Excel or CSV sheet, ask a question in plain English, or sketch a layout. Every chart uses reviewed definitions, and the brief shows what it leaves out.</p>
       {onDemo && <button className="demo-entry-link" onClick={onDemo}>Try the design playground <span aria-hidden="true">→</span><small>Start with a messy dashboard. Improve the charts, then shape the story.</small></button>}
       <div className="model-summary"><span className="dot ready" />{prettifyModelName(model.name)}<span>· {Object.keys(model.metrics).length} metrics ready to explore</span></div>
       <div className="paths">
+        {onSpreadsheet && (
+          <button className="path spreadsheet-path" onClick={onSpreadsheet}>
+            <span className="path-glyph" aria-hidden="true">⊞</span>
+            <h3>Drop an Excel or CSV sheet <span>↗</span></h3>
+            <p>Upload an .xlsx or .csv file—no SQL or YAML needed. Confirm 3 plain-English details on a 5-row preview and get an instant dashboard.</p>
+          </button>
+        )}
         <button className="path suggested" onClick={onSuggest}>
           <span className="path-glyph" aria-hidden="true">✧</span>
           <h3>Suggest a dashboard <span>↗</span></h3>

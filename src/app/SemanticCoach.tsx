@@ -472,11 +472,11 @@ export function SemanticCoachPanel({
                 : "Coaching needed to unlock this analysis"}
             </b>
             <span className={`active-badge ${report.questionAnalysis.canAnswerNow ? "modeler-status" : "warn"}`}>
-              {report.questionAnalysis.canAnswerNow ? "Model appears to support this question" : "Needs model update"}
+              {report.questionAnalysis.canAnswerNow ? "Ready to test" : "Needs model update"}
             </span>
           </div>
           <p className="muted sm">
-            Heuristic Readiness Score: <b>{report.overallScore}/100</b> · Structural heuristic based on declared fields and joins — run a query to validate against warehouse data; not a quality certification.
+            Overall model completeness heuristic: <b>{report.overallScore}/100</b> (covers all tables in the workspace, not just this question — validate with a live warehouse query; not a quality certification).
           </p>
           <p className="sm">
             <b>Question:</b> “{report.questionAnalysis.question}”

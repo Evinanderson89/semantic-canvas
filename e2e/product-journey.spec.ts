@@ -14,7 +14,7 @@ test("a first Ending MRR chart supplies its required month and becomes a usable 
   await expect(picker).toContainText("reporting period required");
   await picker.getByRole("button", { name: /KPI card/ }).click();
   await picker.getByRole("button", { name: "Add tile", exact: true }).click();
-  await expect(page.locator(".node .kpi")).toContainText("$203k");
+  await expect(page.locator(".node .kpi")).toContainText("$202.8k");
   await expect(page.locator(".node .kpi")).toContainText("Aug 2026");
   await page.getByRole("button", { name: "Review and share", exact: true }).click();
   const review = page.getByRole("dialog", { name: "Review and share" });
@@ -36,7 +36,7 @@ for (const chart of ["bar", "barStacked", "barGrouped"]) test(`AI preview preser
   const dialog = page.getByRole("dialog", { name: "Reimagine this dashboard" });
   await dialog.getByRole("button", { name: "Show me a better dashboard" }).click();
   await expect(dialog.locator(".heading-text")).toHaveText("Growth drivers");
-  await expect(dialog.locator(".kpi")).toContainText("$203k");
+  await expect(dialog.locator(".kpi")).toContainText("$202.8k");
   for (const label of ["New MRR (USD)", "Expansion MRR (USD)", "Contraction MRR (USD)", "Churned MRR (USD)"]) await expect(dialog.locator("figure")).toContainText(label);
   await expect(dialog.locator(".chart-err")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Apply redesign", exact: true })).toBeEnabled();
@@ -62,5 +62,5 @@ test("a failed query cannot be applied as a finished redesign", async ({ page })
   await page.unroute("**/api/query");
   await dialog.getByRole("button", { name: "Retry chart checks", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Apply redesign", exact: true })).toBeEnabled();
-  await expect(dialog.locator(".kpi")).toContainText("$203k");
+  await expect(dialog.locator(".kpi")).toContainText("$202.8k");
 });

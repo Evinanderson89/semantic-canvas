@@ -49,6 +49,7 @@ import { proposalIssues, proposalToExtension, proposalToYaml } from "./modeler/y
 import { driftOf, extendProposal, dashboardDriftImpact, type DriftFinding } from "./modeler/extend.ts";
 import { updateExtension, writeExtension } from "./sources/extensions.ts";
 import { proposalProblems } from "./modeler/proposals.ts";
+import { buildSpreadsheetProposal, parseCsv, parseXlsxBuffer, profileSpreadsheet, slugifySourceId, writeSpreadsheetParquet } from "./modeler/spreadsheet.ts";
 import { draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -726,6 +727,101 @@ app.post("/api/modeler/drafts/:id/publish", safe(async (req, res) => {
   const source = sources.find((s) => s.id === d.id);
   telemetry.log("audit.modeler_published", { actor: actorOf(req), id: d.id, tables: Object.keys(source?.model?.tables ?? {}).length, metrics: Object.keys(source?.model?.metrics ?? {}).length });
   res.json({ draft: summarizeDraft(published), source: source ? describeSource(source) : null, path, sources: reload.sources });
+}));
+
+const spreadsheetUploadSchema = z.object({
+  fileName: z.string().min(1).max(200),
+  format: z.enum(["csv", "xlsx"]),
+  content: z.string().min(1).max(10_500_000),
+});
+
+const spreadsheetImportSchema = spreadsheetUploadSchema.extend({
+  sourceId: z.string().regex(/^[a-z][a-z0-9-]{1,40}$/).optional(),
+  label: z.string().min(1).max(200),
+  grain: z.string().min(1).max(300),
+  timeColumn: z.string().max(128).nullable().optional(),
+  reportingLag: z.number().int().min(0).max(365).optional(),
+  choices: z.array(z.object({
+    name: z.string().min(1).max(128),
+    role: z.enum(["date", "id", "metric", "category"]),
+    label: z.string().max(200).optional(),
+  })).max(200).optional(),
+});
+
+function parseUploadedSpreadsheet(input: z.infer<typeof spreadsheetUploadSchema>) {
+  if (input.format === "xlsx") {
+    const buf = Buffer.from(input.content, "base64");
+    return parseXlsxBuffer(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
+  }
+  return parseCsv(input.content, input.fileName.replace(/\.(csv|tsv)$/i, "") || "Sheet1");
+}
+
+app.post("/api/modeler/spreadsheet/preview", safe(async (req, res) => {
+  const input = spreadsheetUploadSchema.parse(req.body ?? {});
+  const parsed = parseUploadedSpreadsheet(input);
+  const preview = profileSpreadsheet(input.fileName, parsed);
+  let candidateId = preview.sourceId;
+  let suffix = 2;
+  while (sources.some((s) => s.id === candidateId)) {
+    candidateId = `${preview.sourceId.slice(0, 32)}-${suffix++}`;
+  }
+  res.json({ ...preview, sourceId: candidateId });
+}));
+
+app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
+  const input = spreadsheetImportSchema.parse(req.body ?? {});
+  const parsed = parseUploadedSpreadsheet(input);
+  const preview = profileSpreadsheet(input.fileName, parsed);
+  let sourceId = input.sourceId ?? slugifySourceId(input.label || input.fileName);
+  let suffix = 2;
+  while (sources.some((s) => s.id === sourceId)) {
+    sourceId = `${sourceId.slice(0, 32)}-${suffix++}`;
+  }
+
+  const dataDir = process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
+  const lakeRoot = resolve(dataDir, "spreadsheets", sourceId);
+  await writeSpreadsheetParquet(lakeRoot, preview.tableName, preview.columns, parsed.rows);
+
+  const proposal = buildSpreadsheetProposal({
+    sourceId,
+    label: input.label.trim(),
+    tableName: preview.tableName,
+    rowCount: preview.rowCount,
+    grain: input.grain.trim(),
+    timeColumn: input.timeColumn ?? null,
+    reportingLag: input.reportingLag,
+    columns: preview.columns,
+    choices: input.choices,
+  });
+  const issues = proposalIssues(proposal);
+  if (issues.length) return res.status(400).json({ error: issues[0], issues });
+
+  const yamlPath = await writeAuthored(sourceId, proposalToYaml(proposal));
+  const added = await addSource({
+    id: sourceId,
+    label: input.label.trim(),
+    adapter: "duckglue",
+    model: yamlPath,
+    connectorType: "duckdb",
+    connector: { type: "duckdb", lakeRoot, poolSize: 2 },
+  });
+  if ("error" in added) return res.status(added.status).json({ error: added.error });
+
+  const source = sources.find((s) => s.id === sourceId);
+  telemetry.log("audit.spreadsheet_imported", {
+    actor: actorOf(req),
+    id: sourceId,
+    rows: preview.rowCount,
+    columns: preview.columns.length,
+    metrics: proposal.metrics.length,
+  });
+  res.json({
+    sourceId,
+    tableName: preview.tableName,
+    source: source ? describeSource(source) : null,
+    sources: added.reload.sources,
+    metrics: proposal.metrics.filter((m) => m.include).map((m) => m.name),
+  });
 }));
 
 /** Non-secret fields only, for the edit form to pre-fill -- privateKey,
