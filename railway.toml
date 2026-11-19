@@ -7,8 +7,3 @@ healthcheckPath = "/readyz"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
-
-[variables]
-SC_SERVE_UI = "true"
-SC_SANDBOX_MODE = "true"
-SC_DATA_DIR = "/tmp/semantic-canvas-sandbox"
