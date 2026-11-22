@@ -217,11 +217,11 @@ export function buildDeterministicProposal(
 }
 
 type Preview = { proposal: CanvasProposal; spec: DashboardSpec; canvas: CanvasSpec; before: DashboardSpec; expected: string; context: string; explanation: string; rationaleWarnings: RationaleIssue[]; research?: ResearchLedgerQuery[]; trace?: ResearchTraceStep[] };
-export function AiRedesign({ spec, canvas, model, available, canConfigure, onConfigure, onClose, onApply, queryContext, filtersByTile, drills, resolveFilters, resolveScopeWarnings, activeTabId, filterContext }: {
+export function AiRedesign({ spec, canvas, model, available, canConfigure, sandboxMode = false, onConfigure, onClose, onApply, queryContext, filtersByTile, drills, resolveFilters, resolveScopeWarnings, activeTabId, filterContext }: {
   activeTabId?: string; filterContext?: string;
   resolveFilters?: (spec: DashboardSpec) => Record<string, FilterSpec[]>;
   resolveScopeWarnings?: (spec: DashboardSpec) => Record<string, string[]>;
-  spec: DashboardSpec; canvas: CanvasSpec; model: Model; available: boolean; canConfigure: boolean;
+  spec: DashboardSpec; canvas: CanvasSpec; model: Model; available: boolean; canConfigure: boolean; sandboxMode?: boolean;
   onConfigure: () => void; onClose: () => void; onApply: (proposal: CanvasProposal, expected: string) => boolean;
   queryContext: string; filtersByTile: Record<string, FilterSpec[]>; drills: Record<string, DrillEntry[]>;
 }) {
@@ -332,9 +332,15 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, onCon
           ["Better comparisons", "Find charts that hide useful information. Improve their reporting periods, breakdowns and comparisons using governed metrics. Add only the context needed to understand them."],
           ["Revenue & retention drivers", "How is recurring revenue trending, what drove August's change, and how does retention compare across plans?"],
         ].map(([label, value]) => <button key={label} disabled={busy} onClick={() => setGoal(value)}>{label}</button>)}</div>
-        {!available ? <p role="status">Connect an AI provider to generate a redesign. {canConfigure ? <button className="link" onClick={onConfigure}>Configure AI</button> : "Ask your workspace administrator to configure AI."}</p>
+        {!available ? (
+          sandboxMode ? (
+            <p role="status">Public Sandbox runs in zero-key deterministic mode (no LLM calls or API keys required). Generate a governed draft below immediately, or self-host to connect Claude, OpenAI, Gemini, or a local VPC model.</p>
+          ) : (
+            <p role="status">Connect an AI provider to generate a redesign. {canConfigure ? <button className="link" onClick={onConfigure}>Configure AI</button> : "Ask your workspace administrator to configure AI."}</p>
+          )
+        )
           : <button className="primary" disabled={busy || !goal.trim()} onClick={generate}>{busy ? "Designing…" : preview ? "Generate another version" : error ? "Retry redesign" : "Show me a better dashboard"}</button>}
-        <button type="button" className="ai-redesign-deterministic" disabled={busy || !goal.trim()} onClick={generateDeterministic}>
+        <button type="button" className={!available && sandboxMode ? "primary ai-redesign-deterministic-primary" : "ai-redesign-deterministic"} disabled={busy || !goal.trim()} onClick={generateDeterministic}>
           Generate deterministic draft from prompt
         </button>
         {busy && <div role="status" className="ai-redesign-busy"><p>Reviewing the canvas and governed metrics, then preparing changes you can inspect.</p><AgenticResearchStepper /><button className="link" onClick={() => { request.current?.abort(); setBusy(false); }}>Cancel generation</button></div>}

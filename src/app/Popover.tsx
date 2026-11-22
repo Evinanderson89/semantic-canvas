@@ -16,7 +16,7 @@ export function Popover({ label, trigger, children, align = "start", className =
       if (!root.current?.contains(e.target as Node)) setOpen(false);
     };
     const escape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setOpen(false); button.current?.focus(); }
+      if (e.key === "Escape") { e.preventDefault(); setOpen(false); button.current?.focus(); }
     };
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", escape);

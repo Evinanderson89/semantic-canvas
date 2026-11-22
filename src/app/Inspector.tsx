@@ -17,7 +17,10 @@ import { TileLineageAndDriversSection } from "./TileLineageAndDrivers.tsx";
  * it writes lands on the tile spec, so it survives Copy spec and an agent can
  * set the same fields.
  */
-export function Inspector({ model, tile, queryContext = "", onChange, onClose }: {
+export function Inspector({ model, tile, queryContext = "", onChange, onClose, onExplore, onSetupDetails, onSmartDetails }: {
+  onExplore?: () => void;
+  onSetupDetails?: () => void;
+  onSmartDetails?: () => void;
   model: Model; tile: TileSpec; queryContext?: string;
   onChange: (t: TileSpec) => void; onClose: () => void;
 }) {
@@ -41,6 +44,14 @@ export function Inspector({ model, tile, queryContext = "", onChange, onClose }:
         <button className="x" aria-label="Close inspector" onClick={onClose}>✕</button>
       </div>
 
+      {(!tile.kind || tile.kind === "metric") && onExplore && <section className="ins-sec inspector-explore">
+        <button className="primary" onClick={onExplore}>Open detail dashboard</button>
+        <p className="muted sm">Open a centered dashboard of related charts using the details button. KPI values also open it.</p>
+        <div className="inspector-detail-actions">
+          {onSmartDetails && <button className="review-action" onClick={onSmartDetails}>✦ Smart-add story details</button>}
+          {onSetupDetails && <button className="review-action" onClick={onSetupDetails}>{tile.detailDashboard ? "Edit detail dashboard" : "Set up detail dashboard"}</button>}
+        </div>
+      </section>}
       {tile.kind && tile.kind !== "metric" ? (
         <>
           <Section title={tile.kind === "divider" ? "Divider" : tile.kind === "image" ? "Image" : "Text"}>
@@ -135,7 +146,7 @@ export function Inspector({ model, tile, queryContext = "", onChange, onClose }:
                       opts={[["value", "value"], ["delta", "change"], ["percent", "% change"]]} />
               )}
               <p className="muted sm">
-                {isKpi ? "Choose the baseline for the headline change. First shown uses the earliest returned period; missing baselines stay unavailable. None turns the change off."
+                {isKpi ? "Choose a comparison period. Missing comparisons stay blank."
                   : "Adds the prior period, the change and the % change alongside each measure."}
               </p>
             </Section>

@@ -105,7 +105,11 @@ export function App() {
   const [canvas, setCanvas] = useState<CanvasSpec>({ ...DEFAULT_CANVAS, locked: !session.canEdit });
   const [zoom, setZoom] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
-  const [investigating, setInvestigating] = useState<{ id: string; result: InvestigationResult } | null>(null);
+  const explorationActions = React.useRef(new Map<string, () => void>());
+  const registerExploration = useCallback((id: string, open?: () => void) => {
+    if (open) explorationActions.current.set(id, open); else explorationActions.current.delete(id);
+  }, []);
+  const [investigating, setInvestigating] = useState<{ id: string; result: InvestigationResult; initialMode?: "configure" | "smart"; modeSeq?: number; setupChanged?: boolean } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [handoff, setHandoff] = useState(false);
   const [handoffMode, setHandoffMode] = useState<PresentationMode>("dashboard");
@@ -150,7 +154,9 @@ export function App() {
   // called setAsWho/setSourceId, before this effect has re-run.
   const asWhoRef = React.useRef(asWho);
   const sourceRef = React.useRef(sourceId);
-  React.useEffect(() => {
+  // Install workspace headers before child tiles start passive query effects,
+  // including when Fast Refresh replays effects with the dashboard open.
+  React.useLayoutEffect(() => {
     const orig = window.fetch;
     window.fetch = (input: any, init: any = {}) => {
       const url = new URL(typeof input === "string" ? input : input.url ?? input.toString(), location.href);
@@ -599,7 +605,7 @@ export function App() {
     }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
   }, [freshCanvas, beginDocument]);
 
-  if (!model) return bootError ? <div className="setup-empty"><Connections sources={sources} activeId={activeSourceId} onSelect={switchSource} onRefresh={() => { refreshSources(); switchSource(""); }} principals={principals} policies={policies} /><p role="alert">{session.canAdmin ? "Connect a source to open your metric catalogue." : "No accessible source is ready. Contact your workspace administrator."}</p></div> : <div className="boot">Loading semantic layer…</div>;
+  if (!model) return bootError ? <div className="setup-empty"><Connections sources={sources} activeId={activeSourceId} sandboxMode={sandboxMode} onSelect={switchSource} onRefresh={() => { refreshSources(); switchSource(""); }} principals={principals} policies={policies} /><p role="alert">{session.canAdmin ? "Connect a source to open your metric catalogue." : "No accessible source is ready. Contact your workspace administrator."}</p></div> : <div className="boot">Loading semantic layer…</div>;
 
   const nextId = () => `t${Math.random().toString(36).slice(2, 8)}`;
   // dropPoint pushes a tile below existing content when the natural spot is
@@ -936,7 +942,7 @@ export function App() {
           <LibraryBrowser key={activeSourceId} data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} refresh={refreshSaved} folderId={libraryFolder} onFolder={setLibraryFolder} onOpen={openLibraryItem}
             onNewDashboard={folderId => { if (beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas(), folderId })) pendingFit.current = true; }} />
         ) : !dash && view === "connections" ? (
-          <Connections sources={sources} activeId={activeSourceId} onSelect={switchSource}
+          <Connections sources={sources} activeId={activeSourceId} sandboxMode={sandboxMode} onSelect={switchSource}
                        onRefresh={() => { refreshSources(); fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message)); }} principals={principals} policies={policies} />
         ) : !dash && view === "registry" ? (
           <MetricRegistry model={model} initialTable={registryTable} sourceId={activeSourceId ?? ""}
@@ -975,7 +981,6 @@ export function App() {
                 <div className="dashboard-meta">
                   <span>{dash.tiles.length} tiles</span><span aria-hidden="true">·</span>
                   <span>{prettifyModelName(model.name)}</span>
-                  <span className="masthead-pill" title="SHA-256 checks content integrity, not analytical correctness or authorship.">Snapshot with integrity checksum</span>
                   {templateId && <span title="This starter opens as a new dashboard. Save to keep your version.">· Starter copy</span>}
                   {refreshed && <span className="refresh-detail" title={`Refresh requested ${refreshed.toLocaleString()}`}>· Refresh requested {refreshed.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</span>}
                 </div>
@@ -1184,6 +1189,7 @@ export function App() {
                               crossFilters: [
                                 ...(d.crossFilters ?? []).filter((x) => x.field !== f.field), f],
                             }))}
+                            onExploreReady={registerExploration}
                             onInvestigate={result => setInvestigating({ id: t.id, result })}
                             aiAvailable={aiAvailable}
                             drill={drills[t.id]}
@@ -1281,6 +1287,20 @@ export function App() {
       }} />}
       {inspecting && (
         <Inspector model={model}
+                   onSmartDetails={session.canEdit && !canvas.locked ? () => {
+                     const open = explorationActions.current.get(selectedTile!.id);
+                     if (open) { open(); setInvestigating(current => current ? { ...current, initialMode: "smart", modeSeq: (current.modeSeq ?? 0) + 1 } : current); }
+                     else setNotice("Wait for the chart to finish loading before adding story details.", "info");
+                   } : undefined}
+                   onSetupDetails={session.canEdit && !canvas.locked ? () => {
+                     const open = explorationActions.current.get(selectedTile!.id);
+                     if (open) { open(); setInvestigating(current => current ? { ...current, initialMode: "configure", modeSeq: (current.modeSeq ?? 0) + 1 } : current); }
+                     else setNotice("Wait for the chart to finish loading before setting up its detail dashboard.", "info");
+                   } : undefined}
+                   onExplore={() => {
+                     const open = explorationActions.current.get(selectedTile!.id);
+                     if (open) open(); else setNotice("Wait for this chart to finish loading, or refresh it if its query failed.", "info");
+                   }}
                    queryContext={`${activeSourceId}:${asWho}:${refreshToken}`}
                    tile={selectedTile!}
                    onChange={(next) => commit({ ...dash!,
@@ -1304,20 +1324,32 @@ export function App() {
         <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
       <AgentQuestions />
-      {investigating && dash?.tiles.some(t => t.id === investigating.id) && <Investigation
-        key={JSON.stringify([activeSourceId, asWho, refreshToken, dash, filterValues, drills, investigating.id])}
-        source={dash.tiles.find(t => t.id === investigating.id)!} result={investigating.result} model={model}
-        filters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, dash.tiles.find(t => t.id === investigating.id)!, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, dash.tiles.find(t => t.id === investigating.id)!, dateWindow, todayOf(model), calendarOf(model))]}
-        drill={drills[investigating.id] ?? []} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`}
-        scopeWarnings={unappliedFilters(book!, dash.tiles.find(t => t.id === investigating.id)!, filterValues, model)}
-        canKeep={session.canEdit && !canvas.locked} onClose={() => setInvestigating(null)}
-        onKeep={candidate => {
-          if (!session.canEdit || canvas.locked) return;
-          const issues = validateTile(model, candidate); if (issues.length) { setNotice(issues[0].problem); return; }
-          const { id, layout, ...draft } = candidate;
-          addTile(draft, { w: Math.min(900, canvas.width - 48), h: 440 }); setInvestigating(null);
-          setNotice("Investigation added with its captured period and filters. One undo removes it.", "success");
-        }} />}
+      {investigating && dash?.tiles.some(t => t.id === investigating.id) && (() => {
+        const invTile = dash.tiles.find(t => t.id === investigating.id)!;
+        return <Investigation
+          key={JSON.stringify([activeSourceId, asWho, refreshToken, filterValues, dateWindow, drills[investigating.id] ?? [], investigating.id])}
+          source={invTile} result={investigating.result} model={model}
+          filters={[...(dash.crossFilters ?? []), ...filtersForTile(book!, invTile, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, invTile, dateWindow, todayOf(model), calendarOf(model))]}
+          drill={drills[investigating.id] ?? []} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`}
+          scopeWarnings={unappliedFilters(book!, invTile, filterValues, model)}
+          aiAvailable={aiAvailable} initialMode={investigating.initialMode} modeSeq={investigating.modeSeq} setupChanged={investigating.setupChanged}
+          dirtyDashboard={dirty} savingDashboard={saving}
+          onSaveDashboard={!sandboxMode && session.canEdit && !canvas.locked ? () => save(false, true) : undefined}
+          onConfigure={configuration => {
+            if (!session.canEdit || canvas.locked) return;
+            commit({ ...dash, tiles: dash.tiles.map(t => t.id === investigating.id ? { ...t, detailDashboard: configuration } : t) });
+            setInvestigating(current => current ? { ...current, initialMode: undefined, setupChanged: true } : current);
+          }}
+          canKeep={session.canEdit && !canvas.locked} onClose={() => setInvestigating(null)}
+          onKeep={candidate => {
+            if (!session.canEdit || canvas.locked) return;
+            const issues = validateTile(model, candidate); if (issues.length) { setNotice(issues[0].problem); return; }
+            const { id, layout, ...draft } = candidate;
+            const targetH = draft.chart === "kpi" || draft.chart === "stat" ? 190 : 440;
+            addTile(draft, { w: Math.min(900, canvas.width - 48), h: targetH }); setInvestigating(null);
+            setNotice("Detail view added with its captured period and filters. One undo removes it.", "success");
+          }} />;
+      })()}
       {handoff && dash && <ReviewHandoff canEdit={session.canEdit} activeTabId={activeTabId} canSave={session.canEdit && !saving} initialMode={handoffMode} key={`${activeSourceId}:${asWho}:${refreshToken}:${activeTabId}:${draftKey.current}:${presentationContentKey(dash)}:${JSON.stringify([filterValues, drills])}`} spec={dash} canvas={canvas} model={model} dirty={dirty}
         evidenceScope={JSON.stringify({ source: activeSourceId, principal: asWho, user: session.user?.id, policy: session.policy })}
         queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills}
@@ -1331,7 +1363,7 @@ export function App() {
           if (canvas.locked) changeCanvas({ ...canvas, locked: false });
           setAiRedesign(true);
         } : undefined} />}
-      {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify([filterValues, dateWindow])} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, [...filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
+      {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify([filterValues, dateWindow])} sandboxMode={sandboxMode} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, [...filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
         resolveScopeWarnings={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, unappliedFilters(proposed, t, filterValues, model)]))}
         onClose={() => setAiRedesign(false)} onConfigure={() => { setAiRedesign(false); setView("connections"); }}
         queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, [...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))}

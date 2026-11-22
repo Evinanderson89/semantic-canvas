@@ -68,8 +68,12 @@ function EvidenceWarning({ message, label, onInspect, title }: { message: string
 }
 
 function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCrossFilter,
-                     drill, onDrill, onDrillUp, aiAvailable, queryContext, onReadiness, scopeWarnings, onInvestigate, presentation = false }: {
+                     drill, onDrill, onDrillUp, aiAvailable, queryContext, onReadiness, scopeWarnings, onInvestigate, onExploreReady, explanationContext, showExplain = false, embedded = false, presentation = false }: {
   presentation?: boolean;
+  embedded?: boolean;
+  showExplain?: boolean;
+  explanationContext?: string;
+  onExploreReady?: (id: string, open?: () => void) => void;
   onInvestigate?: (result: InvestigationResult) => void;
   onReadiness?: (id: string, state: Readiness) => void;
   scopeWarnings?: string[];
@@ -216,6 +220,14 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     readiness.current?.(spec.id, result);
   }, [state, queryKey, kindOf, renderKey, rendered, spec.id, dataFindings, evidenceSummary, evidenceDigest.digest, evidenceDigest.pending]);
 
+  const investigate = onInvestigate && state.status === "ok" && state.key === queryKey ? () => onInvestigate({ columns: state.columns, rows: state.rows }) : undefined;
+
+  const exploreRef = useRef(investigate); exploreRef.current = investigate;
+  useEffect(() => {
+    onExploreReady?.(spec.id, investigate ? () => exploreRef.current?.() : undefined);
+    return () => onExploreReady?.(spec.id, undefined);
+  }, [onExploreReady, spec.id, queryKey, !!investigate]);
+
   // Non-data tiles: no query, no chart inference, editable in place.
   if (kindOf !== "metric") {
     const commit = (text: string) => onUpdate?.({ ...spec, text });
@@ -299,8 +311,6 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
   }
   const title = spec.title ?? spec.metrics.map((m) => metricOf(model, m)?.label ?? m).join(", ");
 
-  const investigate = onInvestigate && state.status === "ok" && state.key === queryKey ? () => onInvestigate({ columns: state.columns, rows: state.rows }) : undefined;
-
   const runExplain = () => {
     explainRequest.current?.abort();
     const ac = new AbortController(); explainRequest.current = ac;
@@ -310,7 +320,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       body: JSON.stringify({
         title, metrics: spec.metrics, dimensions, where, compare: query.compare,
         columns: state.columns, rows: state.rows,
-        scopeNotes: dataFindings.map(f => `${f.title}: ${f.evidence}`),
+        scopeNotes: [...dataFindings.map(f => `${f.title}: ${f.evidence}`), ...(explanationContext ? [explanationContext] : []), ...(spec.evidence?.note ? [spec.evidence.note] : [])],
       }),
     }).then(readResponse).then((d) => {
       if (ac.signal.aborted) return;
@@ -330,7 +340,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     setSpreadsheetBusy(true); setExportError("");
     try {
       await downloadSpreadsheet(`${slugForFilename(title)}${state.truncated ? "-limited-window" : ""}.xlsx`, state.columns, state.rows, [
-        ["Chart", title], ["Semantic model", model.name], ["Adapter", model.source],
+        ["Chart", title], ["Related-view context", spec.evidence?.note ?? "None"], ["Semantic model", model.name], ["Adapter", model.source],
         ["Connection", state.source?.label ?? "Not reported by this query"],
         ["Connection ID", state.source?.id ?? "Not reported by this query"],
         ["Query principal", state.principal ?? "None reported by this query"],
@@ -465,7 +475,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
       body: JSON.stringify({
         title, metrics: spec.metrics, dimensions, where, compare: query.compare,
         columns: state.columns, rows: state.rows,
-        scopeNotes: dataFindings.map(f => `${f.title}: ${f.evidence}`),
+        scopeNotes: [...dataFindings.map(f => `${f.title}: ${f.evidence}`), ...(explanationContext ? [explanationContext] : []), ...(spec.evidence?.note ? [spec.evidence.note] : [])],
       }),
     }).then(readResponse).then((d) => {
       if (ac.signal.aborted) return;
@@ -473,15 +483,24 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     }).catch((e) => { if (!ac.signal.aborted) setAgentTips({ status: "error", text: aiError(e) }); });
   };
 
+  const detailTooltip = spec.detailDashboard
+    ? `Open detail dashboard: ${spec.detailDashboard.title} (${spec.detailDashboard.views.length} views)`
+    : "Open detail dashboard";
+
   return (
-    <div className={"tile" + (kind === "stat" ? " tile-stat" : "")} ref={tileRef} style={{ background: tileFill(fmt),
-                                   borderColor: fmt.border ? undefined : "transparent" }}>
-      {spec.evidence && <div className="evidence-origin" title={`${spec.evidence.period}. Scope captured ${spec.evidence.capturedAt}. Live values; further filtering may narrow this scope.`}>Evidence from {spec.evidence.sourceTitle} · captured scope</div>}
+    <div className={"tile" + (kind === "stat" ? " tile-stat" : "") + (embedded ? " tile-embedded" : "")} ref={tileRef} style={{ background: embedded ? "transparent" : tileFill(fmt),
+                                   borderColor: embedded || !fmt.border ? "transparent" : undefined }}>
+      {spec.evidence?.note && <p className="evidence-note">{spec.evidence.note}</p>}
+      {spec.evidence && <div className="evidence-origin" title={`${spec.evidence.period}. Scope captured ${spec.evidence.capturedAt}. Live values; further filtering may narrow this scope.`}>Evidence from {spec.evidence.sourceTitle} · {spec.evidence.period} · captured scope</div>}
       {!!scopeWarnings?.length && <EvidenceWarning message={`Not filtered by ${scopeWarnings.join(", ")}`} label="Inspect filter scope" onInspect={() => setEvidenceOpen(true)} />}
       {kind !== "kpi" && kind !== "table" && spec.compare && spec.compare !== "none" && spec.compareShow && spec.compareShow !== "value" && <div className="result-warning">{showingPercentChange ? "Percentage change" : "Change"} vs. {spec.compare === "yoy" ? "same period last year" : "prior period"}</div>}
       {kind !== "kpi" && (
-        <header>
-          {editingTitle && !locked && onUpdate ? (
+        <header className={embedded ? "embedded-tile-bar" : undefined}>
+          {embedded ? (
+            showExplain && aiAvailable ? (
+              <button type="button" className="link embedded-explain-btn" disabled={!currentResult || state.status !== "ok" || explain?.status === "loading"} onClick={runExplain}>Explain this view with AI</button>
+            ) : <span />
+          ) : editingTitle && !locked && onUpdate ? (
             <input
               className="tile-title-input"
               aria-label="Edit tile title"
@@ -525,9 +544,9 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
             scopedBy(state.rlsApplied, session?.policy)?.full,
             state.partial?.start || state.partial?.end ? `Partial ${state.partial.start && state.partial.end ? "first and last" : state.partial.start ? "first" : "last"} ${grain ?? "period"} left out.` : null,
           ].filter(Boolean).join("\n")} onPointerDown={e => e.stopPropagation()} onClick={() => setEvidenceOpen(true)}>ⓘ</button>}
-          {investigate && <button className={"investigate-trigger" + (kind === "stat" ? " compact" : "")} aria-label="Investigate this" title="Investigate this" onPointerDown={e => e.stopPropagation()} onClick={investigate}>{kind === "stat" ? <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg> : "Investigate this"}</button>}
-          <ChartActivityButtons tileId={spec.id} />
-          <TileActions onInspect={() => setEvidenceOpen(true)} sql={!locked ? state.sql : undefined}
+          {investigate && <button className={"investigate-trigger" + (kind === "stat" ? " compact" : "")} aria-label="Open detail dashboard" title={detailTooltip} onPointerDown={e => e.stopPropagation()} onClick={investigate}>{kind === "stat" ? <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg> : "Open detail dashboard"}</button>}
+          {!embedded && <ChartActivityButtons tileId={spec.id} />}
+          <TileActions onInspect={() => setEvidenceOpen(true)} sql={(!locked || session?.canEdit) && state.status === "ok" ? state.sql : undefined}
                        onRemove={!locked ? () => onRemove(spec.id) : undefined}
                        onExplain={aiAvailable && state.status === "ok" ? runExplain : undefined}
                        onBeautify={!locked && state.status === "ok" ? runBeautify : undefined}
@@ -535,6 +554,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
           </div>
         </header>
       )}
+      {!embedded && showExplain && aiAvailable && <button className="review-action investigation-ai" disabled={!currentResult || state.status !== "ok" || explain?.status === "loading"} onClick={runExplain}>Explain this view with AI</button>}
       {kind === "kpi" && timeDimIndex < 0 && <div className="kpi-activity"><ChartActivityButtons tileId={spec.id} /></div>}
       {kind === "kpi" && connected && <span className="ms mono data-as-of kpi-as-of" title={`${connected.provenance.source}, loaded by ${connected.provenance.loadedBy}`}>{dataAsOf(connected)}</span>}
       {currentResult && state.status === "ok" && state.truncated && <EvidenceWarning message={`${state.window ? "Latest window" : "Limited results"} · ${state.limit} rows · export is limited`} title={state.warnings?.join(" ")} label="Inspect result limit" onInspect={() => setEvidenceOpen(true)} />}
@@ -547,7 +567,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         onExportCsv={currentResult && state.status === "ok" ? exportCsv : undefined}
         onExportSpreadsheet={currentResult && state.status === "ok" ? exportSpreadsheet : undefined}
         exporting={spreadsheetBusy} exportError={exportError}
-        sql={!locked && state.key === queryKey && state.status === "ok" ? state.sql : undefined} onClose={() => setEvidenceOpen(false)} />}
+        sql={(!locked || session?.canEdit) && state.key === queryKey && state.status === "ok" ? state.sql : undefined} onClose={() => setEvidenceOpen(false)} />}
       {beautifyOpen && (
         <FloatingPanel anchor={tileRef} anchorTop className="explain-pop beautify-pop" role="dialog" aria-label="Chart design review" focusOnOpen onDismiss={closeReview}>
           <div className="explain-head">
@@ -629,7 +649,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
             <span>Explain</span>
             <button className="icon" onClick={closeExplain} aria-label="Close">✕</button>
           </div>
-          {explain.status === "loading" && <p className="explain-body loading">Thinking…</p>}
+          {explain?.status === "loading" && <p className="explain-body loading">Thinking…</p>}
           {explain.status === "error" && <p className="explain-body error">{explain.text}</p>}
           {explain.status === "ok" && <div className="explain-body">{renderMarkdown(explain.text)}</div>}
         </FloatingPanel>
@@ -660,7 +680,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         )}
         {currentResult && state.status === "ok" && !((state.rows?.length ?? 0) === 0 && (state.partial?.start || state.partial?.end)) && (
           plotIssue ? <div className="chart-err">{plotIssue}</div> : kind === "kpi" && kpiTimeDimIndex >= 0
-            ? <Kpi label={title} actions={<>{investigate && <button className="investigate-trigger compact" aria-label="Investigate this" title="Investigate this" onPointerDown={e => e.stopPropagation()} onClick={investigate}><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg></button>}<button className="link" aria-label="Metric definition and scope" onClick={() => setEvidenceOpen(true)}>ⓘ</button><ChartActivityButtons tileId={spec.id} /></>} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
+            ? <Kpi label={title} actions={<>{investigate && <button className="investigate-trigger compact" aria-label="Open detail dashboard" title={detailTooltip} onPointerDown={e => e.stopPropagation()} onClick={investigate}><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12 12 4.5 4.5" /></svg></button>}<button className="link" aria-label="Metric definition and scope" onClick={() => setEvidenceOpen(true)}>ⓘ</button><ChartActivityButtons tileId={spec.id} /></>} grain={grain} direction={metricOf(model, spec.metrics[0])?.direction}
                    previous={query.compare && query.compare !== "none" ? numericValue(state.rows?.at(-1)?.[state.columns.indexOf(`${spec.metrics[0]}__prev`)]) : undefined}
                    comparison={cardComparison({ ...spec, dimensions })}
                    onComparison={onUpdate && !locked ? mode => onUpdate(withCardComparison(spec, mode)) : undefined}
@@ -681,7 +701,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
                    }
                    percent={fmt.number === "percent"}
                    onRename={onUpdate && !locked ? (next) => onUpdate({ ...spec, title: next }) : undefined}
-                   onDeltaClick={investigate}
+                   onDeltaClick={investigate} onValueClick={investigate}
                    onOptions={onUpdate && !locked ? (spark) => onUpdate({ ...spec, spark }) : undefined} />
           : kind === "stat" || kind === "kpi"
             ? <Stat value={state.rows?.[0]?.[state.columns.indexOf(spec.metrics[0])]} format={makeFormatter(fmt)} />

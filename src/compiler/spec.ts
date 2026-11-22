@@ -55,7 +55,9 @@ export interface TileSpec {
    *  else: as a plain, self-contained JSON field that saves with the dashboard. */
   imageData?: string;
   /** A kept investigation is live data queried at a captured reporting scope. */
-  evidence?: { sourceTileId: string; sourceTitle: string; question: string; period: string; capturedAt: string };
+  evidence?: { sourceTileId: string; sourceTitle: string; question: string; period: string; capturedAt: string; note?: string };
+  /** A centered detail dashboard opened from this chart; IDs reference governed exploration views. */
+  detailDashboard?: { title: string; subtitle?: string; views: string[]; layout: "grid" | "focus" };
   metrics: string[];
   /** "month:event_date" for a time grain, "dim_users.country" for a join. */
   dimensions: string[];

@@ -78,6 +78,8 @@ export interface Metric {
   /** Declared native reporting grains. Omitted means the expression owns rollup semantics. */
   timeGrains?: TimeGrain[];
   timeDimension?: string;
+  /** Authored paths to related evidence; never inferred from a metric's name. */
+  explorations?: { label: string; metric: string; dimension: string; timeDimension: string; description: string; chart?: "waterfall" | "bar" }[];
   /** Always-on filter, e.g. status = 'active'. */
   filter?: string | null;
   synonyms: string[];
@@ -392,6 +394,49 @@ export function ratioSideDimensions(model: Model, ratio: Metric, input: Metric, 
     aligned.push(`${grain}:${date}`);
   }
   return aligned;
+}
+
+/** Align a cross-table ratio's dimension filters onto one input metric's base table,
+ * mapping filters on the numerator's primary reporting date onto the input's own date. */
+export function ratioSideWhere<T extends { source: "dimension" | "metric"; field: string }>(
+  model: Model,
+  ratio: Metric,
+  input: Metric,
+  where: T[] | undefined,
+): T[] | null {
+  if (!where?.length) return [];
+  const num = metricOf(model, ratio.numerator ?? "");
+  const rawNumTime = num?.timeDimension ?? timeColumnOf(model, num?.baseTable ?? null);
+  const numTime = rawNumTime ? (rawNumTime.includes(".") ? rawNumTime : `${num.baseTable}.${rawNumTime}`) : null;
+  const out: T[] = [];
+  for (const f of where) {
+    if (f.source === "metric") { out.push(f); continue; }
+    const qualified = f.field.includes(".") ? f.field : `${ratio.baseTable}.${f.field}`;
+    if (numTime && qualified === numTime) {
+      const rawSideTime = input.baseTable === num.baseTable ? numTime : (input.timeDimension ?? timeColumnOf(model, input.baseTable));
+      if (!rawSideTime) return null;
+      const sideTime = rawSideTime.includes(".") ? rawSideTime : `${input.baseTable}.${rawSideTime}`;
+      out.push({ ...f, field: sideTime });
+      continue;
+    }
+    if (!fieldReachable(model, input.baseTable, f.field)) return null;
+    out.push(f);
+  }
+  return out;
+}
+
+/** True only when segment values add cleanly across a mutually exclusive partition
+ * (excludes ratios, divisions, averages, and COUNT(DISTINCT) measures). */
+export function isAdditiveMetric(model: Model, m: Metric | undefined): boolean {
+  if (!m) return false;
+  const t = metricType(m);
+  if (t === "ratio" || t === "cumulative") return false;
+  if (t === "derived") {
+    if (/\//.test(m.expression)) return false;
+    const comps = metricComponents(model, m);
+    return comps.length > 0 && comps.every((c) => isAdditiveMetric(model, c));
+  }
+  return /^\s*(sum|count)\s*\(/i.test(m.expression) && !/\bdistinct\b|\bavg\s*\(|\//i.test(m.expression);
 }
 
 /** Problems with a computed metric's definition, in words; null when it is sound. */

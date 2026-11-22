@@ -14,7 +14,7 @@ type Point = { x: unknown; y: number };
  * wants a zero baseline, a retention ratio wants a tight domain or it reads as
  * a flat line.
  */
-export function Kpi({ label, metricSlug, series, options, onOptions, format, grain, previous, comparison, onComparison, direction = "neutral", percent = false, actions, notice, precisionLimited = false, partialWindow, unverifiedPeriods, onRename, onDeltaClick }: {
+export function Kpi({ label, metricSlug, series, options, onOptions, format, grain, previous, comparison, onComparison, direction = "neutral", percent = false, actions, notice, precisionLimited = false, partialWindow, unverifiedPeriods, onRename, onDeltaClick, onValueClick }: {
   metricSlug?: string;
   comparison?: CardComparison; onComparison?: (comparison: CardComparison) => void;
   precisionLimited?: boolean;
@@ -30,6 +30,7 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
   format?: (n: number) => string;
   onRename?: (next: string) => void;
   onDeltaClick?: () => void;
+  onValueClick?: () => void;
 }) {
   const o: SparkOptions = { ...DEFAULT_SPARK, ...(options ?? {}) };
   const mode = comparison ?? o.compare;
@@ -193,7 +194,9 @@ export function Kpi({ label, metricSlug, series, options, onOptions, format, gra
       </div>
 
       <div className="kpi-value-row">
-        <div className="kpi-value">{latest == null ? "—" : fmt(latest)}</div>
+        <div className="kpi-value">{onValueClick && latest != null
+          ? <button className="kpi-explore-value" aria-label={`Open ${label} detail dashboard`} title="Open detail dashboard" onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onValueClick(); }}>{fmt(latest)}</button>
+          : latest == null ? "—" : fmt(latest)}</div>
         <div className="kpi-delta">
           {mode === "none" ? <span className="flat">comparison off</span> : coverageLimited ? <span className="flat" title="Review the ratio's input dates before comparing these periods.">input coverage · no comparison</span> : partialComparison ? <span className="flat" title="Use complete reporting periods or a finer grain before comparing this selected window.">partial period · no comparison</span> : precisionLimited ? <span className="flat" title="Displayed values may round together. Inspect the data check and compare the exact returned values in the warehouse.">precision limited</span> : delta == null ? <span className="flat" title={mode === "first" && series.length < 2 ? "At least two shown periods are needed to compare with the first." : "A valid comparison value is unavailable."}>no comparison</span> : (
             <>

@@ -33,7 +33,7 @@ export function FloatingPanel({ anchor, align = "start", anchorTop = false, onDi
       if (!panel.contains(e.target as Node) && !anchor.current?.contains(e.target as Node)) dismiss.current?.();
     };
     const escape = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && dismiss.current) { e.stopPropagation(); dismiss.current(); previous?.focus({ preventScroll: true }); }
+      if (e.key === "Escape" && dismiss.current) { e.preventDefault(); e.stopPropagation(); dismiss.current(); previous?.focus({ preventScroll: true }); }
     };
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", escape);

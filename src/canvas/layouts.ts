@@ -60,7 +60,7 @@ const chartHeightFloor = (t: TileSpec) => t.chart !== "table" && (t.metrics.leng
 function noteHeight(tile: TileSpec, width: number): number {
   const format = mergeTextFormat(tile.format);
   const usable = Math.max(1, width - 40);
-  const capacity = Math.max(1, Math.floor(usable / (format.textSize * .68)));
+  const capacity = Math.max(1, Math.floor(usable / (format.textSize * .55)));
   const lines = (tile.text ?? "").split("\n").reduce((sum, paragraph) => {
     let used = 0, count = 1;
     for (const word of paragraph.split(/\s+/)) {
@@ -203,8 +203,9 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
     const packed: TileSpec[] = [];
     let localY = 0;
     if (heading) {
-      packed.push({ ...heading, layout: { ...heading.layout, x: PAD, y: localY, w: avail, h: Math.max(48, heading.layout.h) } });
-      localY += Math.max(48, heading.layout.h) + 12;
+      packed.push({ ...heading, layout: { ...heading.layout, x: PAD, y: localY, w: avail, h: Math.max(48, heading.layout.h,
+        noteHeight({ ...heading, text: heading.text ?? heading.title ?? "" }, avail - 64)) } });
+      localY += packed[0].layout.h + 12;
     }
     for (let i = 0; i < body.length;) {
       const isKpi = isKpiTile(body[i]);
@@ -214,11 +215,16 @@ export function applyLayout(name: LayoutName, tiles: TileSpec[], width: number, 
       let row: TileSpec[];
       if (isKpi) {
         if (model) { const priority = (t: TileSpec) => Math.max(0, ...t.metrics.map(m => metricOf(model, m)?.importance ?? 0)); run.sort((a, b) => priority(b) - priority(a)); }
-        const cols = Math.max(1, Math.min(purposeful ? 3 : Infinity, Math.floor((avail + GAP) / (180 + GAP))));
+        // In a spacious story layout, give interactive KPIs wider columns and taller
+        // room for wrapped labels, data checks, and sparklines; compact executive/grid
+        // rows keep the 180px minimum so three KPIs fit side-by-side at 640px.
+        const minWidth = name === "story" && run.some(t => t.chart === "kpi") ? 240 : 180;
+        const rowHeight = name === "story" && run.some(t => t.chart === "kpi") ? 224 : 156;
+        const cols = Math.max(1, Math.min(purposeful ? 3 : Infinity, Math.floor((avail + GAP) / (minWidth + GAP))));
         row = run.map((t, j) => {
           const count = Math.min(cols, run.length - Math.floor(j / cols) * cols);
           const w = Math.floor((avail - GAP * (count - 1)) / count);
-          return { ...t, layout: { ...t.layout, x: PAD + (j % cols) * (w + GAP), y: Math.floor(j / cols) * (156 + GAP), w, h: 156 } };
+          return { ...t, layout: { ...t.layout, x: PAD + (j % cols) * (w + GAP), y: Math.floor(j / cols) * (rowHeight + GAP), w, h: rowHeight } };
         });
       } else {
         row = arrange(run.map(t => {

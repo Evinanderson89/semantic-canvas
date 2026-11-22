@@ -9,6 +9,7 @@ import type { ConnectedProvenance } from "../semantic/model.ts";
 import { UnreviewedBadge, dataAsOf } from "./connected.tsx";
 import { PublishDialog } from "./PublishDialog.tsx";
 import { PrivateKeyInput } from "./PrivateKeyInput.tsx";
+import { isRefreshableSpreadsheetSource } from "../security/sandbox.ts";
 
 export interface SourceInfo {
   id: string; label: string; adapter: string;
@@ -22,8 +23,8 @@ export interface Principal { id: string; name: string }
 
 type FormMode = { kind: "add" } | { kind: "edit"; id: string } | null;
 
-export function Connections({ sources, activeId, onSelect, onRefresh, principals, policies }: {
-  sources: SourceInfo[]; activeId: string; onSelect: (id: string) => void;
+export function Connections({ sources, activeId, sandboxMode = false, onSelect, onRefresh, principals, policies }: {
+  sources: SourceInfo[]; activeId: string; sandboxMode?: boolean; onSelect: (id: string) => void;
   onRefresh: () => void; principals: Principal[]; policies: RlsPolicy[];
 }) {
   const { canAdmin } = useSession();
@@ -88,9 +89,18 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
     <div className="explore">
       <h1>Connections</h1>
       <p className="lede">Connect your semantic layer, check your workspace, and bring your team’s metrics together.</p>
-      {canAdmin && <WorkspaceSetup refreshKey={sources} />}
-      {canAdmin && <ClaudeConnection key={`claude:${activeId}`} source={activeId} label={sources.find(s => s.id === activeId)?.label ?? "your source"} />}
-      {canAdmin && <ChatgptConnection key={`chatgpt:${activeId}`} source={activeId} label={sources.find(s => s.id === activeId)?.label ?? "your source"} principals={principals} />}
+      {sandboxMode && (
+        <div className="sandbox-readonly-note" role="status">
+          <strong>Public Sandbox (Read-Only Connections)</strong>
+          <p>
+            Connecting private PostgreSQL, BigQuery, or Snowflake warehouses, Claude/ChatGPT MCP tunnels, or saving AI provider keys is disabled on this shared demo.
+            Self-host locally in 60 seconds with <code className="mono">docker compose up -d</code> to connect your own warehouse, or use <strong>Drop Excel / CSV</strong> in the top banner to analyze a spreadsheet right now.
+          </p>
+        </div>
+      )}
+      {canAdmin && !sandboxMode && <WorkspaceSetup refreshKey={sources} />}
+      {canAdmin && !sandboxMode && <ClaudeConnection key={`claude:${activeId}`} source={activeId} label={sources.find(s => s.id === activeId)?.label ?? "your source"} />}
+      {canAdmin && !sandboxMode && <ChatgptConnection key={`chatgpt:${activeId}`} source={activeId} label={sources.find(s => s.id === activeId)?.label ?? "your source"} principals={principals} />}
 
       <div className="ex-head-row">
         <h4 className="ex-h" style={{ margin: 0 }}>Sources</h4>
@@ -112,7 +122,7 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
               {s.status === "error" && <span className="active-badge err">Unavailable</span>}
               {canAdmin && form === null && confirmRemove !== s.id && (
                 <>
-                  {s.connector?.toLowerCase().includes("duckdb") && s.id !== "sample-warehouse" && (
+                  {isRefreshableSpreadsheetSource(s) && (
                     <label className="link conn-action" style={{ cursor: "pointer" }} title="Upload an updated .xlsx or .csv file to refresh this source in place">
                       {refreshingSheet === s.id ? "Refreshing…" : "↻ Refresh sheet"}
                       <input
@@ -127,10 +137,14 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
                       />
                     </label>
                   )}
-                  <button className="link conn-action"
-                          onClick={() => setForm({ kind: "edit", id: s.id })}>Edit</button>
-                  <button className="link conn-action"
-                          onClick={() => { setConfirmRemove(s.id); setRemoveError(null); }}>Remove</button>
+                  {!sandboxMode && (
+                    <>
+                      <button className="link conn-action"
+                              onClick={() => setForm({ kind: "edit", id: s.id })}>Edit</button>
+                      <button className="link conn-action"
+                              onClick={() => { setConfirmRemove(s.id); setRemoveError(null); }}>Remove</button>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -165,7 +179,7 @@ export function Connections({ sources, activeId, onSelect, onRefresh, principals
         {sources.length === 0 && <div className="empty">No sources configured.</div>}
       </div>
 
-      {canAdmin && <>
+      {canAdmin && !sandboxMode && <>
       <div className="ex-head-row">
         <h4 className="ex-h" style={{ margin: 0 }}>
           {form?.kind === "edit" ? "Edit source" : "Add a source"}

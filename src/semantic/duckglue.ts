@@ -73,6 +73,11 @@ export const duckglueAdapter: SemanticAdapter = {
         ...(m.metric !== undefined ? { metric: String(m.metric) } : {}),
         ...(m.window !== undefined ? { window: z.number().int().min(1).parse(m.window) } : {}),
         timeGrains, timeDimension,
+        explorations: m.explorations === undefined ? undefined : z.array(z.object({
+          label: z.string().min(1), metric: z.string().min(1), dimension: z.string().min(1),
+          timeDimension: z.string().min(1), description: z.string().min(1),
+          chart: z.enum(["waterfall", "bar"]).optional(),
+        }).strict()).max(8).parse(m.explorations),
         unit: m.unit === undefined ? undefined : z.enum(["currency", "percent", "number", "months", "days", "seconds", "ratio"]).parse(m.unit),
         direction: m.direction === undefined ? undefined : z.enum(["higher", "lower", "neutral"]).parse(m.direction),
         importance: m.importance === undefined ? undefined : z.number().min(0).max(100).parse(m.importance),

@@ -1,5 +1,5 @@
 import type { Connector } from "../connectors/types.ts";
-import { metricOf, joinPath, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, ratioSideDimensions, computedMetricIssue, calendarOf, nativePeriod, periodRollupAllowed, type Metric, type Model } from "../semantic/model.ts";
+import { metricOf, joinPath, fieldReachable, isTemporal, metricGrainIssue, joinPairs, metricComponents, metricType, isCrossTableRatio, ratioSideDimensions, ratioSideWhere, computedMetricIssue, calendarOf, nativePeriod, periodRollupAllowed, type Metric, type Model } from "../semantic/model.ts";
 import type { FilterSpec, TileSpec, ValidationIssue } from "./spec.ts";
 import { issuesText } from "./issueText.ts";
 
@@ -67,6 +67,11 @@ export function validateTile(model: Model, tile: TileSpec, options: { role?: str
         }
         if (!table) issues.push({ tile: id, problem: `${m.label} crosses two tables: name the dimension's table (${dim} → table.${dim})` });
         else if (table !== den.baseTable && "error" in joinPath(model, den.baseTable, table)) issues.push({ tile: id, problem: `${(joinPath(model, den.baseTable, table) as { error: string }).error}, which ${m.label}'s denominator needs` });
+      }
+      for (const f of tile.where ?? []) {
+        if (f.source === "dimension" && (!ratioSideWhere(model, m, m, [f]) || !ratioSideWhere(model, m, den, [f]))) {
+          issues.push({ tile: id, problem: `the filter on ${f.field} cannot be applied to both ${m.baseTable} and ${den.baseTable}, which ${m.label} needs` });
+        }
       }
     }
   }
@@ -331,9 +336,9 @@ function compileAcross(model: Model, conn: Connector, tile: TileSpec, ratio: Met
   };
   for (const f of tile.where ?? []) {
     if (f.source === "metric") continue;
-    if (!fieldReachable(model, den.baseTable, f.field) || !fieldReachable(model, num.baseTable, f.field)) throw new Error(`the filter on ${f.field} cannot be applied to both ${num.baseTable} and ${den.baseTable}, which ${ratio.label} needs`);
+    if (!ratioSideWhere(model, ratio, num, [f]) || !ratioSideWhere(model, ratio, den, [f])) throw new Error(`the filter on ${f.field} cannot be applied to both ${num.baseTable} and ${den.baseTable}, which ${ratio.label} needs`);
   }
-  const side = (m: Metric, name: string) => compileCore(model, conn, { ...tile, metrics: [m.name], dimensions: sideDims(m) }, [{ metric: m, alias: name }], true);
+  const side = (m: Metric, name: string) => compileCore(model, conn, { ...tile, metrics: [m.name], dimensions: sideDims(m), where: ratioSideWhere(model, ratio, m, tile.where) ?? undefined }, [{ metric: m, alias: name }], true);
   const n = side(num, "__num"), d = side(den, "__den");
   // Both sides group by the same dimensions in the same order; only a time column's alias may differ.
   const dims = (tile.dimensions ?? []).map((dim, i) => {

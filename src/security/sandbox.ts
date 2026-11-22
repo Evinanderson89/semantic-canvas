@@ -10,6 +10,17 @@
 
 export const SANDBOX_MAX_SPREADSHEET_SOURCES = 10;
 
+const BUILTIN_SAMPLE_SOURCE_IDS = new Set(["sample-warehouse", "duckglue-local"]);
+
+/**
+ * Returns true when a listed source is eligible for an in-place spreadsheet
+ * upload refresh in the Connections UI (DuckDB-backed uploaded sheets, never
+ * the bundled sample warehouse).
+ */
+export function isRefreshableSpreadsheetSource(source: { id: string; connector: string | null }): boolean {
+  return Boolean(source.connector?.toLowerCase().includes("duckdb")) && !BUILTIN_SAMPLE_SOURCE_IDS.has(source.id);
+}
+
 export function isSandboxMode(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = String(env.SC_SANDBOX_MODE ?? "").trim().toLowerCase();
   return raw === "true" || raw === "1" || raw === "yes";

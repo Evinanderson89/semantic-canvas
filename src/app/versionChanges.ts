@@ -26,6 +26,7 @@ function fieldDisplay(field: string, value: unknown): string {
 }
 
 const tileFields: Record<Exclude<keyof TileSpec, "id" | "spark">, [VersionChangeGroup, string]> = {
+  detailDashboard: ["Story and content", "Detail dashboard"],
   metrics: ["Data and scope", "Metrics"], dimensions: ["Data and scope", "Dimensions and time grain"],
   where: ["Data and scope", "Chart filters"], limit: ["Data and scope", "Row limit"],
   compare: ["Data and scope", "Comparison period"], compareShow: ["Data and scope", "Comparison display"],

@@ -1,72 +1,76 @@
-# Semantic Canvas (`v0.2.0`)
+# Semantic Canvas (`v0.3.5`)
 
-An open-source canvas for building dashboards, editorial stories, and executive briefs from governed metrics. Connect a supported semantic model (`duckglue`, `dbt`, `cube`, or `snowflake-semantic`), start with a suggested dashboard or an empty canvas, and arrange charts, KPIs, notes, headings, and images into a cohesive narrative.
+**Open-source governed BI studio (MIT)** that turns spreadsheets, SQL warehouses, or semantic YAML (`duckglue`, `dbt`, `cube`, `snowflake-semantic`) into parameterized SQL and three synchronized publication views: an interactive **Dashboard**, a narrative **Executive Story**, and a **Broadside Infographic**.
 
-**Open-source `v0.2.0` with opt-in company mode.** Try the local sample immediately, or self-host a company workspace with OpenID Connect sign-in, real-time IdP session revalidation, SCIM 2.0 user/group provisioning, server-enforced roles, and source/row access.
+- **Try it live (zero install):** [Public Sandbox on Railway](https://sandbox-production-357b5956.up.railway.app) (pre-loaded DuckDB sample warehouse + drop-in `.xlsx`/`.csv` upload)
+- **Interactive Tour & Architecture:** [semanticcanvas.ai](https://semanticcanvas.ai)
+- **Self-host in 60 seconds:** `docker compose up --build -d`
 
-## The Broadside Design Philosophy & Three Publication Views
+![Semantic Canvas v0.3.5 Dashboard Overview](docs/images/dashboard-overview.png)
+*Interactive Broadside dashboard (`$202.8k` Ending MRR, `102.8%` NRR, `$299.51` CAC) compiled locally against the sample DuckDB warehouse with partial-period hatching, goal thresholds, Global Date Window filtering, and 0 AI keys required.*
 
-Semantic Canvas is built around the **Broadside ("honesty made visible")** design philosophy: analytical interfaces should read with the typographic hierarchy, provenance clarity, and editorial discipline of a broadsheet publication rather than a cluttered grid of widgets. Every figure discloses its scope, partial periods are hatched rather than disguised, and every AI-generated rationale is checked against calculated warehouse numbers before you apply it.
+![Semantic Canvas v0.3.5 Broadside Infographic Mode](docs/images/infographic-broadside.png)
+*One click converts the exact same governed queries and filters into a Broadside Infographic with Warm Broadsheet, Cobalt Blueprint, or Obsidian Dark themes, vector SVG export, PNG export, Print/PDF, and SHA-256 snapshot integrity checks.*
 
-Move seamlessly across three synchronized views of the same governed document:
+## Broadside Design Philosophy ("Honesty Made Visible")
 
-- **Dashboard:** A spatial, multi-tile freeform canvas with smart arrangement, section structure, cross-tab filter wiring, target callouts, and interactive drill-downs.
-- **Story:** A publication-grade editorial brief with serif narrative headlines, consolidated reporting-scope and provenance margin notes, embedded interactive figures alongside executive prose, and a cryptographic SHA-256 verification footer.
-- **Infographic:** A high-density executive broadside pairing a typographic KPI strip with dimensional driver attribution bars, revenue mix breakdowns, and standalone vector SVG export readiness.
+Semantic Canvas avoids unverified text-to-SQL guesswork and dashboard bloat:
 
-## What's New in `v0.2.0`
+1. **One SQL compiler, three views:** **Dashboard** (spatial layout + drills), **Executive Story** (question, takeaway, next step, consolidated data notes), and **Broadside Infographic** (condensed visual brief + vector SVG) query the exact same compiled SQL.
+2. **Uncertainty is drawn, not hidden:** Incomplete trailing/leading date buckets render diagonal hatching (`reportingLag`), policy cutovers render dashed rules, unsupported snapshot sums are rejected at compile time, and missing/incomplete series surface explicit caveats.
+3. **Zero-key deterministic core:** Metric exploration, 5-dialect YAML conversion, Structural Readiness Coaching (`0–100`), messy-Excel cleaning, period-over-period driver attribution, and Smart Arrange run with zero LLM calls. When AI redesign is enabled, numeric claims in the AI's rationale are cross-checked against warehouse query outputs before applying.
 
-### 1. BI & Analytics Engineers
-- **Expanded Semantic Layer Adapters:**
-  - **dbt (`dbt`):** Supports `simple`, `ratio`, `derived`, and `cumulative` metrics from `semantic_manifest.json`.
-  - **Cube (`cube`):** Imports Cube semantic models including `measures`, `dimensions`, `segments`, and time dimensions.
-  - **Snowflake (`snowflake-semantic`) & Native YAML (`duckglue`):** Governed multi-hop join paths and metric compilation.
-- **Warehouse Connectors:** Direct execution against **DuckDB**, **SQLite (`.db`)**, **Parquet/CSV** lakes (local or S3), and **Snowflake**.
-- **Compiled SQL & Metric Lineage DAG Inspector (`POST /api/query/lineage`):** Inspect parameterized SQL, join paths, applied RLS predicates, and the upstream table-to-metric DAG for any tile.
-- **Source Freshness & SLA Health (`GET /api/sources/:id/health`):** Real-time watermark inspection and SLA status (`healthy`, `warning`, `breached`) per source.
-- **2-Way Dashboard-as-Code YAML Sync & Diff (`GET /api/dashboards/:id/yaml`, `POST /api/dashboards/import-yaml`):** Export any dashboard to deterministic YAML for Git version control, preview structural diffs, and import YAML changes back into the workspace.
-- **Universal 5-Dialect Semantic Layer Converter & Coach (`GET /api/model/export`, `POST /api/model/convert`, `POST /api/model/coach`):** Convert governed models across **DuckGlue / Canvas (`duckglue`)**, **Snowflake Cortex Analyst (`snowflake`)**, **dbt MetricFlow (`metricflow`)**, **AWS Glue Data Catalog (`glue`)**, and **Cube (`cube`)**, score model readiness across five analytical categories, and generate dialect-native YAML recipes for natural-language questions. See [multi-dialect conversion, coaching & CLI](docs/semantic-layer-conversion.md).
-- **Developer & CI/CD Semantic CLI (`npm run semantic`):** Headless CLI supporting `formats`, `convert` (`--from auto --to <dialect>`), and `coach` (`--question`, `--format`, `--json`, and `--fail-under <0-100>` for GitHub Actions Semantic Quality Gates).
-- **`⌘K` / `Ctrl+K` Universal Command Palette:** Instant keyboard launcher for governed metrics (synonym-aware search across metric names, tables, and business synonyms), canvas actions, editorial themes, and workspace navigation.
+## What's in `v0.3.5`
 
-### 2. Designers & Storytellers
-- **4 Curated Editorial Theme Presets:** Switch between `editorial-warm`, `executive-slate`, `high-contrast-print`, and `boardroom-dark` palettes tuned for screen, projector, and print.
-- **Chart Target Lines & Callout Annotations:** First-class horizontal/vertical target thresholds, shaded bands, and point callout labels on canvas charts.
-- **Standalone Vector SVG Export:** Export individual charts or entire dashboards, stories, and infographics as crisp, font-embedded standalone vector SVGs for Figma, Keynote, or print.
-- **Sketch & PDF Reference Import:** Upload a whiteboard sketch, screenshot, or PDF reference to map visual layouts directly onto governed catalogue metrics.
+### 1. Live Warehouses, Messy Spreadsheets & SQL Engine
+- **Warehouse Connectors:** Parameterized SQL execution against **DuckDB**, **PostgreSQL** (Supabase, Neon, AWS RDS — with Postgres OID normalization for `NUMERIC`, `INT8`, and `DATE`), **Google BigQuery**, **Snowflake**, **SQLite (`.db`)**, and **Parquet/CSV** lakes (local or S3 via AWS profile / STS).
+- **Messy Corporate Excel & Multi-Sheet Auto-Join:** Upload raw `.xlsx` or `.csv` files directly into the Modeler or Public Sandbox. Automatically skips leading report/title banners, strips summary rows (`Total`, `Subtotal`, `Grand Total`) to prevent 2× double-counting, scrubs `#N/A`/`#DIV/0!`/`#REF!`, unpivots wide monthly/quarterly header columns (`Jan 2026`, `Q1 2026`), infers cross-sheet joins, and records a visible cleaning banner (`cleaningNotes`).
+- **Global Date Window & Instant PDF Export:** Top-bar global date window presets (`Last 3 months`, `Last 6 months`, `YTD`, `Last 12 months`, `All dates`) scoped dynamically to each source's anchor date, plus print-ready **Print / Save PDF** CSS output in Review & Share.
+- **Compiled SQL & Lineage DAG Inspector (`POST /api/query/lineage`):** Inspect generated SQL, join traversal, enforced RLS predicates, and table-to-metric dependencies per chart.
+- **Universal 5-Dialect Semantic Layer Converter & Coach (`npm run semantic`):** Convert models across **DuckGlue**, **Snowflake Cortex Analyst**, **dbt MetricFlow**, **AWS Glue Data Catalog**, and **Cube** (`--from auto --to <dialect>`), score structural readiness (`--fail-under 85` CI gate), and generate YAML fix recipes. See [multi-dialect conversion, coaching & CLI](docs/semantic-layer-conversion.md).
 
-### 3. Busy Executives
-- **One-Click Executive Digest & SHA-256 Verified Brief (`POST /api/dashboards/:id/digest`):** Generate a structured executive brief with headline takeaways, anomaly flags, scope disclosures, and a cryptographic SHA-256 verification hash over the underlying query results.
-- **Deterministic "Why Did This Move?" Metric Driver Attribution (`POST /api/query/drivers`):** Decompose period-over-period metric changes across catalogue dimensions ranked by absolute contribution share.
-- **AI Rationale Fact-Checking:** Every AI-suggested narrative or design rationale is cross-checked against calculated warehouse figures before presentation, flagging or zeroing out discrepancies.
+### 2. Design, Storytelling & Verifiable Publications
+- **Centered Detail Sub-Dashboards & Smart Story Details:** Click any KPI value or chart to open a centered Broadside sub-dashboard with governed movement bridges (`Metric.explorations`), **1-Click Story Arcs** (*Executive Pulse*, *Why Did It Move?*, *Stakeholder & Finance Pack*), and zero-AI SQL mover attribution (`✦ Smart-add story details`). See [detail dashboards & smart story subdetails](docs/metric-exploration.md).
+- **4 Canvas Themes & 3 Poster Themes:** Canvas palettes (`editorial-warm`, `executive-slate`, `high-contrast-print`, `boardroom-dark`) plus Infographic themes (`Warm Broadsheet`, `Cobalt Blueprint`, `Obsidian Dark`), standalone font-embedded Vector SVG export, PNG export, and 2-way Dashboard-as-Code YAML sync (`GET /api/dashboards/:id/yaml`, `POST /api/dashboards/import-yaml`).
+- **Snapshot Integrity Checksums (`POST /api/dashboards/:id/digest`):** Records a SHA-256 digest over chart queries, RLS scopes, warehouse results, and reviewed takeaways; automatically flags `Review needed` if underlying numbers or text change after review.
+- **Sketch & PDF Reference Import:** Map a whiteboard photo, dashboard screenshot, or PDF onto governed catalog metrics with interactive field matching before creation.
 
-### 4. Enterprise & AI Ecosystem
-- **Provider-Agnostic AI:** Connect `anthropic` (Claude), `openai`, `gemini`, or any `openai-compatible` local/VPC endpoint (vLLM, Ollama, LiteLLM). Core exploration, deterministic review, driver attribution, and smart arrange require no AI key.
-- **8-Tool MCP Onboarding Hub + Authenticated Remote MCP (`POST /api/mcp`):** Ready-to-copy configurations for **Claude Desktop**, **Claude Code**, **Codex**, **Cursor**, **Antigravity**, **VS Code**, **Gemini CLI**, and **generic** stdio clients, plus authenticated remote HTTP MCP (`POST /api/mcp`) enforcing company RBAC and RLS—including `convert_semantic_model` and `coach_semantic_model` for multi-dialect semantic translation and readiness coaching.
-- **Identity, Provisioning & Governance:** OIDC sign-in with real-time IdP session revalidation, **SCIM 2.0 provisioning (`/api/scim/v2`)**, zero-downtime `access.yaml` hot reload, and per-dashboard ownership and lock controls.
-- **High-Availability & Operations Telemetry:** AES-256-GCM encrypted persistent sessions, distributed scheduler leases, Slack and generic webhook alert delivery, and durable audit & ROI telemetry endpoints (`GET /api/operations/audit`, `GET /api/operations/metrics`, `GET /api/operations/manifest`).
+### 3. Enterprise Governance, MCP & Public Sandbox
+- **Fail-Closed Row-Level Security & Identity:** Server-enforced RLS across charts, driver analysis, filters, and remote MCP, plus **OIDC sign-in**, **SCIM 2.0 (`/api/scim/v2`)**, AES-256-GCM persistent sessions, hot-reloaded `access.yaml`, and OpenTelemetry log/trace export.
+- **13 Governed MCP Tools (Local Stdio + Remote HTTP):** Copy-ready setup in **Connections** for Claude Code, Claude Desktop, OpenAI Codex CLI, Cursor, Antigravity, VS Code, Gemini CLI, and ChatGPT Secure MCP Tunnels (`npm run mcp`), alongside principal-scoped Remote HTTP MCP (`POST /api/mcp`).
+- **Public Sandbox Mode (`SC_SANDBOX_MODE=true`):** Safe unauthenticated demo mode with same-origin CSRF allowlisting (`SC_SANDBOX_ORIGINS`), per-IP upload/query rate limiting, hard blocks on warehouse/AI-key/audit/MCP mutations, and automatic FIFO eviction of old ephemeral spreadsheet uploads.
+- **Automated Verification (`v0.3.5`):** **1,324 unit tests across 162 suites** (96.62% covered line threshold enforcement on SQL compiler and RLS core) + **420+ Playwright E2E tests** running across Node 22, 24, and 26.
+
+## Deliberate Non-Goals & Where This Stops
+
+Thoughtful BI requires being clear about what a tool refuses to guess or automate:
+
+1. **No ad-hoc LLM SQL against raw tables:** Uploaded spreadsheets and unreviewed tables sit in draft quarantine until a human confirms the time column, grain, and measure aggregations in the Visual Modeler.
+2. **No autonomous Slack, Jira, or HubSpot task bots:** Executive Story & Infographic briefs record a clear next action and owner inside the document; no external tasks or messages are dispatched autonomously.
+3. **SHA-256 verifies snapshot integrity, not truth:** A matching SHA-256 digest proves the snapshot's queries, scopes, warehouse payload, and reviewed prose did not change since sign-off. It does **not** certify upstream ETL pipeline completeness or causal correctness. (Trailing partial periods remain visually flagged; `Coverage unverified` is displayed honestly.)
+4. **Local SQL compiler, not remote vendor proxy:** Importing `dbt`, `Cube`, or `snowflake-semantic` compiles SQL locally against your configured database—it does not guarantee 100% behavioral parity with every vendor's proprietary runtime.
 
 ## Part of the Semantic Canvas suite
 
-The packaging direction is **one suite with two apps**: Semantic Canvas for governed analytics and dashboard design, and Ingest for bringing data into databases. Gateway provides the shared workspace, sign-in and app navigation. Canvas remains independently usable.
-
-The intended installation choices are **Full workspace** (default), **Canvas only**, and **Ingest only**. The standalone Canvas setup below works today; the full workspace's company deployment, release bundle and automatic Ingest-to-Canvas handoff remain unfinished. See [suite packaging and integration status](docs/suite-packaging.md) and the [Gateway/Ingest repository](https://github.com/Evinanderson89/gateway-platform).
+Semantic Canvas can run standalone (all instructions below) or alongside Ingest and Gateway in the suite architecture. See [suite packaging and integration status](docs/suite-packaging.md) and the [Gateway/Ingest repository](https://github.com/Evinanderson89/gateway-platform).
 
 ## Run it
 
-With Docker:
+**Try the zero-install live sandbox:** open [https://sandbox-production-357b5956.up.railway.app](https://sandbox-production-357b5956.up.railway.app) to inspect the pre-loaded `SaaS overview` workbook, switch between Dashboard / Story / Infographic, or upload a messy `.xlsx`/`.csv`.
+
+Or run locally with Docker (60 seconds):
 
 ```sh
+git clone https://github.com/Evinanderson89/semantic-canvas.git
+cd semantic-canvas
 docker compose up --build -d
 ```
 
-**Try the before-and-after walkthrough:** on Home, choose **Try the design playground**. Start with a messy dashboard, preview a redesign with **Improve with AI** (requires a configured provider), or apply chart fixes in **Design review**. Use **Smart arrange → Tell a story**, then **Review and share** to compare Dashboard, Story and Infographic formats and export a PNG. The starter opens as an unsaved copy. See [presentation and evidence behavior](docs/presentations.md).
+**Before-and-after walkthrough:** On Home (or via **Examples → Dashboard cleanup demo**), open **Improve with AI** (`Generate deterministic draft from prompt` works with zero API keys, or configure an AI provider), use **Smart arrange → Tell a story**, then open **Review and share** to compare **Dashboard**, **Story**, and **Infographic** and export a PNG/SVG/PDF. See [presentation and evidence behavior](docs/presentations.md).
 
 Open [the local demo](http://localhost:5173). Dashboard storage persists in a named volume. For HTTPS company deployment, SSO, logging and recovery, follow the [self-hosting guide](docs/self-hosting.md).
 
-For local development:
-
-Use Node.js 22.x (22.12 or newer), 24.x, or 26.x. Use the latest patch release in your chosen major version.
+For local development (Node.js 22.12+, 24.x, or 26.x):
 
 ```sh
 npm ci
@@ -75,41 +79,9 @@ npm start
 
 Open [Semantic Canvas](http://127.0.0.1:5173). The API runs at `127.0.0.1:5174`. The bundled sample warehouse needs no credentials.
 
-## What you can do
-
-- Start from scratch or generate a dashboard from the semantic catalog.
-- Move, resize, align and layer tiles. Preview Smart Arrange before applying a layout; sections and pinned positions are preserved.
-- Add KPIs, charts, tables, headings, notes, dividers, images and connected filter controls.
-- Organize a dashboard into tabs. Scope filters to one tab or carry them across tabs with explicit chart connections.
-- Recreate a sketch, photo, dashboard image or PDF using catalogue metrics, with a matching review before creation (requires a vision-capable AI provider).
-- Copy charts into another tab or saved dashboard, with destination filter connections and revision protection.
-- Explore with filters and time drill-downs, then refresh data without replacing the design.
-- Save, reopen, save a copy, undo canvas changes and recover unsaved drafts from Home.
-- Open the message icon on a chart to discuss it, reply, and resolve conversations. Open the bell to create a personal threshold or anomaly watch, preview its result, and review its history.
-- Review charts against their current filters and drill state. Partial reviews identify unavailable or limited results.
-- Ask the optional AI assistant to improve the active unsaved document. Review its proposed edits, apply them together, and undo them in one step.
-- Export returned chart data as typed Excel with query context, or raw CSV for data tools; export dashboards as PNG.
-- Review workspace setup in Connections, upload a semantic model, and download a complete dashboard-library backup.
-- In company mode, sign in through your identity provider and assign viewer/editor/admin roles with source and row access.
-- Collect JSON application/audit logs or export logs and request traces through OpenTelemetry.
-
-See [references, tabs and connected filters](docs/reference-tabs-filters.md) for a walkthrough, file limits and current boundaries.
-
-## What this alpha guarantees—and where it stops
-
-Saved documents have a version, a source identity and a revision. Conflicting updates return an error, and the browser keeps its unsaved work. A new dashboard gets a new identity. The save limit is 8 MB per document, including images.
-
-Queries validate metrics, dimensions and structured filters before compiling SQL. Charts, field samples, distinct values and ranges use the same row restrictions. A policy that cannot be enforced denies that query. A missing or malformed policy file stops startup instead of disabling restrictions.
-
-Time-series limits keep the newest result window. Responses disclose truncation and the visible date window; limited CSV exports are labeled. Period comparisons look up the previous reporting period, so gaps stay unknown. First-of-month snapshots remain visible. Models can declare a week start, fiscal year start month, reporting time zone and pinned sample date; see [the calendar contract](docs/calendar.md). The app shows **Coverage unverified** because observed dates do not prove that a reporting period is complete. Upstream completeness metadata is not implemented.
-
-Snapshot and retention metrics in the sample declare their supported monthly grain. Unsupported rollups and all-time snapshot sums are rejected instead of returning misleading totals. Model authors can declare `time_grains`, `time_dimension`, optional dashboard `importance`, and `direction` (higher, lower or neutral) in YAML. Undeclared direction uses neutral KPI colors.
-
-These are tested local behaviors, not a claim of semantic equivalence with every vendor's query engine. See [the alpha contract](docs/alpha-contract.md) for supported imports, migration details and known limits.
-
 ## Connect a source
 
-Open **Connections** to add, edit or select a source, or edit `sources.yaml`. A source pairs a semantic adapter with a warehouse connector.
+Open **Connections** to add, edit or select a source, or edit `sources.yaml` (using your read-only warehouse role). A source pairs a semantic adapter with a warehouse connector.
 
 | Adapter | Supported import | Explicitly unsupported |
 | --- | --- | --- |
@@ -118,19 +90,13 @@ Open **Connections** to add, edit or select a source, or edit `sources.yaml`. A 
 | `cube` | Cube `measures`, `dimensions`, `segments`, and time dimensions from YAML/JSON model files | Custom JS dynamic schemas, pre-aggregations, and arbitrary multi-hop reverse joins |
 | `snowflake-semantic` | Public plain-column fields and table-level metrics, composite equality join keys, left/inner joins, database/schema qualification | Computed fields, filters, non-additive rules, private access, variables, explicit metric join paths, SQL-defined tables, range/asof joins, top-level derived metrics, repeated physical table names with different aliases |
 
-Unsupported imports return a source error explaining what could not be represented. The dbt, Cube, and Snowflake adapters import files and compile local SQL; they do not call the external vendor semantic query service.
+Unsupported imports return a source error explaining what could not be represented. Adapters import model definitions locally and compile parameterized SQL rather than delegating to an external vendor runtime.
 
-Connectors: **DuckDB**, **SQLite (`.db`)**, **Parquet/CSV** through DuckDB (a local directory, or an S3 lake), and **Snowflake**. The sample is tested against DuckDB. Snowflake execution requires your own credentials and verification against your model.
-
-For an S3 lake, set `lakeRoot` to `s3://bucket/prefix` and name an `awsProfile` from the server's `~/.aws/config` (an SSO login or a `role_arn` + `source_profile` entry) plus the bucket's `awsRegion`; the credential is resolved when the source connects and renewed before an assumed role's session expires. No access key is written to `sources.yaml`. See the commented example there.
-
-For Snowflake, copy `.env.example` to `.env`, fill in the required settings, then configure a source. Use a read-only warehouse role. Connection credentials stay on the local server and are referenced by environment variables in `sources.yaml`.
-
-Tables registered by Ingest ("Connected to Semantic Canvas", see `docs/connected-canvas.md`) appear as ingested and unreviewed, visible to editors and administrators only, until an administrator publishes them; they are kept in a per-source overlay under `SC_DATA_DIR/models/connected/`, never in your model file.
+Connectors: **DuckDB**, **PostgreSQL**, **Google BigQuery**, **Snowflake**, **SQLite (`.db`)**, and **Parquet/CSV** through DuckDB (local directory, uploaded `.xlsx`/`.csv`, or S3 lake via `awsProfile` + `awsRegion` in `~/.aws/config`). Keep personal credentials out of tracked `sources.yaml`; see `sources.personal.local` instructions below.
 
 ## AI and MCP
 
-AI is optional. The embedded agent currently supports **Anthropic only**. Add a key in **Connections**, or set `ANTHROPIC_API_KEY` in `.env`; choose an available model with `ai.model` in `sources.yaml`. Connections saves its key on the server and preserves replacements/removals across source reloads and restarts, even without an `ai` block. See [credential precedence](docs/self-hosting.md#ai-credentials) for operator-managed configuration. The canvas and rule-based suggestions work without a key.
+AI is optional. The canvas, deterministic draft composer, messy-spreadsheet cleaner, driver attribution, Coach, and 5-dialect compiler work with **zero AI keys**. When enabled, choose `anthropic` (Claude), `openai`, `gemini`, or any `openai-compatible` local/VPC endpoint (vLLM, Ollama, LiteLLM) via **Connections** or `.env`. Credentials stay on the server.
 
 Embedded tools and conversation histories are bound to the selected source and principal; in company mode, they also carry the authenticated caller’s session and are isolated by user. A model cannot switch that scope by changing its tool arguments. AI recommendations still need human judgment; they are not proof of causation or business correctness.
 

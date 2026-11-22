@@ -261,7 +261,7 @@ test("a KPI on a declared date field uses the latest observation without inventi
 test("a scalar KPI keeps investigation and metric-scope actions", async ({ page }) => {
   await open(page, [chart({ metrics: ["new_signups"], dimensions: [], chart: "kpi" })]);
   const tile = page.locator(".node .tile");
-  await expect(tile.getByRole("button", { name: "Investigate this", exact: true })).toBeVisible();
+  await expect(tile.getByRole("button", { name: "Open detail dashboard", exact: true })).toBeVisible();
   await tile.getByRole("button", { name: "More chart actions" }).click();
   await expect(tile.getByRole("button", { name: "Metric definition and scope" })).toBeVisible();
 });

@@ -44,7 +44,6 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
         <span>{mode === "infographic" ? "BROADSIDE INFOGRAPHIC" : "EXECUTIVE NARRATIVE STORY"}</span>
         <span aria-hidden="true">·</span>
         <span>{model.name}</span>
-        <span className="masthead-pill" title="SHA-256 checks content integrity, not analytical correctness or authorship.">Snapshot with integrity checksum (SHA-256)</span>
       </div>
       <div className="report-broadside-actions" data-export-ignore>
         <div className="report-broadside-themes" role="group" aria-label="Poster theme">

@@ -37,9 +37,9 @@ for (const [width, height] of [[520, 80], [260, 108], [180, 156]]) test(`scalar 
   const tile = await open(page, width, height);
   await expect(tile.locator(".stat .v")).toHaveText("$1,234,567.89");
   await assertReadable(tile);
-  await tile.getByRole("button", { name: "Investigate this", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: /Investigate/ })).toBeVisible();
-  await page.getByRole("dialog", { name: /Investigate/ }).getByRole("button", { name: "Close", exact: true }).click();
+  await tile.getByRole("button", { name: "Open detail dashboard", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Detail dashboard", exact: true })).toBeVisible();
+  await page.getByRole("dialog", { name: "Detail dashboard", exact: true }).getByRole("button", { name: "Close", exact: true }).click();
   await tile.getByRole("button", { name: "More chart actions", exact: true }).click();
   await tile.getByRole("button", { name: "Metric definition and scope", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Metric definition and scope" })).toContainText("New MRR");

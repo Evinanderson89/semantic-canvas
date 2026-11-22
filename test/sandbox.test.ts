@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createSandboxRateLimiter,
+  isRefreshableSpreadsheetSource,
   isSandboxMode,
   isSandboxOriginAllowed,
   SANDBOX_MAX_SPREADSHEET_SOURCES,
@@ -103,5 +104,16 @@ describe("Public Sandbox guard (SC_SANDBOX_MODE)", () => {
     clock += 10 * 60_000 + 1;
     expect(check("9.9.9.9", "POST", "/api/modeler/spreadsheet/import").allowed).toBe(true);
     expect(check("1.2.3.4", "POST", "/api/query").allowed).toBe(true);
+  });
+
+  it("marks only uploaded DuckDB spreadsheet sources as refreshable by file upload", () => {
+    expect(isRefreshableSpreadsheetSource({ id: "duckglue-local", connector: "duckdb" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource({ id: "sample-warehouse", connector: "duckdb" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource({ id: "q3-sales", connector: "duckdb" })).toBe(true);
+    expect(isRefreshableSpreadsheetSource({ id: "q3-sales", connector: "DuckDB" })).toBe(true);
+    expect(isRefreshableSpreadsheetSource({ id: "prod-pg", connector: "postgres" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource({ id: "bq-prod", connector: "bigquery" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource({ id: "sf-prod", connector: "snowflake" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource({ id: "no-conn", connector: null })).toBe(false);
   });
 });

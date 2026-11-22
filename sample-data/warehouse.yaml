@@ -318,6 +318,7 @@ metrics:
     synonyms: [returning customer mrr, reactivated revenue]
 
   contraction_mrr:
+    direction: lower
     label: Contraction MRR (USD)
     base_table: fct_mrr_movements
     expression: "SUM(CASE WHEN fct_mrr_movements.movement_type = 'contraction' THEN -fct_mrr_movements.mrr_delta_usd ELSE 0 END)"
@@ -325,6 +326,7 @@ metrics:
     synonyms: [downgrade mrr, downsell]
 
   churned_mrr:
+    direction: lower
     label: Churned MRR (USD)
     base_table: fct_mrr_movements
     expression: "SUM(CASE WHEN fct_mrr_movements.movement_type = 'churn' THEN -fct_mrr_movements.mrr_delta_usd ELSE 0 END)"
@@ -332,6 +334,12 @@ metrics:
     synonyms: [lost mrr, cancelled revenue, revenue churn]
 
   net_new_mrr:
+    explorations:
+      - label: What added and lost MRR?
+        metric: net_new_mrr
+        dimension: fct_mrr_movements.movement_type
+        timeDimension: fct_mrr_movements.movement_date
+        description: Signed new business, expansion, reactivation, contraction and churn from the movement ledger. Net change is the sum of these movements, not the ending MRR balance.
     label: Net new MRR (USD)
     base_table: fct_mrr_movements
     expression: SUM(fct_mrr_movements.mrr_delta_usd)
@@ -373,6 +381,7 @@ metrics:
     synonyms: [session to customer rate, acquisition rate]
 
   lost_mrr:
+    direction: lower
     label: Lost MRR (USD)
     type: derived
     expression: churned_mrr + contraction_mrr
@@ -401,6 +410,7 @@ metrics:
     synonyms: [new customers, new subscribers, acquisitions]
 
   churned_customers:
+    direction: lower
     label: Churned customers
     base_table: fct_mrr_movements
     expression: "COUNT(DISTINCT fct_mrr_movements.user_id) FILTER (WHERE fct_mrr_movements.movement_type = 'churn')"
@@ -479,6 +489,24 @@ metrics:
     synonyms: [opening mrr, bom mrr]
 
   ending_mrr:
+    explorations:
+      - label: What added and lost MRR?
+        metric: net_new_mrr
+        dimension: fct_mrr_movements.movement_type
+        timeDimension: fct_mrr_movements.movement_date
+        description: Signed new business, expansion, reactivation, contraction and churn from the movement ledger. This sample movement ledger is separate from the monthly balance series; it is not a reconciliation to ending MRR.
+      - label: Where did net MRR shift by plan tier?
+        metric: net_new_mrr
+        dimension: dim_plans.plan_tier
+        timeDimension: fct_mrr_movements.movement_date
+        chart: bar
+        description: Signed net MRR movement by plan tier from the movement ledger. This sample movement ledger is separate from the monthly balance series; it is not a reconciliation to ending MRR.
+      - label: Which signup sources drove net MRR change?
+        metric: net_new_mrr
+        dimension: dim_users.signup_source
+        timeDimension: fct_mrr_movements.movement_date
+        chart: bar
+        description: Signed net MRR movement by customer signup source from the movement ledger. This sample movement ledger is separate from the monthly balance series; it is not a reconciliation to ending MRR.
     unit: currency
     direction: higher
     importance: 100
@@ -608,6 +636,7 @@ metrics:
     synonyms: [annual grr, gross retention annual]
 
   logo_churn_annualized:
+    direction: lower
     time_grains: [month]
     time_dimension: fct_saas_monthly.month
     label: Logo churn (annualized)

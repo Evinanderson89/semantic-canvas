@@ -32,7 +32,7 @@ import { generateExecutiveDigest, formatDigestMarkdown, exportVerifiedBriefBundl
 import { analyzeMetricDrivers } from "./suggest/drivers.ts";
 import type { Connector } from "./connectors/types.ts";
 import { executionBudget } from "./connectors/execution.ts";
-import { fieldReachable, isNumeric, metricOf, reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
+import { fieldReachable, isNumeric, metricComponents, metricOf, reviewedModel, visibleModel, type Model } from "./semantic/model.ts";
 import { coachSemanticModel, type AnalysisGoal } from "./semantic/coach.ts";
 import {
   convertSemanticLayer,
@@ -62,7 +62,7 @@ import { viewSaveSchema } from "./library/model.ts";
 import { loadRls, type RlsConfig } from "./security/rls.ts";
 import { applyBestLayout, applyLayout, LAYOUTS } from "./canvas/layouts.ts";
 import { requireScope, scopedField } from "./security/queryScope.ts";
-import { saveSchema, querySchema, tileSchema, dashboardSchema, canvasSchema, MAX_DOCUMENT_BYTES, profileRequestSchema } from "./compiler/schema.ts";
+import { saveSchema, querySchema, tileSchema, dashboardSchema, canvasSchema, filterSchema, MAX_DOCUMENT_BYTES, profileRequestSchema } from "./compiler/schema.ts";
 import { inspectTileLineage } from "./compiler/lineage.ts";
 import { checkSourceHealth } from "./sources/health.ts";
 import { dashboardFromYaml, dashboardToYaml, diffDashboardSpecs } from "./store/codeSync.ts";
@@ -1739,20 +1739,35 @@ app.get("/api/principals", safe((req, res) =>
     policies: rls.policies.map((p) => ({ id: p.id, field: `${p.table}.${p.column}`, claim: p.claim })),
   })));
 
+const driversRequestSchema = z.object({
+  metric: z.string().trim().min(1).max(256),
+  timeDimension: z.string().trim().min(1).max(256).optional(),
+  where: z.array(filterSchema).max(100).optional(),
+  maxDimensions: z.number().int().min(1).max(12).optional(),
+  topN: z.number().int().min(1).max(10).optional(),
+});
+
 app.post("/api/query/drivers", safe(async (req, res) => {
-  const metric = String(req.body?.metric ?? "").trim();
-  if (!metric) return res.status(400).json({ error: "metric is required" });
-  const model = modelOf(req), m = metricOf(model, metric);
+  const parsed = driversRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid drivers request" });
+  const { metric, timeDimension, where: clientWhere = [], maxDimensions, topN } = parsed.data;
+  const model = modelOf(req), m = metricOf(model, metric), role = roleOf(req);
   if (!m) return res.status(400).json({ error: `Unknown metric: ${metric}` });
-  const who = principalOf(req) ?? (auth.config.mode === "local" && !req.header("x-sc-principal") ? (rls.principals[defaultPrincipal ?? "admin"] ?? null) : null);
-  const scope = requireScope(model, m.baseTable, rls, who, identityOf(req)?.policy);
-  const where = [...(Array.isArray(req.body?.where) ? req.body.where : []), ...scope.filters];
+  const who = principalOf(req);
+  const componentTables = new Set([m, ...metricComponents(model, m)].map((c) => c.baseTable));
+  const rlsFilters = [...componentTables].flatMap(
+    (baseTable) => requireScope(model, baseTable, rls, who, identityOf(req)?.policy).filters,
+  );
+  const where = [...clientWhere, ...rlsFilters];
   const analysis = await analyzeMetricDrivers(model, connOf(req), {
     metric,
-    timeDimension: typeof req.body?.timeDimension === "string" ? req.body.timeDimension : undefined,
+    timeDimension,
     where,
-    maxDimensions: typeof req.body?.maxDimensions === "number" ? req.body.maxDimensions : undefined,
-    topN: typeof req.body?.topN === "number" ? req.body.topN : undefined,
+    maxDimensions,
+    topN,
+    role,
+    cacheScope: `${who?.id ?? "anon"}:${req.header("x-sc-refresh") ?? ""}`,
+    execution: requestBudget(res, QUERY_TIMEOUT_MS),
   });
   res.json({
     ...analysis,

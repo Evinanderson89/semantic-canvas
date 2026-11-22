@@ -1323,13 +1323,26 @@ function attachPicker(host: HTMLElement, column: string | null, data: any[], kin
     body.append(label, button); details.append(summary, body); host.appendChild(details);
   }
 
-  svg.style.cursor = "pointer";
-  svg.addEventListener("click", (e: MouseEvent) => {
+  const plotPoint = (e: MouseEvent) => {
     const r = svg.getBoundingClientRect();
     // Rect is in screen px under a scaled canvas; convert back to plot px.
     const scaleX = r.width / (svg.viewBox?.baseVal?.width || svg.clientWidth || r.width) || 1;
     const scaleY = r.height / (svg.viewBox?.baseVal?.height || svg.clientHeight || r.height) || 1;
-    const point = { x: (e.clientX - r.left) / scaleX, y: (e.clientY - r.top) / scaleY };
+    return { x: (e.clientX - r.left) / scaleX, y: (e.clientY - r.top) / scaleY };
+  };
+  let down: { clientX: number; clientY: number; point: { x: number; y: number } } | null = null;
+  svg.addEventListener("pointerdown", (e: PointerEvent) => {
+    if (e.button === 0) down = { clientX: e.clientX, clientY: e.clientY, point: plotPoint(e) };
+  });
+  svg.style.cursor = "pointer";
+  svg.addEventListener("click", (e: MouseEvent) => {
+    // Selecting an unselected tile on pointerdown opens the inspector and can
+    // shift surrounding chrome before click arrives; resolve the mark under the
+    // initial press when the pointer stayed put.
+    const point = down && Math.hypot(e.clientX - down.clientX, e.clientY - down.clientY) < 6
+      ? down.point
+      : plotPoint(e);
+    down = null;
     // Axis labels, legends and margins are not observations. Check both
     // plot coordinates before snapping a click to any reporting bucket.
     for (const axis of ["x", "y"] as const) {
