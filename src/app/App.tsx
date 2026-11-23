@@ -36,7 +36,8 @@ import { Inspector } from "./Inspector.tsx";
 import { MetricRegistry, DataModel } from "./Explore.tsx";
 import { Connections, type Principal, type RlsPolicy, type SourceInfo } from "./Connections.tsx";
 import { Modeler } from "./Modeler.tsx";
-import { SpreadsheetImport } from "./SpreadsheetImport.tsx";
+import { SpreadsheetImport, quickImportSampleWorkbook } from "./SpreadsheetImport.tsx";
+import { SAMPLE_WORKBOOKS, type SampleWorkbookId } from "../modeler/spreadsheetTypes.ts";
 import type { Brief } from "../suggest/match.ts";
 import { DEFAULT_CANVAS, THEME_PRESETS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
@@ -64,6 +65,7 @@ import { ReferenceImport } from "./ReferenceImport.tsx";
 import { TabStrip } from "./TabStrip.tsx";
 import { FilterControl, FilterDesigner, filterTileSize } from "./FilterControls.tsx";
 import { linkedSource, parseLink, stripLink } from "./link.ts";
+import { buildShareUrl, parseShareLink, resolveStarterName, stripShareLink } from "./shareLink.ts";
 
 const GRAINS = ["day", "week", "month", "quarter", "year"];
 
@@ -78,6 +80,14 @@ export function App() {
   const [activeTabId, setActiveTabId] = useState("main");
   const [referenceImport, setReferenceImport] = useState(false);
   const [spreadsheetImport, setSpreadsheetImport] = useState(false);
+  const [initialSample, setInitialSample] = useState<SampleWorkbookId | null>(null);
+  const [worldBusy, setWorldBusy] = useState<string | null>(null);
+  const [sandboxToolsOpen, setSandboxToolsOpen] = useState(false);
+  const [completedQuests, setCompletedQuests] = useState<string[]>([]);
+  const [topbarLinkCopied, setTopbarLinkCopied] = useState(false);
+  const markQuest = useCallback((q: "story" | "poster" | "messy") => {
+    setCompletedQuests((prev) => (prev.includes(q) ? prev : [...prev, q]));
+  }, []);
   const [distributing, setDistributing] = useState(false);
   const [filterEditing, setFilterEditing] = useState<string | null>(null);
   const [filterValues, setFilterValues] = useState<Record<string, FilterValue>>({});
@@ -106,8 +116,29 @@ export function App() {
   const [zoom, setZoom] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const explorationActions = React.useRef(new Map<string, () => void>());
+  const pendingDetailRef = React.useRef<{ target: string; story: boolean } | null>(null);
+  const dashTilesRef = React.useRef<TileSpec[]>([]);
+  dashTilesRef.current = dash?.tiles ?? [];
   const registerExploration = useCallback((id: string, open?: () => void) => {
-    if (open) explorationActions.current.set(id, open); else explorationActions.current.delete(id);
+    if (open) {
+      explorationActions.current.set(id, open);
+      const pending = pendingDetailRef.current;
+      if (pending) {
+        const tile = dashTilesRef.current.find((t) => t.id === id);
+        if (tile && (tile.id === pending.target || tile.metrics.includes(pending.target))) {
+          pendingDetailRef.current = null;
+          const openStory = pending.story;
+          queueMicrotask(() => {
+            open();
+            if (openStory) {
+              setInvestigating((cur) => cur ? { ...cur, initialMode: "smart", modeSeq: (cur.modeSeq ?? 0) + 1 } : cur);
+            }
+          });
+        }
+      }
+    } else {
+      explorationActions.current.delete(id);
+    }
   }, []);
   const [investigating, setInvestigating] = useState<{ id: string; result: InvestigationResult; initialMode?: "configure" | "smart"; modeSeq?: number; setupChanged?: boolean } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -124,6 +155,7 @@ export function App() {
   const [view, setView] = useState<"home" | "registry" | "model" | "connections" | "library" | "modeler">(() => location.pathname.replace(/\/+$/, "") === "/modeler" ? "modeler" : "home");
   // ?source=&table= from an "Open in Semantic Canvas" link: read once, applied when the sources (then the model) are known, and stripped.
   const link = React.useRef<ReturnType<typeof parseLink> | null>(parseLink(location.search));
+  const shareLink = React.useRef<ReturnType<typeof parseShareLink>>(parseShareLink(location.search));
   const [sourcesLoaded, setSourcesLoaded] = useState(false);
   const [linkedTable, setLinkedTable] = useState<string | null>(null);
   const [registryTable, setRegistryTable] = useState<string | null>(null);
@@ -575,19 +607,9 @@ export function App() {
       .catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
   }, []);
 
-  // In Public Sandbox mode, open the flagship SaaS overview dashboard immediately on first visit
-  // so visitors land directly inside a live, populated executive dashboard rather than a blank menu.
-  useEffect(() => {
-    if (!sandboxMode || sandboxAutoOpened.current || !model || book || view !== "home" || link.current) return;
-    const starter = showcaseStarters()["SaaS overview"];
-    if (!starter || !model.metrics.ending_mrr) return;
-    sandboxAutoOpened.current = true;
-    const fitted = fitStarter(starter, DEFAULT_CANVAS, freshCanvas().width);
-    if (beginDocument(fitted.spec, { canvas: fitted.canvas })) {
-      setTemplateId("starter:SaaS overview");
-      pendingFit.current = true;
-    }
-  }, [sandboxMode, model, book, view, freshCanvas, beginDocument]);
+  useEffect(() => { if (investigating) markQuest("story"); }, [investigating, markQuest]);
+  useEffect(() => { if (handoff && (handoffMode === "infographic" || handoffMode === "story")) markQuest("poster"); }, [handoff, handoffMode, markQuest]);
+  useEffect(() => { if (spreadsheetImport) markQuest("messy"); }, [spreadsheetImport, markQuest]);
 
   const build = useCallback((brief: Brief) => {
     setInterview(false);
@@ -604,6 +626,190 @@ export function App() {
       setGrain(documentGrain(d));
     }).catch((e) => { if (documentEpoch.current === epoch) setNotice(e.message); });
   }, [freshCanvas, beginDocument]);
+
+  const openStarterByName = useCallback((starterName: string, opts?: { detail?: string | null; story?: boolean; mode?: PresentationMode | null; window?: DatePreset | "all" | null }) => {
+    const starters = showcaseStarters();
+    const resolved = resolveStarterName(starterName, Object.keys(starters)) ?? "SaaS overview";
+    const starter = starters[resolved];
+    if (!starter) return false;
+    const fitted = fitStarter(starter, DEFAULT_CANVAS, freshCanvas().width);
+    if (!beginDocument(fitted.spec, { canvas: fitted.canvas })) return false;
+    setTemplateId(`starter:${resolved}`);
+    setView("home");
+    pendingFit.current = true;
+    if (opts?.window) setDateWindow(opts.window);
+    if (opts?.mode === "story" || opts?.mode === "infographic") {
+      setHandoffMode(opts.mode);
+      setHandoff(true);
+    }
+    if (opts?.detail) {
+      pendingDetailRef.current = { target: opts.detail, story: Boolean(opts.story) };
+    }
+    return true;
+  }, [freshCanvas, beginDocument]);
+
+  const activateSampleWorld = useCallback(async (sampleId: SampleWorkbookId) => {
+    const meta = SAMPLE_WORKBOOKS.find((w) => w.id === sampleId);
+    if (!meta || worldBusy) return;
+    markQuest("messy");
+    setWorldBusy(sampleId);
+    try {
+      const existing = sources.find((s) => s.id === meta.preferredSourceId && s.status === "ready");
+      if (existing) {
+        if (!beginDocument(null)) return;
+        sourceRef.current = existing.id;
+        setSourceId(existing.id);
+        setLibraryFolder(null);
+        try { storage.setItem(sourceStorageKey, existing.id); } catch {}
+        setView("home");
+        const epoch = documentEpoch.current;
+        const nextModel = (await fetch("/api/model").then(readResponse)) as Model;
+        if (documentEpoch.current !== epoch) return;
+        setModel(nextModel);
+        setBootError("");
+        const primaryTable = Object.keys(nextModel.tables)[0];
+        const metricNames = Object.keys(nextModel.metrics).slice(0, 4);
+        if (primaryTable && metricNames.length) {
+          await build({ table: primaryTable, metrics: metricNames, audience: "operator", grain: "month", text: `Overview of ${meta.title}` });
+        }
+        return;
+      }
+      const imported = await quickImportSampleWorkbook(sampleId);
+      refreshSources();
+      sourceRef.current = imported.sourceId;
+      setSourceId(imported.sourceId);
+      setLibraryFolder(null);
+      try { storage.setItem(sourceStorageKey, imported.sourceId); } catch {}
+      setView("home");
+      const epoch = documentEpoch.current;
+      const nextModel = (await fetch("/api/model").then(readResponse)) as Model;
+      if (documentEpoch.current !== epoch) return;
+      setModel(nextModel);
+      setBootError("");
+      await build({
+        table: imported.tableName,
+        metrics: imported.metrics.slice(0, 4),
+        audience: "operator",
+        grain: "month",
+        text: `Overview of ${imported.label}`,
+      });
+      setNotice(`Cleaned & loaded "${imported.label}" into a live governed dashboard.`, "success");
+    } catch (e: any) {
+      setNotice(e?.message ?? "Could not switch sample world.");
+    } finally {
+      setWorldBusy(null);
+    }
+  }, [worldBusy, markQuest, sources, beginDocument, storage, sourceStorageKey, build, refreshSources, setNotice]);
+
+  const switchToSaasWorld = useCallback(async (opts?: { detail?: string | null; story?: boolean }) => {
+    if (worldBusy) return;
+    if (activeSourceId && activeSourceId !== "duckglue-local" && sources.some((s) => s.id === "duckglue-local" && s.status === "ready")) {
+      setWorldBusy("saas");
+      try {
+        if (!beginDocument(null)) return;
+        sourceRef.current = "duckglue-local";
+        setSourceId("duckglue-local");
+        setLibraryFolder(null);
+        try { storage.setItem(sourceStorageKey, "duckglue-local"); } catch {}
+        setView("home");
+        const epoch = documentEpoch.current;
+        const nextModel = (await fetch("/api/model").then(readResponse)) as Model;
+        if (documentEpoch.current !== epoch) return;
+        setModel(nextModel);
+        setBootError("");
+        const starter = showcaseStarters()["SaaS overview"];
+        if (starter) {
+          const fitted = fitStarter(starter, DEFAULT_CANVAS, freshCanvas().width);
+          if (beginDocument(fitted.spec, { canvas: fitted.canvas })) {
+            setTemplateId("starter:SaaS overview");
+            pendingFit.current = true;
+            if (opts?.detail) pendingDetailRef.current = { target: opts.detail, story: Boolean(opts.story) };
+          }
+        }
+      } catch (e: any) {
+        setNotice(e?.message ?? "Could not switch back to Sample Warehouse.");
+      } finally {
+        setWorldBusy(null);
+      }
+      return;
+    }
+    openStarterByName("SaaS overview", opts);
+  }, [worldBusy, activeSourceId, sources, beginDocument, storage, sourceStorageKey, freshCanvas, openStarterByName, setNotice]);
+
+  const copyShareUrl = useCallback(async (extra?: { mode?: PresentationMode | null; detail?: string | null; story?: boolean }) => {
+    const starterTitle = templateId?.startsWith("starter:") ? templateId.slice("starter:".length) : (dash?.title && showcaseStarters()[dash.title] ? dash.title : null);
+    const url = buildShareUrl(location.href, {
+      starterTitle,
+      dashId,
+      sourceId: activeSourceId,
+      dateWindow,
+      mode: extra?.mode ?? null,
+      detail: extra?.detail ?? null,
+      story: extra?.story,
+    });
+    try {
+      await navigator.clipboard.writeText(url);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [templateId, dash?.title, dashId, activeSourceId, dateWindow]);
+
+  // Apply rich deep-links (?starter=, ?dash=, ?mode=story|infographic, ?detail=, ?sample=, ?window=) once on boot.
+  useEffect(() => {
+    if (!sourcesLoaded || !model || link.current || !shareLink.current) return;
+    const pending = shareLink.current;
+    shareLink.current = null;
+    history.replaceState(history.state, "", stripShareLink(location.href));
+    if (pending.sample) {
+      if (pending.auto && session.canAdmin) {
+        sandboxAutoOpened.current = true;
+        void activateSampleWorld(pending.sample);
+        return;
+      }
+      if (session.canAdmin) {
+        setInitialSample(pending.sample);
+        setSpreadsheetImport(true);
+      }
+    }
+    if (pending.dash) {
+      sandboxAutoOpened.current = true;
+      void openSaved(pending.dash).then(() => {
+        if (pending.window) setDateWindow(pending.window);
+        if (pending.mode === "story" || pending.mode === "infographic") {
+          setHandoffMode(pending.mode);
+          setHandoff(true);
+        }
+        if (pending.detail) {
+          pendingDetailRef.current = { target: pending.detail, story: pending.story };
+        }
+      });
+      return;
+    }
+    if (pending.starter || pending.mode || pending.detail || pending.window) {
+      sandboxAutoOpened.current = true;
+      openStarterByName(pending.starter ?? "SaaS overview", {
+        detail: pending.detail,
+        story: pending.story,
+        mode: pending.mode,
+        window: pending.window,
+      });
+    }
+  }, [sourcesLoaded, model, session.canAdmin, activateSampleWorld, openStarterByName]);
+
+  // In Public Sandbox mode, open the flagship SaaS overview dashboard immediately on first visit
+  // so visitors land directly inside a live, populated executive dashboard rather than a blank menu.
+  useEffect(() => {
+    if (!sandboxMode || sandboxAutoOpened.current || !model || book || view !== "home" || link.current || shareLink.current) return;
+    const starter = showcaseStarters()["SaaS overview"];
+    if (!starter || !model.metrics.ending_mrr) return;
+    sandboxAutoOpened.current = true;
+    const fitted = fitStarter(starter, DEFAULT_CANVAS, freshCanvas().width);
+    if (beginDocument(fitted.spec, { canvas: fitted.canvas })) {
+      setTemplateId("starter:SaaS overview");
+      pendingFit.current = true;
+    }
+  }, [sandboxMode, model, book, view, freshCanvas, beginDocument]);
 
   if (!model) return bootError ? <div className="setup-empty"><Connections sources={sources} activeId={activeSourceId} sandboxMode={sandboxMode} onSelect={switchSource} onRefresh={() => { refreshSources(); switchSource(""); }} principals={principals} policies={policies} /><p role="alert">{session.canAdmin ? "Connect a source to open your metric catalogue." : "No accessible source is ready. Contact your workspace administrator."}</p></div> : <div className="boot">Loading semantic layer…</div>;
 
@@ -884,18 +1090,91 @@ export function App() {
 
       <main className="main" ref={mainRef}>
         {sandboxMode && !sandboxDismissed && (
-          <div className="sandbox-banner" role="status">
-            <span>
-              <strong>Public Sandbox</strong> · Live sample warehouse loaded — toggle Story &amp; Infographic below, or upload your own file.
-            </span>
+          <div className="sandbox-banner" role="region" aria-label="Interactive sandbox playground">
+            <div className="sandbox-worlds" role="group" aria-label="Switch sample dataset world">
+              <span className="sandbox-kicker">LIVE SANDBOX</span>
+              <button
+                type="button"
+                className={"sandbox-world-pill" + ((activeSourceId === "duckglue-local" || !activeSourceId) ? " active" : "")}
+                disabled={worldBusy !== null}
+                onClick={() => void switchToSaasWorld()}
+              >
+                {worldBusy === "saas" ? "Loading…" : "📊 SaaS Revenue"}
+              </button>
+              {session.canAdmin && (
+                <>
+                  <button
+                    type="button"
+                    className={"sandbox-world-pill" + (activeSourceId.startsWith("coffee-roastery-2tab") ? " active" : "")}
+                    disabled={worldBusy !== null}
+                    onClick={() => void activateSampleWorld("roastery-2tab-xlsx")}
+                  >
+                    {worldBusy === "roastery-2tab-xlsx" ? "Cleaning .xlsx…" : "☕ Coffee Roastery"}
+                  </button>
+                  <button
+                    type="button"
+                    className={"sandbox-world-pill" + (activeSourceId.startsWith("us-grid-renewables") ? " active" : "")}
+                    disabled={worldBusy !== null}
+                    onClick={() => void activateSampleWorld("grid-renewables")}
+                  >
+                    {worldBusy === "grid-renewables" ? "Cleaning CSV…" : "⚡ Grid Renewables"}
+                  </button>
+                </>
+              )}
+            </div>
+            <div className="sandbox-quests" role="group" aria-label="20-second interactive tour">
+              <span className="sandbox-quest-label">Try ({completedQuests.length}/3):</span>
+              <button
+                type="button"
+                className={"sandbox-quest-pill" + (completedQuests.includes("story") ? " done" : "")}
+                onClick={() => {
+                  const target = dash?.tiles.find((t) => explorationActions.current.has(t.id) && (t.metrics.includes("ending_mrr") || t.chart === "kpi"))
+                    ?? dash?.tiles.find((t) => explorationActions.current.has(t.id));
+                  if (target) {
+                    const open = explorationActions.current.get(target.id);
+                    if (open) {
+                      open();
+                      queueMicrotask(() => setInvestigating((cur) => cur ? { ...cur, initialMode: "smart", modeSeq: (cur.modeSeq ?? 0) + 1 } : cur));
+                    }
+                  } else {
+                    void switchToSaasWorld({ detail: "ending_mrr", story: true });
+                  }
+                }}
+              >
+                {completedQuests.includes("story") ? "✓" : "①"} KPI Story Arcs
+              </button>
+              <button
+                type="button"
+                className={"sandbox-quest-pill" + (completedQuests.includes("poster") ? " done" : "")}
+                onClick={() => {
+                  if (!dash?.tiles.length) {
+                    openStarterByName("SaaS overview", { mode: "infographic" });
+                  } else {
+                    setHandoffMode("infographic");
+                    setHandoff(true);
+                  }
+                }}
+              >
+                {completedQuests.includes("poster") ? "✓" : "②"} Broadside Poster
+              </button>
+              {session.canAdmin && (
+                <button
+                  type="button"
+                  className={"sandbox-quest-pill" + (completedQuests.includes("messy") ? " done" : "")}
+                  onClick={() => { setInitialSample("messy-roastery-pnl"); setSpreadsheetImport(true); }}
+                >
+                  {completedQuests.includes("messy") ? "✓" : "③"} Clean Messy Sheet
+                </button>
+              )}
+            </div>
             <div className="sandbox-banner-actions">
               {session.canAdmin && (
-                <button type="button" className="sandbox-upload-btn" onClick={() => setSpreadsheetImport(true)}>
+                <button type="button" className="sandbox-upload-btn" onClick={() => { setInitialSample(null); setSpreadsheetImport(true); }}>
                   ⊞ Drop Excel / CSV
                 </button>
               )}
               <a href="https://github.com/Evinanderson89/semantic-canvas#quick-start" target="_blank" rel="noreferrer">
-                Self-host in 60s ↗
+                Self-host ↗
               </a>
               <button type="button" className="link" aria-label="Dismiss sandbox banner" onClick={() => setSandboxDismissed(true)}>
                 ✕
@@ -955,7 +1234,7 @@ export function App() {
         ) : !dash && view === "modeler" ? (
           <Modeler sources={sources} onPublished={() => refreshSources()} onImportSpreadsheet={session.canAdmin ? () => setSpreadsheetImport(true) : undefined} />
         ) : !dash ? (
-          <>{session.canEdit ? <Entry model={model} onDemo={demoDashboardAvailable(model) ? () => { const c = freshCanvas(); if (beginDocument(demoDashboard(c.width), { canvas: c })) { pendingFit.current = true; setView("home"); } } : undefined} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)} onSpreadsheet={session.canAdmin ? () => setSpreadsheetImport(true) : undefined}
+          <>{session.canEdit ? <Entry model={model} worldBusy={worldBusy} onDemo={demoDashboardAvailable(model) ? () => { const c = freshCanvas(); if (beginDocument(demoDashboard(c.width), { canvas: c })) { pendingFit.current = true; setView("home"); } } : undefined} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)} onSpreadsheet={session.canAdmin ? () => { setInitialSample(null); setSpreadsheetImport(true); } : undefined} onOpenSaasStory={() => void switchToSaasWorld({ detail: "ending_mrr", story: true })} onOpenSaasPoster={() => openStarterByName("SaaS overview", { mode: "infographic" })} onQuickWorld={session.canAdmin ? (id: SampleWorkbookId) => void activateSampleWorld(id) : undefined} onInspectMessy={session.canAdmin ? () => { setInitialSample("messy-roastery-pnl"); setSpreadsheetImport(true); } : undefined}
                  onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} /> : <div className="explore"><span className="eyebrow">Company workspace</span><h1>Your metrics, in focus.</h1><p className="lede">Open a shared dashboard below, or browse CoreCanvas Library. Filters and drill-downs follow your company’s data permissions.</p></div>}
         <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>{session.mode === "team" ? "Shared dashboards and your drafts in this tab" : "Saved dashboards and drafts on this computer"}</span></div>
           <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
@@ -1021,6 +1300,21 @@ export function App() {
               <button className="save-button" onClick={() => save()} disabled={saving || !session.canEdit} aria-label="Save dashboard">
                 {saving ? "Saving…" : "Save"}
               </button>
+              <button
+                type="button"
+                className="review-action"
+                disabled={!dash.tiles.length}
+                title="Copy a shareable link to this dashboard and date window"
+                onClick={async () => {
+                  const ok = await copyShareUrl();
+                  if (ok) {
+                    setTopbarLinkCopied(true);
+                    setTimeout(() => setTopbarLinkCopied(false), 2200);
+                  }
+                }}
+              >
+                {topbarLinkCopied ? "✓ Link copied" : "Copy link"}
+              </button>
               <button className="review-action" disabled={!dash.tiles.length} onClick={() => { setHandoffMode("dashboard"); setHandoff(true); }}>Review and share</button>
               <Popover label="Dashboard actions" trigger={<span aria-hidden="true">•••</span>} align="end" className="document-menu">
                 {(close) => <>
@@ -1059,12 +1353,13 @@ export function App() {
                   <button
                     type="button"
                     className="journey-step"
-                    aria-pressed={!canvas.locked && !handoff && !aiRedesign}
+                    aria-pressed={!canvas.locked && !handoff && !aiRedesign && (!sandboxMode || sandboxToolsOpen)}
                     title="Edit tiles, layout, and chart formatting on the canvas"
                     onClick={() => {
                       setHandoff(false);
                       setAiRedesign(false);
                       if (canvas.locked) changeCanvas({ ...canvas, locked: false });
+                      if (sandboxMode) setSandboxToolsOpen((v) => !v);
                     }}
                   >
                     <span className="journey-num">1</span>
@@ -1132,7 +1427,7 @@ export function App() {
             {(book!.filters ?? []).some(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)) && <div className="shared-filter-shelf" aria-label="Dashboard filters">
               {(book!.filters ?? []).filter(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)).map(f => <FilterControl key={f.id} compact filter={f} value={filterValues[f.id] ?? f.defaultValue ?? {}} onChange={v => setFilterValues(values => ({ ...values, [f.id]: v }))} spec={book!} model={model} activeTab={currentTab(book!, activeTabId).id} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onEdit={!canvas.locked ? () => setFilterEditing(f.id) : undefined} />)}
             </div>}
-            {!canvas.locked && (
+            {!canvas.locked && (!sandboxMode || sandboxToolsOpen) && (
               <EditBar model={model} canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit} onSettings={() => setSettingsOpen(true)} onRedesign={() => setAiRedesign(true)}
                        selected={selected} tiles={dash.tiles}
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
@@ -1244,9 +1539,11 @@ export function App() {
 
       {spreadsheetImport && session.canAdmin && (
         <SpreadsheetImport
-          onClose={() => setSpreadsheetImport(false)}
+          initialSample={initialSample}
+          onClose={() => { setSpreadsheetImport(false); setInitialSample(null); }}
           onImported={({ sourceId, label, tableName, metrics }) => {
             setSpreadsheetImport(false);
+            setInitialSample(null);
             refreshSources();
             sourceRef.current = sourceId;
             setSourceId(sourceId);
@@ -1335,6 +1632,7 @@ export function App() {
           aiAvailable={aiAvailable} initialMode={investigating.initialMode} modeSeq={investigating.modeSeq} setupChanged={investigating.setupChanged}
           dirtyDashboard={dirty} savingDashboard={saving}
           onSaveDashboard={!sandboxMode && session.canEdit && !canvas.locked ? () => save(false, true) : undefined}
+          onCopyShareLink={(storyOpen) => copyShareUrl({ detail: invTile.metrics[0] ?? invTile.id, story: storyOpen })}
           onConfigure={configuration => {
             if (!session.canEdit || canvas.locked) return;
             commit({ ...dash, tiles: dash.tiles.map(t => t.id === investigating.id ? { ...t, detailDashboard: configuration } : t) });
@@ -1358,6 +1656,7 @@ export function App() {
         onClose={() => setHandoff(false)} onKeepBrief={brief => { if (book && session.canEdit) { const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); } }}
         onSave={async brief => { if (!book || !session.canEdit || saving) throw new Error("Saving is unavailable"); const next = withPresentationBrief(book, activeTabId, brief); if (next !== book) commitBook(next); await save(false, true, next); }}
         onWatch={() => { chartPreferences.update("alerts", true); setHandoff(false); setNotice("Chart alerts are visible. Choose a chart’s bell to preview a watch. Save edits first; watches use saved filter defaults.", "info"); }}
+        onCopyShareLink={(mode) => copyShareUrl({ mode })}
         onImproveArrange={session.canEdit ? () => {
           setHandoff(false);
           if (canvas.locked) changeCanvas({ ...canvas, locked: false });
@@ -1393,12 +1692,42 @@ export function App() {
   );
 }
 
-function Entry({ model, onSuggest, onScratch, onReference, onSpreadsheet, onDemo }: any) {
+function Entry({ model, worldBusy, onSuggest, onScratch, onReference, onSpreadsheet, onDemo, onOpenSaasStory, onOpenSaasPoster, onQuickWorld, onInspectMessy }: any) {
   return (
     <div className="entry">
       <div className="eyebrow">Semantic Canvas</div>
       <h2>Dashboards from<br /><em>governed metrics.</em></h2>
       <p className="lede">Drop an Excel or CSV sheet, ask a question in plain English, or sketch a layout. Every chart uses reviewed definitions, and the brief shows what it leaves out.</p>
+      <div className="entry-playgrounds" role="region" aria-label="1-click interactive playgrounds">
+        <span className="broadside-eyebrow">JUMP STRAIGHT IN · 1-CLICK LIVE PLAYGROUNDS</span>
+        <div className="entry-playground-pills">
+          {onOpenSaasStory && (
+            <button type="button" className="entry-play-pill primary-pill" disabled={worldBusy !== null} onClick={onOpenSaasStory}>
+              📊 SaaS Overview + KPI Story Arcs
+            </button>
+          )}
+          {onOpenSaasPoster && (
+            <button type="button" className="entry-play-pill" disabled={worldBusy !== null} onClick={onOpenSaasPoster}>
+              📰 Broadside Infographic Poster
+            </button>
+          )}
+          {onQuickWorld && (
+            <button type="button" className="entry-play-pill" disabled={worldBusy !== null} onClick={() => onQuickWorld("roastery-2tab-xlsx")}>
+              {worldBusy === "roastery-2tab-xlsx" ? "Cleaning .xlsx…" : "☕ Specialty Coffee Roastery (2-Tab .xlsx)"}
+            </button>
+          )}
+          {onQuickWorld && (
+            <button type="button" className="entry-play-pill" disabled={worldBusy !== null} onClick={() => onQuickWorld("grid-renewables")}>
+              {worldBusy === "grid-renewables" ? "Cleaning CSV…" : "⚡ U.S. Grid Renewables & Spot Prices"}
+            </button>
+          )}
+          {onInspectMessy && (
+            <button type="button" className="entry-play-pill" disabled={worldBusy !== null} onClick={onInspectMessy}>
+              ✨ Inspect Messy Excel Cleaner
+            </button>
+          )}
+        </div>
+      </div>
       {onDemo && <button className="demo-entry-link" onClick={onDemo}>Try the design playground <span aria-hidden="true">→</span><small>Start with a messy dashboard. Improve the charts, then shape the story.</small></button>}
       <div className="model-summary"><span className="dot ready" />{prettifyModelName(model.name)}<span>· {Object.keys(model.metrics).length} metrics ready to explore</span></div>
       <div className="paths">

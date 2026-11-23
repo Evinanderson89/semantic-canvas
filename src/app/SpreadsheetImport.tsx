@@ -1,14 +1,52 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { StudioDialog } from "./StudioDialog.tsx";
 import { readResponse } from "./http.ts";
 import {
-  SAMPLE_SPREADSHEET_CSV,
-  SAMPLE_SPREADSHEET_NAME,
+  buildSampleWorkbookPayload,
+  SAMPLE_WORKBOOKS,
+  type SampleWorkbookId,
+  type SampleWorkbookMeta,
   type SpreadsheetColumnProfile,
   type SpreadsheetColumnRole,
   type SpreadsheetDetectedJoin,
   type SpreadsheetPreview,
 } from "../modeler/spreadsheetTypes.ts";
+
+export async function quickImportSampleWorkbook(id: SampleWorkbookId): Promise<{
+  sourceId: string;
+  label: string;
+  tableName: string;
+  metrics: string[];
+}> {
+  const built = await buildSampleWorkbookPayload(id);
+  const preview = (await fetch("/api/modeler/spreadsheet/preview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ fileName: built.fileName, format: built.format, content: built.content }),
+  }).then(readResponse)) as SpreadsheetPreview;
+  const res = await fetch("/api/modeler/spreadsheet/import", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      fileName: built.fileName,
+      format: built.format,
+      content: built.content,
+      sourceId: built.meta.preferredSourceId,
+      label: built.meta.title,
+      grain: preview.suggestedGrain,
+      timeColumn: preview.suggestedTimeColumn ?? null,
+      reportingLag: built.meta.defaultLag,
+      choices: preview.columns.map((c) => ({ name: c.name, role: c.role, label: c.label })),
+      joins: preview.detectedJoins ?? [],
+    }),
+  }).then(readResponse);
+  return {
+    sourceId: res.sourceId,
+    label: built.meta.title,
+    tableName: res.tableName,
+    metrics: res.metrics ?? [],
+  };
+}
 
 const ROLE_META: Record<SpreadsheetColumnRole, { label: string; badge: string; next: SpreadsheetColumnRole }> = {
   date: { label: "📅 Date", badge: "role-date", next: "category" },
@@ -49,16 +87,20 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 }
 
 export function SpreadsheetImport({
+  initialSample = null,
   onClose,
   onImported,
 }: {
+  initialSample?: SampleWorkbookId | null;
   onClose: () => void;
   onImported: (result: { sourceId: string; label: string; tableName: string; metrics: string[] }) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const autoLoadedSample = useRef<SampleWorkbookId | null>(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState<"preview" | "import" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [activeSample, setActiveSample] = useState<SampleWorkbookMeta | null>(null);
 
   const [payload, setPayload] = useState<{ fileName: string; format: "csv" | "xlsx"; content: string } | null>(null);
   const [preview, setPreview] = useState<SpreadsheetPreview | null>(null);
@@ -70,7 +112,10 @@ export function SpreadsheetImport({
   const [reportingLag, setReportingLag] = useState<number>(0);
   const [roles, setRoles] = useState<Record<string, SpreadsheetColumnRole>>({});
 
-  const requestPreview = async (next: { fileName: string; format: "csv" | "xlsx"; content: string }) => {
+  const requestPreview = async (
+    next: { fileName: string; format: "csv" | "xlsx"; content: string },
+    sampleMeta: SampleWorkbookMeta | null = null,
+  ) => {
     setBusy("preview");
     setError(null);
     try {
@@ -81,12 +126,13 @@ export function SpreadsheetImport({
       }).then(readResponse)) as SpreadsheetPreview;
       setPayload(next);
       setPreview(data);
+      setActiveSample(sampleMeta);
       setActiveSheetIdx(0);
       setJoins(data.detectedJoins ?? []);
-      setLabel(data.label);
+      setLabel(sampleMeta?.title ?? data.label);
       setGrain(data.suggestedGrain);
       setTimeColumn(data.suggestedTimeColumn ?? "");
-      setReportingLag(0);
+      setReportingLag(sampleMeta?.defaultLag ?? 0);
       setRoles(Object.fromEntries(data.columns.map((c) => [c.name, c.role])));
     } catch (e: any) {
       setError(e?.message ?? "Could not read that spreadsheet. Try a .csv or .xlsx file.");
@@ -104,22 +150,68 @@ export function SpreadsheetImport({
     const lower = file.name.toLowerCase();
     if (lower.endsWith(".xlsx")) {
       const buf = await file.arrayBuffer();
-      await requestPreview({ fileName: file.name, format: "xlsx", content: arrayBufferToBase64(buf) });
+      await requestPreview({ fileName: file.name, format: "xlsx", content: arrayBufferToBase64(buf) }, null);
     } else if (lower.endsWith(".csv") || lower.endsWith(".tsv") || file.type.includes("csv") || file.type === "text/plain") {
       const text = await file.text();
-      await requestPreview({ fileName: file.name, format: "csv", content: text });
+      await requestPreview({ fileName: file.name, format: "csv", content: text }, null);
     } else {
       setError("Please upload an Excel (.xlsx) or CSV (.csv / .tsv) spreadsheet.");
     }
   };
 
-  const loadSample = () => {
-    void requestPreview({
-      fileName: SAMPLE_SPREADSHEET_NAME,
-      format: "csv",
-      content: SAMPLE_SPREADSHEET_CSV,
-    });
+  const loadSampleWorkbook = async (id: SampleWorkbookId) => {
+    setBusy("preview");
+    setError(null);
+    try {
+      const built = await buildSampleWorkbookPayload(id);
+      await requestPreview({ fileName: built.fileName, format: built.format, content: built.content }, built.meta);
+    } catch (e: any) {
+      setError(e?.message ?? "Could not prepare sample workbook.");
+      setBusy(null);
+    }
   };
+
+  const instantOpenSample = async (id: SampleWorkbookId) => {
+    setBusy("import");
+    setError(null);
+    try {
+      const imported = await quickImportSampleWorkbook(id);
+      onImported(imported);
+    } catch (e: any) {
+      setError(e?.message ?? "Could not import sample workbook.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const downloadRawSample = async (id: SampleWorkbookId) => {
+    try {
+      const built = await buildSampleWorkbookPayload(id);
+      let blob: Blob;
+      if (built.format === "xlsx") {
+        const bin = atob(built.content);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      } else {
+        blob = new Blob([built.content], { type: "text/csv;charset=utf-8" });
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = built.fileName;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e: any) {
+      setError(e?.message ?? "Could not download raw sample.");
+    }
+  };
+
+  useEffect(() => {
+    if (!initialSample || autoLoadedSample.current === initialSample) return;
+    autoLoadedSample.current = initialSample;
+    void loadSampleWorkbook(initialSample);
+  }, [initialSample]);
 
   const handleImport = async () => {
     if (!payload || !preview || busy) return;
@@ -202,15 +294,63 @@ export function SpreadsheetImport({
             >
               <h3>Drop your Excel (.xlsx) or CSV sheet here</h3>
               <p>
-                No SQL, YAML, or database setup required. We read the first 5 rows locally, let you confirm 3 plain-English details, and build an instant governed dashboard.
+                No SQL, YAML, or database setup required. Title rows, Total double-counts, formula errors, wide month columns, and multi-tab joins are cleaned locally in DuckDB.
               </p>
               <div className="sheet-dropzone-actions" onClick={(e) => e.stopPropagation()}>
                 <button type="button" className="primary small" disabled={busy !== null} onClick={() => inputRef.current?.click()}>
                   {busy === "preview" ? "Reading spreadsheet…" : "Choose .xlsx or .csv file"}
                 </button>
-                <button type="button" className="review-action" disabled={busy !== null} onClick={loadSample}>
-                  Try sample Q3 Sales sheet
-                </button>
+              </div>
+            </div>
+
+            <div className="sample-workbooks-section" aria-label="Try a messy real-world sample workbook">
+              <div className="sample-workbooks-head">
+                <span className="broadside-eyebrow">NO FILE HANDY? TRY A REAL-WORLD MESSY WORKBOOK</span>
+                <span className="muted sm">Inspect how ugly corporate traps get cleaned—or download the raw file to check in Excel</span>
+              </div>
+              <div className="sample-workbooks-grid">
+                {SAMPLE_WORKBOOKS.map((wb) => (
+                  <article key={wb.id} className="sample-workbook-card">
+                    <div className="sample-wb-top">
+                      <span className="sample-wb-badge">{wb.badge}</span>
+                      <span className="mono muted sm">.{wb.format}</span>
+                    </div>
+                    <h4>{wb.title}</h4>
+                    <p>{wb.summary}</p>
+                    <div className="sample-wb-traps" aria-label="Traps automatically cleaned">
+                      {wb.trapsFixed.map((trap) => (
+                        <span key={trap} className="sample-wb-trap">✓ {trap}</span>
+                      ))}
+                    </div>
+                    <div className="sample-wb-actions">
+                      <button
+                        type="button"
+                        className="review-action"
+                        disabled={busy !== null}
+                        onClick={() => void loadSampleWorkbook(wb.id)}
+                      >
+                        Inspect cleaning
+                      </button>
+                      <button
+                        type="button"
+                        className="primary small"
+                        disabled={busy !== null}
+                        onClick={() => void instantOpenSample(wb.id)}
+                      >
+                        ⚡ Clean &amp; Open
+                      </button>
+                      <button
+                        type="button"
+                        className="link sm"
+                        disabled={busy !== null}
+                        title={`Download raw ${wb.fileName} to inspect in Excel or Numbers`}
+                        onClick={() => void downloadRawSample(wb.id)}
+                      >
+                        ⬇ Raw
+                      </button>
+                    </div>
+                  </article>
+                ))}
               </div>
             </div>
             {error && <p className="conn-err" role="alert">{error}</p>}
@@ -226,26 +366,47 @@ export function SpreadsheetImport({
                   {isPrimarySheet ? " · Click any column pill below to adjust its role" : " · Lookup / related sheet"}
                 </span>
               </div>
-              <button
-                type="button"
-                className="link"
-                disabled={busy !== null}
-                onClick={() => {
-                  setPreview(null);
-                  setPayload(null);
-                  setJoins([]);
-                  setActiveSheetIdx(0);
-                  setError(null);
-                }}
-              >
-                Choose another file
-              </button>
+              <div className="story-actions">
+                {activeSample && (
+                  <button
+                    type="button"
+                    className="link sm"
+                    disabled={busy !== null}
+                    onClick={() => void downloadRawSample(activeSample.id)}
+                  >
+                    ⬇ Download raw .{activeSample.format}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="link"
+                  disabled={busy !== null}
+                  onClick={() => {
+                    setPreview(null);
+                    setPayload(null);
+                    setActiveSample(null);
+                    setJoins([]);
+                    setActiveSheetIdx(0);
+                    setError(null);
+                  }}
+                >
+                  Choose another file
+                </button>
+              </div>
             </div>
 
             {preview.cleaningNotes && preview.cleaningNotes.length > 0 && (
               <div className="sheet-cleaning-banner" role="status">
-                <strong>✨ Auto-cleaned messy spreadsheet:</strong>{" "}
-                <span>{preview.cleaningNotes.join(" · ")}</span>
+                <div>
+                  <strong>✨ Auto-cleaned messy spreadsheet:</strong>{" "}
+                  <span>{preview.cleaningNotes.join(" · ")}</span>
+                </div>
+                {activeSample && (
+                  <details className="sheet-raw-before">
+                    <summary>Compare raw messy rows before cleaning</summary>
+                    <pre className="mono">{activeSample.rawSnippet.join("\n")}</pre>
+                  </details>
+                )}
               </div>
             )}
 

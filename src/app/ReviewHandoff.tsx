@@ -20,7 +20,7 @@ import { BriefEvidence } from "./BriefEvidence.tsx";
 import { cardComparison, CARD_COMPARISONS } from "../charts/cardComparison.ts";
 import { resolvedChartKind } from "../suggest/chartRules.ts";
 
-export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope, filtersByTile, drills, scopeWarnings, dirty, canSave, canEdit, activeTabId, initialMode = "dashboard", onKeepBrief, onClose, onSave, onWatch, onLoadMessyDraft, onImproveArrange }: {
+export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope, filtersByTile, drills, scopeWarnings, dirty, canSave, canEdit, activeTabId, initialMode = "dashboard", onKeepBrief, onClose, onSave, onWatch, onLoadMessyDraft, onImproveArrange, onCopyShareLink }: {
   spec: DashboardSpec; canvas: CanvasSpec; model: Model; queryContext: string; evidenceScope: string;
   filtersByTile: Record<string, FilterSpec[]>; drills: Record<string, DrillEntry[]>;
   scopeWarnings: Record<string, string[]>; dirty: boolean; canSave: boolean; canEdit: boolean; activeTabId: string;
@@ -28,9 +28,11 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
   onKeepBrief: (brief: PresentationBrief) => void;
   onClose: () => void; onSave: (brief: PresentationBrief) => Promise<void>; onWatch: () => void;
   onLoadMessyDraft?: () => void; onImproveArrange?: () => void;
+  onCopyShareLink?: (mode: PresentationMode) => Promise<boolean>;
 }) {
   const [checks, setChecks] = useState<Record<string, Readiness>>({});
   const [message, setMessage] = useState("");
+  const [linkCopied, setLinkCopied] = useState(false);
   const [brief, setBrief] = useState<PresentationBrief>(() => structuredClone(currentTab(spec, activeTabId).brief ?? emptyBrief()));
   const [savingBrief, setSavingBrief] = useState(false);
   const { question, takeaway, nextStep } = brief;
@@ -124,6 +126,23 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
       {onImproveArrange && <button type="button" className="review-action" disabled={busy} onClick={() => { if (canEdit) onKeepBrief(brief); onImproveArrange(); }}>Improve &amp; Arrange</button>}
       <button type="button" className="review-action" disabled={busy} onClick={() => setExpanded(v => !v)}>{expanded ? "Edit brief & evidence" : "Expand presentation"}</button>
       <span className="spacer" />
+      {onCopyShareLink && (
+        <button
+          type="button"
+          className="review-action"
+          disabled={busy}
+          title={`Copy a direct link that opens in ${presentation.label} view`}
+          onClick={async () => {
+            const ok = await onCopyShareLink(mode);
+            if (ok) {
+              setLinkCopied(true);
+              setTimeout(() => setLinkCopied(false), 2200);
+            }
+          }}
+        >
+          {linkCopied ? "✓ Link copied" : `Copy ${presentation.label.toLowerCase()} link`}
+        </button>
+      )}
       <button type="button" className="review-action" disabled={!ready || busy} onClick={() => window.print()}>Print / Save PDF</button>
       <button type="button" className="primary" disabled={!ready || busy} onClick={() => void exportPresentation()}>{exporting ? "Exporting…" : `Export ${presentation.label.toLowerCase()} as PNG`}</button>
       {message && <p role="status">{message}</p>}

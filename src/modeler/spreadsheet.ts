@@ -91,7 +91,7 @@ function detectDelimiter(sampleText: string): "," | "\t" | ";" {
 }
 
 const EXCEL_ERROR_RE = /^#(N\/A|DIV\/0!|VALUE!|REF!|NAME\?|NUM!|NULL!|SPILL!|CALC!)$/i;
-const SUMMARY_ROW_LABEL_RE = /^(grand\s+total|sub\s*-?\s*total|total|totals|net\s+total|ytd\s+total|overall\s+total)(\s*:.*)?$/i;
+const SUMMARY_ROW_LABEL_RE = /^(grand\s+total|sub\s*-?\s*total|total|totals|net\s+total|ytd\s+total|overall\s+total)(\s*[:\-–—].*)?$/i;
 const MONTH_MAP: Record<string, string> = {
   jan: "01", january: "01",
   feb: "02", february: "02",

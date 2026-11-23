@@ -30,6 +30,7 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
   const notesId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const [posterTheme, setPosterTheme] = useState<"broadsheet" | "blueprint" | "dark">("broadsheet");
+  const [showColophon, setShowColophon] = useState(true);
   const isMetric = (t: TileSpec) => (t.kind ?? "metric") === "metric";
   const notes = reportFindings(spec.tiles.filter(t => isMetric(t) && checks[t.id]?.dataFindings?.length && checks[t.id].status !== "checking").map(t => {
     const query = visibleQuery(model, t, [...(spec.crossFilters ?? []), ...(filtersByTile[t.id] ?? [])], drills[t.id]);
@@ -63,6 +64,10 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
             </button>
           ))}
         </div>
+        <label className="report-colophon-toggle" title="Include open-source Semantic Canvas signature on exported posters">
+          <input type="checkbox" checked={showColophon} onChange={e => setShowColophon(e.target.checked)} />
+          <span>Colophon</span>
+        </label>
         <button
           type="button"
           className="report-svg-btn"
@@ -163,7 +168,8 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
     {spec.tiles.length > 0 && <footer className="report-broadside-colophon">
       <span>Model: {model.name} ({model.source})</span>
       <span>Snapshot with integrity checksum (SHA-256) · Checks content integrity, not analytical correctness</span>
-      <span>Governed evidence: {spec.tiles.filter(t => (t.kind ?? "metric") === "metric").length} chart tiles · {notes.length} scope & honesty notes</span>
+      <span>Governed evidence: {spec.tiles.filter(t => (t.kind ?? "metric") === "metric").length} chart tiles · {notes.length} scope &amp; honesty notes</span>
+      {showColophon && <span className="report-colophon-brand">Prepared with Semantic Canvas · Open-source governed BI · semanticcanvas.ai</span>}
     </footer>}
     {!spec.tiles.length && <p>Add charts or commentary to create a presentation.</p>}
   </div>;

@@ -163,3 +163,18 @@ for (const width of [390, 768, 1280]) test(`detail dashboard fits ${width}px and
   await dialog.getByRole("button", { name: "Cancel setup", exact: true }).click();
   await expect(dialog.getByRole("heading", { name: "Ending MRR details", exact: true })).toBeVisible();
 });
+
+test("deep-links open KPI Story Builder and messy sample workbooks in one click", async ({ page }) => {
+  await page.goto("/?detail=ending_mrr&story=1");
+  const dialog = popup(page);
+  await expect(dialog.getByRole("heading", { name: "Ending MRR details", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("region", { name: "Smart story subdetails", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Copy link", exact: true })).toBeVisible();
+
+  await page.goto("/?sample=messy-roastery-pnl");
+  const sheetDialog = page.getByRole("dialog", { name: "Drop an Excel or CSV spreadsheet", exact: true });
+  await expect(sheetDialog).toBeVisible();
+  await expect(sheetDialog).toContainText("Coffee Roastery Board P&L");
+  await expect(sheetDialog.locator(".sheet-cleaning-banner")).toContainText("Skipped 2 leading title/banner rows");
+  await expect(sheetDialog.locator(".sheet-cleaning-banner")).toContainText("Unpivoted 6 wide period columns");
+});

@@ -72,6 +72,7 @@ export function Investigation({
   dirtyDashboard,
   savingDashboard,
   onSaveDashboard,
+  onCopyShareLink,
   onConfigure,
   onKeep,
   onClose,
@@ -89,6 +90,7 @@ export function Investigation({
   dirtyDashboard?: boolean;
   savingDashboard?: boolean;
   onSaveDashboard?: () => Promise<void>;
+  onCopyShareLink?: (storyOpen: boolean) => Promise<boolean>;
   onConfigure: (configuration: DetailConfiguration) => void;
   scopeWarnings: string[];
   canKeep: boolean;
@@ -98,6 +100,7 @@ export function Investigation({
   const smartPanelId = useId();
   const smartBtnRef = useRef<HTMLButtonElement>(null);
   const customizeBtnRef = useRef<HTMLButtonElement>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
   const filterSig = JSON.stringify(filters);
   const drillSig = JSON.stringify(drill);
 
@@ -429,9 +432,9 @@ export function Investigation({
               {humanScopeSummary ? ` · ${humanScopeSummary}` : ""}
             </p>
           </div>
-          {!editing && canKeep && (
+          {!editing && (canKeep || onCopyShareLink) && (
             <div className="detail-heading-actions">
-              {plan.options.length > 1 && (
+              {canKeep && plan.options.length > 1 && (
                 <button
                   ref={smartBtnRef}
                   type="button"
@@ -445,18 +448,36 @@ export function Investigation({
                   {unaddedCount > 0 && <span className="smart-subdetails-count">{unaddedCount}</span>}
                 </button>
               )}
-              <button
-                ref={customizeBtnRef}
-                type="button"
-                className="review-action"
-                onClick={() => {
-                  setSmartOpen(false);
-                  setDraft(activeConfig);
-                  setEditing(true);
-                }}
-              >
-                Customize this dashboard
-              </button>
+              {canKeep && (
+                <button
+                  ref={customizeBtnRef}
+                  type="button"
+                  className="review-action"
+                  onClick={() => {
+                    setSmartOpen(false);
+                    setDraft(activeConfig);
+                    setEditing(true);
+                  }}
+                >
+                  Customize this dashboard
+                </button>
+              )}
+              {onCopyShareLink && (
+                <button
+                  type="button"
+                  className="review-action"
+                  title="Copy a direct link that opens straight to this detail sub-dashboard"
+                  onClick={async () => {
+                    const ok = await onCopyShareLink(smartOpen);
+                    if (ok) {
+                      setLinkCopied(true);
+                      setTimeout(() => setLinkCopied(false), 2200);
+                    }
+                  }}
+                >
+                  {linkCopied ? "✓ Link copied" : "Copy link"}
+                </button>
+              )}
             </div>
           )}
         </header>
