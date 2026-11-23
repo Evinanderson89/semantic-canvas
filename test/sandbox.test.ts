@@ -28,6 +28,8 @@ describe("Public Sandbox guard (SC_SANDBOX_MODE)", () => {
     expect(sandboxBlockReason("POST", "/api/modeler/spreadsheet/preview")).toBeNull();
     expect(sandboxBlockReason("POST", "/api/modeler/spreadsheet/import")).toBeNull();
     expect(sandboxBlockReason("POST", "/api/modeler/spreadsheet/refresh/q3-sales")).toBeNull();
+    expect(sandboxBlockReason("POST", "/api/modeler/spreadsheet/refresh/coffee-roastery-2tab")).toMatch(/public sandbox/i);
+    expect(sandboxBlockReason("POST", "/api/modeler/spreadsheet/refresh/duckglue-local")).toMatch(/public sandbox/i);
   });
 
   it("hard-blocks warehouse mutations, .env credential writes, AI key saves, sensitive GETs, local setup checks, MCP, and shared deletions", () => {
@@ -109,6 +111,11 @@ describe("Public Sandbox guard (SC_SANDBOX_MODE)", () => {
   it("marks only uploaded DuckDB spreadsheet sources as refreshable by file upload", () => {
     expect(isRefreshableSpreadsheetSource({ id: "duckglue-local", connector: "duckdb" })).toBe(false);
     expect(isRefreshableSpreadsheetSource({ id: "sample-warehouse", connector: "duckdb" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource({ id: "coffee-roastery-2tab", connector: "duckdb" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource({ id: "coffee-roastery-pnl", connector: "duckdb" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource({ id: "us-grid-renewables", connector: "duckdb" })).toBe(false);
+    expect(isRefreshableSpreadsheetSource("coffee-roastery-2tab")).toBe(false);
+    expect(isRefreshableSpreadsheetSource("q3-sales")).toBe(true);
     expect(isRefreshableSpreadsheetSource({ id: "q3-sales", connector: "duckdb" })).toBe(true);
     expect(isRefreshableSpreadsheetSource({ id: "q3-sales", connector: "DuckDB" })).toBe(true);
     expect(isRefreshableSpreadsheetSource({ id: "prod-pg", connector: "postgres" })).toBe(false);

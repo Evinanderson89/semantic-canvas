@@ -19,6 +19,10 @@ function trendFormatForMetric(m: Metric): TileSpec["format"] | undefined {
   return undefined;
 }
 
+function effectiveImportance(m: Metric): number {
+  return m.importance ?? 50;
+}
+
 /** A useful first draft has a subject, a focal point and supporting sections. */
 export function suggestDashboard(full: Model, opts: { table?: string | null; grain?: string; width?: number } & Brief = {}): DashboardSpec {
   // Ingested-but-unreviewed tables never make it into a proposal, whoever asks.
@@ -32,14 +36,33 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
       ? matched.subject
       : Object.entries(byTable).sort((a,b) => b[1].length - a[1].length)[0]?.[0];
   if (!subject) return { title: prettifyModelName(model.name), tiles: [] };
-  const metrics = [...byTable[subject]].sort((a,b) => (b.importance ?? 0) - (a.importance ?? 0));
-  const selected = (opts.metrics ?? []).map(n => metricOf(model, n)).filter((m): m is Metric => Boolean(m));
+  const allSubjectMetrics = [...byTable[subject]].sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0));
+  const realSubjectMetrics = allSubjectMetrics.filter((m) => effectiveImportance(m) > 20);
+  const metrics = realSubjectMetrics.length >= 2 ? realSubjectMetrics : allSubjectMetrics;
+  const rawSelected = (opts.metrics ?? []).map(n => metricOf(model, n)).filter((m): m is Metric => Boolean(m));
+  const realSelected = rawSelected.filter((m) => effectiveImportance(m) > 20);
+  // Keep explicit selection order among real business metrics, demoting/excluding synthetic fallback row counts (importance <= 20)
+  // whenever >= 2 business metrics exist (while honoring a fallback metric when explicitly requested on its own).
+  const selected =
+    rawSelected.length === 0
+      ? []
+      : realSelected.length >= 2
+        ? realSelected
+        : realSelected.length === 1 && rawSelected.length > 1
+          ? [...realSelected, ...rawSelected.filter((m) => effectiveImportance(m) <= 20)]
+          : rawSelected;
   const cap = opts.audience === "analyst" ? 6 : opts.audience === "operator" ? 4 : 3;
-  const matchedOnSubject = matched?.matchedByTable[subject] ?? [];
+  const rawMatchedOnSubject = matched?.matchedByTable[subject] ?? [];
+  const matchedOnSubject =
+    realSubjectMetrics.length >= 2 && rawMatchedOnSubject.some((m) => effectiveImportance(m) > 20)
+      ? rawMatchedOnSubject.filter((m) => effectiveImportance(m) > 20)
+      : realSubjectMetrics.length >= 2 && rawMatchedOnSubject.every((m) => effectiveImportance(m) <= 20)
+        ? []
+        : rawMatchedOnSubject;
   const headline = selected.length
     ? selected
     : matchedOnSubject.length
-      ? [...matchedOnSubject.slice(0, cap)].sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0))
+      ? [...matchedOnSubject].sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0)).slice(0, cap)
       : metrics.slice(0, cap);
   const tiles: TileSpec[] = [];
   let y = 24, sequence = 0, section = "";
@@ -70,7 +93,8 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
       layout: { x: 24 + (i % cols) * (w + gap), y: y + Math.floor(i / cols) * 172, w, h: 156 } });
   });
   y += Math.ceil(headline.length / cols) * 172 + 24;
-  const primary = headline.find(m => dimensions(m).length);
+  const trendableHeadline = headline.filter(m => dimensions(m).length);
+  const primary = [...trendableHeadline].sort((a, b) => effectiveImportance(b) - effectiveImportance(a))[0];
   if (primary) {
     begin("How it's changing");
     const fmt = trendFormatForMetric(primary);
@@ -78,7 +102,11 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
       chart: "line", ...(fmt ? { format: fmt } : {}), layout: { x: 24, y, w: available, h: 320 } });
     y += 360;
   }
-  const supporting = headline.filter(m => m !== primary && dimensions(m).length);
+  const hasMultipleBusinessMetrics =
+    realSubjectMetrics.length >= 2 || headline.filter((m) => effectiveImportance(m) > 20).length >= 2;
+  const supporting = headline.filter(
+    m => m !== primary && dimensions(m).length && !(hasMultipleBusinessMetrics && effectiveImportance(m) <= 20),
+  );
   if (supporting.length) {
     begin("Supporting context");
     const count = width < 960 ? 1 : 2;
@@ -92,11 +120,20 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
     y += Math.ceil(supporting.length / count) * 316 + 24;
   }
   // Snapshot metrics cannot be summed across all dates into a categorical total.
-  const breakdownMetric = headline.find(m => !requiredDimensions(model, [m.name], []).length);
+  const breakdownMetric = [...headline.filter(m => !requiredDimensions(model, [m.name], []).length)]
+    .sort((a, b) => effectiveImportance(b) - effectiveImportance(a))[0];
   if (opts.includeBreakdowns !== false && breakdownMetric) {
     const base = breakdownMetric.baseTable;
-    const cats = [...categoricalDims(model.tables[base]), ...joinedTableOptions(model, base).flatMap(({ table, path }) =>
-      "error" in path ? [] : categoricalDims(table).map(c => `${table.name}.${c}`))].slice(0, 2);
+    const localCats = categoricalDims(model.tables[base]);
+    const joinedCats = joinedTableOptions(model, base).flatMap(({ table, path }) =>
+      "error" in path ? [] : categoricalDims(table).map(c => `${table.name}.${c}`));
+    // Preserve signed movement bridges first, then prefer cross-table lookup dimensions (e.g. Store city & region)
+    // when available so multi-table models showcase governed cross-sheet breakdowns.
+    const cats = [
+      ...localCats.filter(c => c === "movement_type"),
+      ...joinedCats,
+      ...localCats.filter(c => c !== "movement_type"),
+    ].slice(0, 2);
     if (cats.length) begin("A closer look");
     for (const dim of cats) {
       const isMovementDim = dim === "movement_type" || dim.endsWith(".movement_type");

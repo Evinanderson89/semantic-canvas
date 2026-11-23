@@ -3,7 +3,7 @@ import { useEvidenceDigest } from "./useEvidenceDigest.ts";
 import { briefReviewStatus } from "./evidenceFingerprint.ts";
 import { DataFindings, describeFilter } from "./MetricEvidence.tsx";
 import { visibleQuery } from "./query.ts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { DashboardSpec, FilterSpec, PresentationBrief } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
 import type { CanvasSpec } from "../canvas/presets.ts";
@@ -37,16 +37,19 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
   const [savingBrief, setSavingBrief] = useState(false);
   const { question, takeaway, nextStep } = brief;
   const [mode, setMode] = useState<PresentationMode>(initialMode), [expanded, setExpanded] = useState(initialMode !== "dashboard");
+  const report = useRef<HTMLElement>(null), previewScroll = useRef<HTMLDivElement>(null);
   useEffect(() => {
     setMode(initialMode);
     if (initialMode !== "dashboard") setExpanded(true);
   }, [initialMode]);
+  useLayoutEffect(() => {
+    previewScroll.current?.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [mode, expanded, initialMode]);
   const [exporting, setExporting] = useState(false), [preparedAt] = useState(() => new Date().toISOString());
   const busy = exporting || savingBrief;
   const close = () => { if (!busy) { if (canEdit) onKeepBrief(brief); onClose(); } };
   const editBrief = (field: "question" | "takeaway" | "nextStep", value: string) => setBrief(previous => ({ ...previous, [field]: value }));
   const chooseEvidence = (ids?: string[]) => { setBrief(previous => ({ ...previous, evidenceIds: ids })); setChecks({}); setMessage(""); };
-  const report = useRef<HTMLElement>(null), previewScroll = useRef<HTMLDivElement>(null);
   const presentation = PRESENTATIONS.find(p => p.id === mode)!;
   const changeMode = (next: PresentationMode) => {
     if (next === mode || busy) return;
@@ -203,6 +206,11 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
               <div className="report-masthead-pills">
                 <span className="masthead-pill">Partial periods hatched</span>
                 <span className="masthead-pill" title="SHA-256 checks content integrity, not analytical correctness or authorship.">Snapshot with integrity checksum (SHA-256)</span>
+                {model.hygieneNotes && model.hygieneNotes.length > 0 && (
+                  <span className="hygiene-provenance-pill static" title={model.hygieneNotes.join("\n")}>
+                    ✓ {model.hygieneNotes.length} {model.hygieneNotes.length === 1 ? "data fix" : "data fixes"} verified
+                  </span>
+                )}
               </div>
               <p className="report-model">Model: {model.name} · Current tab and viewing scope{model.calendar?.today ? ` · Reporting date: ${model.calendar.today} (fixed model clock)` : ""}</p>
               {takeaway.trim() && <div className="report-takeaway"><strong>Author’s takeaway</strong><p>{takeaway}</p></div>}

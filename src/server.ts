@@ -4,7 +4,7 @@ import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
-import { createSandboxRateLimiter, isSandboxMode, isSandboxOriginAllowed, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason, sandboxClientKey } from "./security/sandbox.ts";
+import { createSandboxRateLimiter, isRefreshableSpreadsheetSource, isSandboxMode, isSandboxOriginAllowed, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason, sandboxClientKey } from "./security/sandbox.ts";
 import { createScimRouter } from "./security/scim.ts";
 import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
 import { budgetFailure, loadQueryTimeoutMs, requestBudget } from "./connectors/queryBudget.ts";
@@ -50,8 +50,8 @@ import { proposalIssues, proposalToExtension, proposalToYaml } from "./modeler/y
 import { driftOf, extendProposal, dashboardDriftImpact, type DriftFinding } from "./modeler/extend.ts";
 import { updateExtension, writeExtension } from "./sources/extensions.ts";
 import { proposalProblems } from "./modeler/proposals.ts";
-import { buildWorkbookProposal, parseCsv, parseXlsxWorkbook, profileWorkbook, slugifySourceId, writeSpreadsheetParquet } from "./modeler/spreadsheet.ts";
-import { draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
+import { buildWorkbookProposal, parseCsv, parseXlsxWorkbook, prepareWorkbookImport, profileWorkbook, sanitizeIdentifier, slugifySourceId, validateSpreadsheetRefreshInDuckDb, writeSpreadsheetParquet, type SpreadsheetValueType } from "./modeler/spreadsheet.ts";
+import { authoredPath, draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import YAML from "yaml";
@@ -805,7 +805,20 @@ const spreadsheetImportSchema = spreadsheetUploadSchema.extend({
     rightColumn: z.string().min(1).max(128),
     matchRate: z.number().min(0).max(1),
     include: z.boolean(),
+    resolution: z.enum(["deduplicate", "one_to_many", "exclude"]).optional(),
+    cardinality: z.enum(["many_to_one", "one_to_one", "one_to_many", "many_to_many"]).optional(),
+    rightKeyUnique: z.boolean().optional(),
+    duplicateKeyCount: z.number().int().nonnegative().optional(),
+    duplicateRightRows: z.number().int().nonnegative().optional(),
+    allExactDuplicates: z.boolean().optional(),
+    duplicateKeys: z.array(z.any()).optional(),
+    fanoutImpact: z.any().optional(),
+    unmatchedLeftRows: z.number().int().nonnegative().optional(),
   })).max(64).optional(),
+});
+
+const spreadsheetRefreshSchema = spreadsheetUploadSchema.extend({
+  deduplicateKeys: z.boolean().optional(),
 });
 
 function parseUploadedWorkbook(input: z.infer<typeof spreadsheetUploadSchema>) {
@@ -856,6 +869,7 @@ async function evictOldestSandboxSpreadsheets(dataDir: string) {
     }
     await rm(resolve(sheetsRoot, victim), { recursive: true, force: true }).catch(() => {});
     await rm(resolve(dataDir, "models", `${victim}.yaml`), { force: true }).catch(() => {});
+    await rm(resolve(dataDir, "models", "authored", `${victim}.yaml`), { force: true }).catch(() => {});
     current = activeSheetIds();
   }
 }
@@ -863,11 +877,25 @@ async function evictOldestSandboxSpreadsheets(dataDir: string) {
 app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
   const input = spreadsheetImportSchema.parse(req.body ?? {});
   const dataDir = process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
+  const parsedSheets = parseUploadedWorkbook(input);
+  const preview = profileWorkbook(input.fileName, parsedSheets);
+
+  const prepared = prepareWorkbookImport({
+    parsedSheets,
+    preview,
+    joins: input.joins,
+  });
+  if (!prepared.ok) {
+    return res.status(400).json({
+      error: "duplicate_join_key",
+      message: prepared.message,
+      duplicateJoins: prepared.duplicateJoins,
+    });
+  }
+
   if (isSandboxMode()) {
     await evictOldestSandboxSpreadsheets(dataDir);
   }
-  const parsedSheets = parseUploadedWorkbook(input);
-  const preview = profileWorkbook(input.fileName, parsedSheets);
   let sourceId = input.sourceId ?? slugifySourceId(input.label || input.fileName);
   let suffix = 2;
   while (sources.some((s) => s.id === sourceId)) {
@@ -875,20 +903,21 @@ app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
   }
 
   const lakeRoot = resolve(dataDir, "spreadsheets", sourceId);
-  const sheetPreviews = preview.sheets ?? [];
+  const sheetPreviews = prepared.sheets;
   for (let i = 0; i < sheetPreviews.length; i++) {
-    await writeSpreadsheetParquet(lakeRoot, sheetPreviews[i].tableName, sheetPreviews[i].columns, parsedSheets[i].rows);
+    await writeSpreadsheetParquet(lakeRoot, sheetPreviews[i].tableName, sheetPreviews[i].columns, prepared.sheetRows[i]);
   }
 
   const proposal = buildWorkbookProposal({
     sourceId,
     label: input.label.trim(),
     sheets: sheetPreviews,
-    joins: input.joins ?? preview.detectedJoins,
+    joins: prepared.joins,
     primaryGrain: input.grain.trim(),
     primaryTimeColumn: input.timeColumn ?? null,
     primaryReportingLag: input.reportingLag,
     primaryChoices: input.choices,
+    hygieneNotes: prepared.hygieneNotes,
   });
   const issues = proposalIssues(proposal);
   if (issues.length) return res.status(400).json({ error: issues[0], issues });
@@ -918,7 +947,8 @@ app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
     sourceId,
     tableName: preview.tableName,
     sheets: sheetPreviews.map((s) => s.tableName),
-    joins: (input.joins ?? preview.detectedJoins ?? []).filter((j) => j.include).length,
+    joins: prepared.joins.filter((j) => j.include).length,
+    ...(prepared.hygieneNotes.length ? { cleaningNotes: prepared.hygieneNotes } : {}),
     source: source ? describeSource(source) : null,
     sources: added.reload.sources,
     metrics: proposal.metrics.filter((m) => m.include).map((m) => m.name),
@@ -928,6 +958,12 @@ app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
 app.post("/api/modeler/spreadsheet/refresh/:sourceId", safe(async (req, res) => {
   const sourceId = String(req.params.sourceId ?? "");
   if (!SLUG.test(sourceId)) return res.status(400).json({ error: "Invalid source id" });
+  if (isSandboxMode() && !isRefreshableSpreadsheetSource(sourceId)) {
+    return res.status(403).json({
+      error: "Shared sandbox sample worlds cannot be overwritten. Upload your own Excel or CSV workbook to test refresh.",
+      sandbox: true,
+    });
+  }
   const existing = sources.find((s) => s.id === sourceId);
   if (!existing || !existing.model) return res.status(404).json({ error: `Source "${sourceId}" not found` });
 
@@ -937,34 +973,128 @@ app.post("/api/modeler/spreadsheet/refresh/:sourceId", safe(async (req, res) => 
     return res.status(400).json({ error: `Source "${sourceId}" is not a spreadsheet-uploaded source and cannot be refreshed by file upload.` });
   }
 
-  const input = spreadsheetUploadSchema.parse(req.body ?? {});
+  const input = spreadsheetRefreshSchema.parse(req.body ?? {});
   const parsedSheets = parseUploadedWorkbook(input);
   const preview = profileWorkbook(input.fileName, parsedSheets);
   const sheetPreviews = preview.sheets ?? [];
   const expectedTables = Object.keys(existing.model.tables);
 
-  let rowsUpdated = 0;
-  const tablesUpdated: string[] = [];
+  const matchedUploads: { targetTable: string; sheetName: string; columns: typeof sheetPreviews[number]["columns"]; rows: string[][] }[] = [];
+  const sheetNamesByTable = new Map<string, string>();
   for (let i = 0; i < sheetPreviews.length; i++) {
     const sp = sheetPreviews[i];
+    const sheetTableCandidate = sanitizeIdentifier(sp.sheetName, "");
     const targetTable = expectedTables.includes(sp.tableName)
       ? sp.tableName
-      : sheetPreviews.length === 1 && expectedTables.length === 1
-        ? expectedTables[0]
-        : null;
+      : sheetTableCandidate && expectedTables.includes(sheetTableCandidate)
+        ? sheetTableCandidate
+        : sheetPreviews.length === 1 && expectedTables.length === 1
+          ? expectedTables[0]
+          : null;
     if (!targetTable) continue;
-    await writeSpreadsheetParquet(lakeRoot, targetTable, sp.columns, parsedSheets[i].rows);
-    rowsUpdated += parsedSheets[i].rows.length;
-    tablesUpdated.push(targetTable);
+    const modeledCols = new Map(
+      (existing.model.tables[targetTable]?.columns ?? []).map((c) => [c.name.toLowerCase(), c.type.toUpperCase()]),
+    );
+    const alignedColumns = sp.columns.map((col) => {
+      const mType = modeledCols.get(col.name.toLowerCase());
+      if (mType === "VARCHAR" || mType === "BIGINT" || mType === "DOUBLE" || mType === "DATE") {
+        return { ...col, sqlType: mType as SpreadsheetValueType };
+      }
+      return col;
+    });
+    matchedUploads.push({
+      targetTable,
+      sheetName: sp.sheetName,
+      columns: alignedColumns,
+      rows: parsedSheets[i].rows,
+    });
+    sheetNamesByTable.set(targetTable, sp.sheetName);
   }
-  if (tablesUpdated.length === 0) {
+
+  if (matchedUploads.length === 0) {
     return res.status(400).json({
       error: `Uploaded file sheets (${sheetPreviews.map((s) => s.tableName).join(", ")}) did not match existing tables (${expectedTables.join(", ")}).`,
     });
   }
-  const reload = await hotReload();
-  telemetry.log("audit.spreadsheet_refreshed", { actor: actorOf(req), id: sourceId, tables: tablesUpdated, rows: rowsUpdated });
-  res.json({ ok: true, sourceId, tablesUpdated, rowsUpdated, sources: reload.sources });
+
+  const stagingRoot = resolve(dataDir, "spreadsheets", `.refresh-${sourceId}-${randomUUID()}`);
+  try {
+    const stagedTables = new Set<string>();
+    for (const item of matchedUploads) {
+      await writeSpreadsheetParquet(stagingRoot, item.targetTable, item.columns, item.rows);
+      stagedTables.add(item.targetTable);
+    }
+
+    const validation = await validateSpreadsheetRefreshInDuckDb({
+      model: existing.model,
+      lakeRoot,
+      stagingRoot,
+      stagedTables,
+      deduplicateKeys: input.deduplicateKeys === true,
+      sheetNamesByTable,
+    });
+
+    if (!validation.ok) {
+      return res.status(409).json({
+        error: "duplicate_join_key",
+        message: validation.message,
+        duplicateJoins: validation.duplicateJoins,
+        canDeduplicate: validation.canDeduplicate,
+      });
+    }
+
+    const tablesUpdated = matchedUploads.map((m) => m.targetTable);
+    for (const tName of stagedTables) {
+      const destDir = resolve(lakeRoot, tName);
+      await mkdir(destDir, { recursive: true, mode: 0o700 });
+      await rename(
+        resolve(stagingRoot, tName, "part-0.parquet"),
+        resolve(destDir, "part-0.parquet"),
+      );
+      if (!tablesUpdated.includes(tName)) tablesUpdated.push(tName);
+    }
+
+    const baseSheetNotes = parsedSheets.flatMap((s) =>
+      (s.cleaningNotes ?? []).map((n) => (parsedSheets.length > 1 ? `${s.sheetName}: ${n}` : n)),
+    );
+    const cleaningNotes = [...baseSheetNotes, ...validation.dedupeNotes];
+
+    const modelYamlFile = authoredPath(sourceId);
+    if (existsSync(modelYamlFile)) {
+      try {
+        const parsedYaml = YAML.parse(await readFile(modelYamlFile, "utf8")) ?? {};
+        if (parsedYaml && typeof parsedYaml === "object") {
+          parsedYaml.model = parsedYaml.model ?? {};
+          if (cleaningNotes.length > 0) {
+            parsedYaml.model.hygiene_notes = cleaningNotes;
+          } else {
+            delete parsedYaml.model.hygiene_notes;
+          }
+          await writeAuthored(
+            sourceId,
+            "# Authored in Semantic Canvas's Modeler from the warehouse catalogue. Edit freely; the Modeler never overwrites a published file without asking.\n" +
+              YAML.stringify(parsedYaml, { lineWidth: 0 }),
+          );
+        }
+      } catch {
+        // Keep refresh non-fatal if custom model YAML cannot be rewritten
+      }
+    }
+
+    const rowsUpdated = tablesUpdated.reduce((sum, t) => sum + (validation.rowCountsByTable.get(t) ?? 0), 0);
+    const reload = await hotReload();
+    telemetry.log("audit.spreadsheet_refreshed", { actor: actorOf(req), id: sourceId, tables: tablesUpdated, rows: rowsUpdated });
+    res.json({
+      ok: true,
+      sourceId,
+      tablesUpdated,
+      rowsUpdated,
+      ...(cleaningNotes.length ? { cleaningNotes } : {}),
+      sources: reload.sources,
+    });
+  } finally {
+    await rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+  }
 }));
 
 /** Non-secret fields only, for the edit form to pre-fill -- privateKey,

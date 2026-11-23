@@ -1,5 +1,22 @@
 import YAML from "yaml";
+import type { JoinCardinality, Metric } from "../semantic/model.ts";
 import type { Proposal } from "./propose.ts";
+
+export type YamlProposalJoin = Proposal["joins"][number] & {
+  cardinality?: JoinCardinality;
+};
+
+export type YamlProposalMetric = Proposal["metrics"][number] & {
+  importance?: number;
+  unit?: Metric["unit"];
+};
+
+export type YamlProposal = Omit<Proposal, "model" | "joins" | "metrics"> & {
+  model: Proposal["model"] & { hygieneNotes?: string[] };
+  joins: YamlProposalJoin[];
+  metrics: YamlProposalMetric[];
+  hygieneNotes?: string[];
+};
 
 /**
  * A reviewed proposal as a duckglue model file: the same format the sample
@@ -7,7 +24,7 @@ import type { Proposal } from "./propose.ts";
  * the model was authored by a tool. Excluded tables, and joins or metrics
  * that name them, are left out.
  */
-export function proposalToYaml(p: Proposal): string {
+export function proposalToYaml(p: YamlProposal): string {
   const included = new Set(p.tables.filter((t) => t.include).map((t) => t.name));
   const tables: Record<string, unknown> = {};
   for (const t of p.tables) {
@@ -24,13 +41,30 @@ export function proposalToYaml(p: Proposal): string {
     };
   }
   const joins = p.joins.filter((j) => j.include && included.has(j.left) && included.has(j.right))
-    .map((j) => ({ left: j.left, left_on: j.leftOn, right: j.right, right_on: j.rightOn, type: j.type, cardinality: "many_to_one" }));
+    .map((j) => ({ left: j.left, left_on: j.leftOn, right: j.right, right_on: j.rightOn, type: j.type, cardinality: j.cardinality ?? "many_to_one" }));
   const metrics: Record<string, unknown> = {};
   for (const m of p.metrics) {
     if (!m.include || !included.has(m.baseTable)) continue;
-    metrics[m.name] = { label: m.label, base_table: m.baseTable, expression: m.expression, ...(m.description ? { description: m.description } : {}) };
+    metrics[m.name] = {
+      label: m.label,
+      base_table: m.baseTable,
+      expression: m.expression,
+      ...(m.unit ? { unit: m.unit } : {}),
+      ...(m.importance !== undefined ? { importance: m.importance } : {}),
+      ...(m.description ? { description: m.description } : {}),
+    };
   }
-  const doc = { model: { name: p.model.name, description: p.model.description }, tables, joins, metrics };
+  const hygieneNotes = (p.hygieneNotes ?? p.model.hygieneNotes)?.filter((n) => typeof n === "string" && n.trim().length > 0);
+  const doc = {
+    model: {
+      name: p.model.name,
+      description: p.model.description,
+      ...(hygieneNotes?.length ? { hygiene_notes: hygieneNotes } : {}),
+    },
+    tables,
+    joins,
+    metrics,
+  };
   return "# Authored in Semantic Canvas's Modeler from the warehouse catalogue. Edit freely; the Modeler never overwrites a published file without asking.\n" + YAML.stringify(doc, { lineWidth: 0 });
 }
 

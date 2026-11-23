@@ -128,7 +128,11 @@ export interface Model {
   metrics: Record<string, Metric>;
   joins: Join[];
   calendar?: Calendar;
+  /** Automated data-hygiene actions applied during import/refresh (e.g. stripped Grand Totals, deduplicated join keys). */
+  hygieneNotes?: string[];
 }
+
+export type SemanticModel = Model;
 
 export interface SemanticAdapter {
   id: string;

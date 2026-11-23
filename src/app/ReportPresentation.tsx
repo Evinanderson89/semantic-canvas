@@ -21,6 +21,16 @@ export const PRESENTATIONS: { id: PresentationMode; label: string; description: 
   { id: "infographic", label: "Infographic", description: "A compact visual brief with headline numbers and supporting evidence." },
 ];
 
+export function BroadsideHygieneProvenance({ hygieneNotes }: { hygieneNotes?: string[] }) {
+  if (!hygieneNotes || hygieneNotes.length === 0) return null;
+  return (
+    <div className="report-hygiene-provenance" role="note" aria-label="Automated data hygiene provenance">
+      <span className="report-hygiene-kicker">✓ Data hygiene &amp; join safety verified</span>
+      <span className="report-hygiene-items">{hygieneNotes.join(" · ")}</span>
+    </div>
+  );
+}
+
 /** Presentation changes geometry only. Queries, chart types, authored section membership and notes are preserved. */
 export function ReportPresentation({ spec, model, mode, queryContext, filtersByTile, scopeWarnings, drills, checks, onReadiness }: {
   spec: DashboardSpec; model: Model; mode: "story" | "infographic"; queryContext: string;
@@ -166,6 +176,7 @@ export function ReportPresentation({ spec, model, mode, queryContext, filtersByT
       </section>)}
     </aside>}
     {spec.tiles.length > 0 && <footer className="report-broadside-colophon">
+      <BroadsideHygieneProvenance hygieneNotes={model.hygieneNotes} />
       <span>Model: {model.name} ({model.source})</span>
       <span>Snapshot with integrity checksum (SHA-256) · Checks content integrity, not analytical correctness</span>
       <span>Governed evidence: {spec.tiles.filter(t => (t.kind ?? "metric") === "metric").length} chart tiles · {notes.length} scope &amp; honesty notes</span>

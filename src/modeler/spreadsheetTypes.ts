@@ -14,6 +14,25 @@ export interface SpreadsheetColumnProfile {
   samples: string[];
 }
 
+export type SpreadsheetJoinResolution = "deduplicate" | "one_to_many" | "exclude";
+
+export interface SpreadsheetDuplicateKeyDetail {
+  key: string;
+  rightRows: number;
+  rowNumbers: number[];
+  exactDuplicate: boolean;
+  conflictingColumns: string[];
+}
+
+export interface SpreadsheetJoinFanoutImpact {
+  metricColumn: string;
+  metricLabel: string;
+  trueTotal: number;
+  inflatedTotal: number;
+  delta: number;
+  multiplier: number;
+}
+
 export interface SpreadsheetDetectedJoin {
   leftTable: string;
   leftColumn: string;
@@ -21,6 +40,25 @@ export interface SpreadsheetDetectedJoin {
   rightColumn: string;
   matchRate: number;
   include: boolean;
+  rightKeyUnique: boolean;
+  duplicateKeyCount?: number;
+  duplicateRightRows?: number;
+  allExactDuplicates?: boolean;
+  duplicateKeys?: SpreadsheetDuplicateKeyDetail[];
+  fanoutImpact?: SpreadsheetJoinFanoutImpact;
+  resolution?: SpreadsheetJoinResolution;
+  unmatchedLeftRows?: number;
+}
+
+/** Formats a [0, 1] join matchRate honestly: never rounds <1 up to 100% or >0 down to 0%. */
+export function formatSpreadsheetMatchRate(matchRate: number): string {
+  if (!Number.isFinite(matchRate) || matchRate <= 0) return "0%";
+  if (matchRate >= 1) return "100%";
+  const pct = matchRate * 100;
+  const oneDec = Number(pct.toFixed(1));
+  if (oneDec >= 100) return "<100%";
+  if (oneDec <= 0) return ">0%";
+  return Number.isInteger(oneDec) ? `${oneDec}%` : `${oneDec}%`;
 }
 
 export interface SpreadsheetSheetPreview {
@@ -190,13 +228,19 @@ export const SAMPLE_WORKBOOKS: SampleWorkbookMeta[] = [
     format: "xlsx",
     preferredSourceId: "coffee-roastery-2tab",
     defaultLag: 0,
-    summary: "Real 2-sheet Excel workbook joining 24 POS Cafe Orders to a 5-city Store Directory on Store ID (100% match).",
-    trapsFixed: ["Real 2-sheet .xlsx binary", "Banner & Grand Total stripped", "Auto-joined Store ID (100%)"],
+    summary: "Real 2-sheet Excel workbook joining 33 POS Cafe Orders to a 5-city Store Directory with a duplicate STR-101 CRM export row.",
+    trapsFixed: [
+      "Real 2-sheet .xlsx binary",
+      "Banner & Grand Total stripped",
+      "Duplicate Store ID fan-out caught ($160k)",
+      "Auto-joined Store ID (100%)",
+    ],
     rawSnippet: [
       'Tab 1 [Cafe Orders] Row 1: "BLUEBIRD POS EXPORT — Q2–Q3 2026 (UNAUDITED)"',
       "Tab 1 [Cafe Orders] Row 2: Order Date | Order ID | Store ID | Drink Category | Net Sales ($) | Cups Sold",
-      "Tab 1 [Cafe Orders] Row 27: Grand Total | | | | $386,400 | 64,800",
+      "Tab 1 [Cafe Orders] Row 36: Grand Total | | | | $528,200 | 85,130",
       "Tab 2 [Store Directory]: Store ID (STR-101..STR-105) | City | Region | Roastery Format",
+      "Tab 2 [Store Directory] Row 7: STR-101 | Seattle | Pacific Northwest | Reserve Roastery Bar (duplicate CRM row)",
     ],
   },
   {
@@ -245,30 +289,45 @@ export async function buildSampleWorkbookPayload(id: SampleWorkbookId): Promise<
   const s = (value: string) => ({ value, type: String as typeof String });
   const n = (value: number) => ({ value, type: Number as typeof Number });
   const ordersRows: [string, string, string, string, number, number, number][] = [
-    ["2026-03-15", "POS-301", "STR-101", "Espresso & Milk", 14200, 2680, 2410],
-    ["2026-03-15", "POS-302", "STR-102", "Cold Brew & Seasonal", 8900, 1620, 1490],
-    ["2026-03-15", "POS-303", "STR-103", "Espresso & Milk", 11400, 2190, 1960],
-    ["2026-03-15", "POS-304", "STR-104", "Whole Bean Bags", 9600, 520, 3120],
-    ["2026-04-15", "POS-401", "STR-101", "Espresso & Milk", 15100, 2840, 2560],
-    ["2026-04-15", "POS-402", "STR-102", "Cold Brew & Seasonal", 10800, 1960, 1780],
-    ["2026-04-15", "POS-403", "STR-104", "Espresso & Milk", 13200, 2480, 2240],
-    ["2026-04-15", "POS-404", "STR-105", "Cold Brew & Seasonal", 11900, 2160, 1950],
-    ["2026-05-15", "POS-501", "STR-101", "Cold Brew & Seasonal", 16800, 3040, 2740],
-    ["2026-05-15", "POS-502", "STR-103", "Whole Bean Bags", 10400, 560, 3380],
-    ["2026-05-15", "POS-503", "STR-104", "Cold Brew & Seasonal", 14900, 2690, 2420],
-    ["2026-05-15", "POS-504", "STR-105", "Cold Brew & Seasonal", 14600, 2640, 2380],
-    ["2026-06-15", "POS-601", "STR-101", "Cold Brew & Seasonal", 19400, 3510, 3160],
-    ["2026-06-15", "POS-602", "STR-102", "Whole Bean Bags", 11800, 640, 3840],
-    ["2026-06-15", "POS-603", "STR-103", "Espresso & Milk", 13600, 2560, 2310],
-    ["2026-06-15", "POS-604", "STR-105", "Cold Brew & Seasonal", 17800, 3210, 2890],
-    ["2026-07-15", "POS-701", "STR-101", "Cold Brew & Seasonal", 22600, 4080, 3680],
-    ["2026-07-15", "POS-702", "STR-102", "Cold Brew & Seasonal", 15900, 2880, 2590],
-    ["2026-07-15", "POS-703", "STR-104", "Cold Brew & Seasonal", 18700, 3380, 3040],
-    ["2026-07-15", "POS-704", "STR-105", "Cold Brew & Seasonal", 21400, 3860, 3480],
-    ["2026-08-15", "POS-801", "STR-101", "Cold Brew & Seasonal", 24800, 4460, 4020],
-    ["2026-08-15", "POS-802", "STR-103", "Whole Bean Bags", 13900, 750, 4510],
-    ["2026-08-15", "POS-803", "STR-104", "Cold Brew & Seasonal", 20900, 3780, 3410],
-    ["2026-08-15", "POS-804", "STR-105", "Cold Brew & Seasonal", 23800, 4290, 3870],
+    // March 2026 (3 orders)
+    ["2026-03-01", "POS-301", "STR-101", "Espresso & Milk", 14200, 2680, 2410],
+    ["2026-03-15", "POS-302", "STR-103", "Espresso & Milk", 11400, 2190, 1960],
+    ["2026-03-28", "POS-303", "STR-104", "Whole Bean Bags", 9600, 520, 3120],
+    // April 2026 (4 orders)
+    ["2026-04-04", "POS-401", "STR-101", "Espresso & Milk", 15100, 2840, 2560],
+    ["2026-04-12", "POS-402", "STR-102", "Cold Brew & Seasonal", 10800, 1960, 1780],
+    ["2026-04-19", "POS-403", "STR-104", "Espresso & Milk", 13200, 2480, 2240],
+    ["2026-04-27", "POS-404", "STR-105", "Cold Brew & Seasonal", 11900, 2160, 1950],
+    // May 2026 (5 orders)
+    ["2026-05-03", "POS-501", "STR-101", "Cold Brew & Seasonal", 16800, 3040, 2740],
+    ["2026-05-10", "POS-502", "STR-102", "Espresso & Milk", 11600, 2180, 1940],
+    ["2026-05-16", "POS-503", "STR-103", "Whole Bean Bags", 10400, 560, 3380],
+    ["2026-05-22", "POS-504", "STR-104", "Cold Brew & Seasonal", 14900, 2690, 2420],
+    ["2026-05-29", "POS-505", "STR-105", "Cold Brew & Seasonal", 14600, 2640, 2380],
+    // June 2026 (6 orders)
+    ["2026-06-03", "POS-601", "STR-101", "Cold Brew & Seasonal", 19400, 3510, 3160],
+    ["2026-06-08", "POS-602", "STR-102", "Whole Bean Bags", 11800, 640, 3840],
+    ["2026-06-14", "POS-603", "STR-103", "Espresso & Milk", 13600, 2560, 2310],
+    ["2026-06-19", "POS-604", "STR-104", "Cold Brew & Seasonal", 16200, 2940, 2650],
+    ["2026-06-24", "POS-605", "STR-105", "Cold Brew & Seasonal", 17800, 3210, 2890],
+    ["2026-06-29", "POS-606", "STR-101", "Whole Bean Bags", 12400, 680, 3960],
+    // July 2026 (8 orders — summer cold-brew surge)
+    ["2026-07-03", "POS-701", "STR-101", "Cold Brew & Seasonal", 22600, 4080, 3680],
+    ["2026-07-07", "POS-702", "STR-102", "Cold Brew & Seasonal", 15900, 2880, 2590],
+    ["2026-07-11", "POS-703", "STR-103", "Cold Brew & Seasonal", 14200, 2580, 2320],
+    ["2026-07-15", "POS-704", "STR-104", "Cold Brew & Seasonal", 18700, 3380, 3040],
+    ["2026-07-19", "POS-705", "STR-105", "Cold Brew & Seasonal", 21400, 3860, 3480],
+    ["2026-07-23", "POS-706", "STR-101", "Espresso & Milk", 16400, 3090, 2780],
+    ["2026-07-27", "POS-707", "STR-104", "Whole Bean Bags", 13100, 710, 4190],
+    ["2026-07-30", "POS-708", "STR-105", "Espresso & Milk", 14800, 2790, 2510],
+    // August 2026 (7 orders — late-summer finish)
+    ["2026-08-04", "POS-801", "STR-101", "Cold Brew & Seasonal", 26800, 4820, 4340],
+    ["2026-08-09", "POS-802", "STR-102", "Cold Brew & Seasonal", 18500, 3340, 3010],
+    ["2026-08-14", "POS-803", "STR-103", "Whole Bean Bags", 15900, 860, 5120],
+    ["2026-08-19", "POS-804", "STR-104", "Cold Brew & Seasonal", 22900, 4140, 3720],
+    ["2026-08-24", "POS-805", "STR-105", "Cold Brew & Seasonal", 25800, 4650, 4190],
+    ["2026-08-28", "POS-806", "STR-101", "Whole Bean Bags", 16300, 890, 5210],
+    ["2026-08-31", "POS-807", "STR-104", "Espresso & Milk", 19200, 3580, 3220],
   ];
   const blob = await writeXlsxFile([
     {
@@ -277,7 +336,7 @@ export async function buildSampleWorkbookPayload(id: SampleWorkbookId): Promise<
         [s("BLUEBIRD POS EXPORT — Q2–Q3 2026 (UNAUDITED)"), s(""), s(""), s(""), s(""), s(""), s("")],
         [s("Order Date"), s("Order ID"), s("Store ID"), s("Drink Category"), s("Net Sales ($)"), s("Cups Sold"), s("Bean Cost ($)")],
         ...ordersRows.map(([dt, oid, sid, cat, sales, cups, cost]) => [s(dt), s(oid), s(sid), s(cat), n(sales), n(cups), n(cost)]),
-        [s("Grand Total"), s(""), s(""), s(""), n(386400), n(64800), n(69230)],
+        [s("Grand Total"), s(""), s(""), s(""), n(528200), n(85130), n(101090)],
       ],
     },
     {
@@ -289,6 +348,7 @@ export async function buildSampleWorkbookPayload(id: SampleWorkbookId): Promise<
         [s("STR-103"), s("Chicago"), s("Midwest"), s("Neighborhood Cafe")],
         [s("STR-104"), s("Brooklyn"), s("Northeast"), s("Reserve Roastery Bar")],
         [s("STR-105"), s("Austin"), s("Southwest"), s("Cold Brew Taproom")],
+        [s("STR-101"), s("Seattle"), s("Pacific Northwest"), s("Reserve Roastery Bar")],
       ],
     },
   ]).toBlob();

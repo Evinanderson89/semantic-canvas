@@ -10,14 +10,25 @@
 
 export const SANDBOX_MAX_SPREADSHEET_SOURCES = 10;
 
-const BUILTIN_SAMPLE_SOURCE_IDS = new Set(["sample-warehouse", "duckglue-local"]);
+export const BUILTIN_SAMPLE_SOURCE_IDS = new Set([
+  "sample-warehouse",
+  "duckglue-local",
+  "coffee-roastery-pnl",
+  "coffee-roastery-2tab",
+  "us-grid-renewables",
+]);
 
 /**
  * Returns true when a listed source is eligible for an in-place spreadsheet
  * upload refresh in the Connections UI (DuckDB-backed uploaded sheets, never
- * the bundled sample warehouse).
+ * the bundled sample warehouse or shared built-in sample worlds).
  */
-export function isRefreshableSpreadsheetSource(source: { id: string; connector: string | null }): boolean {
+export function isRefreshableSpreadsheetSource(
+  source: string | { id: string; connector?: string | null },
+): boolean {
+  if (typeof source === "string") {
+    return Boolean(source) && !BUILTIN_SAMPLE_SOURCE_IDS.has(source);
+  }
   return Boolean(source.connector?.toLowerCase().includes("duckdb")) && !BUILTIN_SAMPLE_SOURCE_IDS.has(source.id);
 }
 
@@ -56,7 +67,12 @@ export function sandboxBlockReason(method: string, path: string): string | null 
 
   if (upper === "GET" || upper === "HEAD" || upper === "OPTIONS") return null;
 
-  // Allow ephemeral spreadsheet preview, import, and refresh in sandbox mode.
+  // Allow ephemeral spreadsheet preview, import, and refresh in sandbox mode,
+  // while protecting built-in shared sample worlds from anonymous refresh mutation.
+  const refreshMatch = /^\/modeler\/spreadsheet\/refresh\/([^/]+)(\/|$)/.exec(normalized);
+  if (refreshMatch && BUILTIN_SAMPLE_SOURCE_IDS.has(decodeURIComponent(refreshMatch[1]))) {
+    return SANDBOX_BLOCK_MESSAGE;
+  }
   if (/^\/modeler\/spreadsheet(\/|$)/.test(normalized)) return null;
 
   // Prevent visitors from deleting shared dashboards or library items.

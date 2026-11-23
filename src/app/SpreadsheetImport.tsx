@@ -3,14 +3,260 @@ import { StudioDialog } from "./StudioDialog.tsx";
 import { readResponse } from "./http.ts";
 import {
   buildSampleWorkbookPayload,
+  formatSpreadsheetMatchRate,
   SAMPLE_WORKBOOKS,
   type SampleWorkbookId,
   type SampleWorkbookMeta,
   type SpreadsheetColumnProfile,
   type SpreadsheetColumnRole,
   type SpreadsheetDetectedJoin,
+  type SpreadsheetJoinFanoutImpact,
+  type SpreadsheetJoinResolution,
   type SpreadsheetPreview,
+  type SpreadsheetSheetPreview,
 } from "../modeler/spreadsheetTypes.ts";
+
+export function isCurrencyMetricHint(
+  metricColumn: string,
+  metricLabel: string,
+  sheets?: SpreadsheetSheetPreview[] | null,
+  leftTable?: string,
+): boolean {
+  const leftSheet = leftTable ? sheets?.find((s) => s.tableName === leftTable) : undefined;
+  const matchedCol = leftSheet?.columns.find((c) => c.name === metricColumn);
+  if (matchedCol) return matchedCol.formatHint === "currency";
+  return /\$|usd|eur|gbp|sales|rev|revenue|mrr|arr|cost|spend|price|amount|profit|budget/i.test(
+    `${metricColumn} ${metricLabel}`,
+  );
+}
+
+export function formatFanoutNumber(value: number, currency: boolean): string {
+  if (!Number.isFinite(value)) return String(value);
+  const isInt = Math.abs(value - Math.round(value)) < 1e-6;
+  if (currency) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: isInt ? 0 : 2,
+      maximumFractionDigits: isInt ? 0 : 2,
+    }).format(value);
+  }
+  return value.toLocaleString("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: isInt ? 0 : 2,
+  });
+}
+
+export function formatFanoutImpactSummary(impact: SpreadsheetJoinFanoutImpact, currency: boolean): string {
+  return `joining raw rows would inflate ${impact.metricLabel} from ${formatFanoutNumber(impact.trueTotal, currency)} to ${formatFanoutNumber(impact.inflatedTotal, currency)} (+${formatFanoutNumber(impact.delta, currency)} double-count)`;
+}
+
+export function effectiveJoinResolution(join: SpreadsheetDetectedJoin): SpreadsheetJoinResolution {
+  if (!join.include || join.resolution === "exclude") return "exclude";
+  if (join.resolution === "one_to_many") return "one_to_many";
+  return "deduplicate";
+}
+
+export function applyJoinResolution(
+  join: SpreadsheetDetectedJoin,
+  resolution: SpreadsheetJoinResolution,
+): SpreadsheetDetectedJoin {
+  if (resolution === "deduplicate") {
+    return { ...join, include: true, resolution: "deduplicate" };
+  }
+  if (resolution === "one_to_many") {
+    return { ...join, include: true, resolution: "one_to_many" };
+  }
+  return { ...join, include: false, resolution: "exclude" };
+}
+
+const JOIN_RESOLUTION_OPTIONS: { value: SpreadsheetJoinResolution; label: string }[] = [
+  { value: "deduplicate", label: "Deduplicate key (1 row per ID)" },
+  { value: "one_to_many", label: "Keep all rows as 1:N (block fan-out sums)" },
+  { value: "exclude", label: "Skip join" },
+];
+
+export function SpreadsheetJoinsSection({
+  joins,
+  sheets = null,
+  onChange,
+}: {
+  joins: SpreadsheetDetectedJoin[];
+  sheets?: SpreadsheetSheetPreview[] | null;
+  onChange: (updater: (prev: SpreadsheetDetectedJoin[]) => SpreadsheetDetectedJoin[]) => void;
+}) {
+  if (joins.length === 0) return null;
+  const includedJoinCount = joins.filter((j) => j.include).length;
+
+  return (
+    <div className="sheet-joins-box" aria-label="Detected cross-sheet joins">
+      <div className="sheet-joins-head">
+        <strong>Auto-detected cross-sheet joins ({includedJoinCount}/{joins.length})</strong>
+        <span className="muted sm">Canonical key match &amp; N:1 cardinality check across your Excel tabs</span>
+      </div>
+      <div className="sheet-joins-list">
+        {joins.map((j, idx) => {
+          const itemKey = `${j.leftTable}.${j.leftColumn}->${j.rightTable}.${j.rightColumn}`;
+          const matchLabel = `${formatSpreadsheetMatchRate(j.matchRate)} matched`;
+
+          if (j.rightKeyUnique !== false) {
+            return (
+              <div key={itemKey} className="sheet-join-entry clean">
+                <label className="sheet-join-item">
+                  <input
+                    type="checkbox"
+                    checked={j.include}
+                    onChange={(e) =>
+                      onChange((prev) => prev.map((x, k) => (k === idx ? { ...x, include: e.target.checked } : x)))
+                    }
+                  />
+                  <span className="mono">{j.leftTable}.{j.leftColumn}</span>
+                  <span className="muted">→</span>
+                  <span className="mono">{j.rightTable}.{j.rightColumn}</span>
+                  {j.unmatchedLeftRows ? (
+                    <span className="muted sm">({j.unmatchedLeftRows.toLocaleString("en-US")} unmatched)</span>
+                  ) : null}
+                  <span className="sheet-join-rate verified">
+                    {matchLabel} · ✓ Unique key (N:1 verified)
+                  </span>
+                </label>
+              </div>
+            );
+          }
+
+          const resMode = effectiveJoinResolution(j);
+          const rightSheet = sheets?.find((s) => s.tableName === j.rightTable);
+          const rightSheetLabel = rightSheet?.sheetName ?? j.rightTable;
+          const rightColObj = rightSheet?.columns.find((c) => c.name === j.rightColumn);
+          const rightColLabel = rightColObj?.originalHeader || rightColObj?.label || j.rightColumn;
+          const dupKeys = j.duplicateKeys ?? [];
+          const dupCount = j.duplicateKeyCount ?? (dupKeys.length || 1);
+          const keySummary = dupKeys.map((d) => d.key).join(", ");
+          const conflictingCols = Array.from(new Set(dupKeys.flatMap((d) => d.conflictingColumns)));
+          const currency = j.fanoutImpact
+            ? isCurrencyMetricHint(j.fanoutImpact.metricColumn, j.fanoutImpact.metricLabel, sheets, j.leftTable)
+            : false;
+
+          return (
+            <div key={itemKey} className="sheet-join-entry duplicate">
+              <label className="sheet-join-item">
+                <input
+                  type="checkbox"
+                  checked={j.include}
+                  onChange={(e) =>
+                    onChange((prev) =>
+                      prev.map((x, k) =>
+                        k === idx ? applyJoinResolution(x, e.target.checked ? "deduplicate" : "exclude") : x,
+                      ),
+                    )
+                  }
+                />
+                <span className="mono">{j.leftTable}.{j.leftColumn}</span>
+                <span className="muted">→</span>
+                <span className="mono">{j.rightTable}.{j.rightColumn}</span>
+                {j.unmatchedLeftRows ? (
+                  <span className="muted sm">({j.unmatchedLeftRows.toLocaleString("en-US")} unmatched)</span>
+                ) : null}
+                <span className="sheet-join-badges">
+                  <span className="sheet-join-rate">{matchLabel}</span>
+                  <span
+                    className={`sheet-join-guard-pill ${
+                      resMode === "deduplicate" ? "guarded" : resMode === "one_to_many" ? "one-to-many" : "paused"
+                    }`}
+                  >
+                    {resMode === "deduplicate"
+                      ? "✓ Fan-out prevented (1 row/ID)"
+                      : resMode === "one_to_many"
+                        ? "1:N guarded (sums blocked)"
+                        : "⚠️ Duplicate key paused"}
+                  </span>
+                </span>
+              </label>
+
+              <div
+                className={`sheet-join-fanout-card ${j.allExactDuplicates ? "exact" : "conflict"}`}
+                role="region"
+                aria-label={`Data error caught on ${j.rightTable}.${j.rightColumn}`}
+              >
+                <div className="sheet-join-fanout-kicker">
+                  {j.allExactDuplicates
+                    ? "✨ DATA ERROR CAUGHT · EXACT DUPLICATE LOOKUP ROW"
+                    : "⚠️ DATA ERROR CAUGHT · CONFLICTING DUPLICATE JOIN KEY"}
+                </div>
+                <p className="sheet-join-fanout-copy">
+                  <strong>
+                    Caught {dupCount} duplicate ID{dupCount === 1 ? "" : "s"}
+                    {keySummary ? ` (${keySummary})` : ""} in {rightSheetLabel}.{rightColLabel}
+                  </strong>
+                  {j.fanoutImpact && j.fanoutImpact.delta > 0 ? (
+                    <> — {formatFanoutImpactSummary(j.fanoutImpact, currency)}.</>
+                  ) : (
+                    <> — joining raw rows would multiply matched {j.leftTable} rows (1:N fan-out).</>
+                  )}
+                </p>
+                <p className="sheet-join-fanout-sub">
+                  {j.allExactDuplicates
+                    ? "All columns on the duplicate lookup row(s) match identically — deduplicating keeps 1 clean row per ID."
+                    : `Duplicate rows conflict in ${conflictingCols.length ? conflictingCols.join(", ") : "lookup attributes"} — inspect below and choose how to resolve.`}
+                </p>
+
+                {dupKeys.length > 0 && (
+                  <details className="sheet-join-dup-drawer">
+                    <summary>
+                      Inspect duplicate key rows in {rightSheetLabel} ({dupKeys.length})
+                    </summary>
+                    <ul className="sheet-join-dup-list">
+                      {dupKeys.map((dk) => (
+                        <li key={dk.key}>
+                          <code className="mono">{dk.key}</code> · <strong>{dk.rightRows} rows</strong>
+                          {dk.rowNumbers.length > 0
+                            ? ` (rows ${dk.rowNumbers.map((n) => `#${n}`).join(", ")})`
+                            : ""}{" "}
+                          ·{" "}
+                          {dk.exactDuplicate ? (
+                            <span className="dup-exact-tag">Exact duplicate across all columns</span>
+                          ) : (
+                            <span className="dup-conflict-tag">
+                              Conflicting columns: {dk.conflictingColumns.join(", ")}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+
+                <div
+                  className="sheet-join-resolutions"
+                  role="radiogroup"
+                  aria-label={`Join resolution for ${j.leftTable}.${j.leftColumn} to ${j.rightTable}.${j.rightColumn}`}
+                >
+                  {JOIN_RESOLUTION_OPTIONS.map((opt) => {
+                    const active = resMode === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        className={`sheet-join-res-pill${active ? " active" : ""}`}
+                        onClick={() =>
+                          onChange((prev) => prev.map((x, k) => (k === idx ? applyJoinResolution(x, opt.value) : x)))
+                        }
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 export async function quickImportSampleWorkbook(id: SampleWorkbookId): Promise<{
   sourceId: string;
@@ -223,7 +469,19 @@ export function SpreadsheetImport({
         role: roles[c.name] ?? c.role,
         label: c.label,
       }));
-      const res = await fetch("/api/modeler/spreadsheet/import", {
+      const preparedJoins = joins.map((j) => {
+        if (j.rightKeyUnique === false) {
+          const resMode = effectiveJoinResolution(j);
+          return {
+            ...j,
+            include: resMode !== "exclude",
+            resolution: resMode,
+            cardinality: resMode === "one_to_many" ? ("one_to_many" as const) : ("many_to_one" as const),
+          };
+        }
+        return j;
+      });
+      const response = await fetch("/api/modeler/spreadsheet/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -234,9 +492,19 @@ export function SpreadsheetImport({
           timeColumn: timeColumn || null,
           reportingLag,
           choices,
-          joins,
+          joins: preparedJoins,
         }),
-      }).then(readResponse);
+      });
+      if (response.status === 400) {
+        const body = await response.clone().json().catch(() => null);
+        if (body?.error === "duplicate_join_key") {
+          if (Array.isArray(body.duplicateJoins) && body.duplicateJoins.length > 0) {
+            setJoins(body.duplicateJoins);
+          }
+          throw new Error(body.message || "Duplicate join key detected — choose Deduplicate or 1:N before importing.");
+        }
+      }
+      const res = await readResponse(response);
       onImported({
         sourceId: res.sourceId,
         label: label.trim() || preview.label,
@@ -472,29 +740,7 @@ export function SpreadsheetImport({
               </table>
             </div>
 
-            {joins.length > 0 && (
-              <div className="sheet-joins-box" aria-label="Detected cross-sheet joins">
-                <div className="sheet-joins-head">
-                  <strong>Auto-detected cross-sheet joins ({includedJoinCount}/{joins.length})</strong>
-                  <span className="muted sm">Measured by matching exact key values across your Excel tabs</span>
-                </div>
-                <div className="sheet-joins-list">
-                  {joins.map((j, idx) => (
-                    <label key={`${j.leftTable}.${j.leftColumn}->${j.rightTable}.${j.rightColumn}`} className="sheet-join-item">
-                      <input
-                        type="checkbox"
-                        checked={j.include}
-                        onChange={(e) => setJoins((prev) => prev.map((x, k) => k === idx ? { ...x, include: e.target.checked } : x))}
-                      />
-                      <span className="mono">{j.leftTable}.{j.leftColumn}</span>
-                      <span className="muted">→</span>
-                      <span className="mono">{j.rightTable}.{j.rightColumn}</span>
-                      <span className="sheet-join-rate">{Math.round(j.matchRate * 100)}% matched</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
+            <SpreadsheetJoinsSection joins={joins} sheets={sheets} onChange={setJoins} />
 
             <div className="sheet-questions">
               <div className="sheet-q-card">

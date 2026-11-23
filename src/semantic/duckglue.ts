@@ -107,10 +107,15 @@ export const duckglueAdapter: SemanticAdapter = {
       if (c.timezone) { try { new Intl.DateTimeFormat("en", { timeZone: c.timezone }); } catch { throw new Error(`model.calendar.timezone: "${c.timezone}" is not an IANA time zone (America/New_York, Europe/London, UTC)`); } }
       calendar = { weekStart: c.week_start, fiscalYearStartMonth: c.fiscal_year_start_month, ...(c.timezone ? { timezone: c.timezone } : {}), ...(c.today ? { today: c.today } : {}) };
     }
+    const rawHygieneNotes = d.model?.hygiene_notes ?? d.model?.hygieneNotes;
+    const hygieneNotes = rawHygieneNotes === undefined
+      ? undefined
+      : z.array(z.string().min(1).max(2000)).max(200).parse(rawHygieneNotes);
     return {
       source: "duckglue",
       name: d.model?.name ?? "warehouse",
       ...(calendar ? { calendar } : {}),
+      ...(hygieneNotes?.length ? { hygieneNotes } : {}),
       description: (d.model?.description ?? "").trim(),
       tables,
       metrics,

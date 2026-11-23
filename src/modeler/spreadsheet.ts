@@ -1,9 +1,12 @@
-import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { copyFile, mkdir, rename } from "node:fs/promises";
 import { resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { DuckDBInstance } from "@duckdb/node-api";
+import { fansOut, type JoinCardinality, type Metric, type Model } from "../semantic/model.ts";
 import type { Proposal, ProposedMetric } from "./propose.ts";
 import {
+  formatSpreadsheetMatchRate,
   SAMPLE_SPREADSHEET_CSV,
   SAMPLE_SPREADSHEET_NAME,
   type ParsedSpreadsheet,
@@ -11,7 +14,10 @@ import {
   type SpreadsheetColumnProfile,
   type SpreadsheetColumnRole,
   type SpreadsheetDetectedJoin,
+  type SpreadsheetDuplicateKeyDetail,
   type SpreadsheetFormatHint,
+  type SpreadsheetJoinFanoutImpact,
+  type SpreadsheetJoinResolution,
   type SpreadsheetPreview,
   type SpreadsheetSheetChoice,
   type SpreadsheetSheetPreview,
@@ -19,6 +25,7 @@ import {
 } from "./spreadsheetTypes.ts";
 
 export {
+  formatSpreadsheetMatchRate,
   SAMPLE_SPREADSHEET_CSV,
   SAMPLE_SPREADSHEET_NAME,
   type ParsedSpreadsheet,
@@ -26,7 +33,10 @@ export {
   type SpreadsheetColumnProfile,
   type SpreadsheetColumnRole,
   type SpreadsheetDetectedJoin,
+  type SpreadsheetDuplicateKeyDetail,
   type SpreadsheetFormatHint,
+  type SpreadsheetJoinFanoutImpact,
+  type SpreadsheetJoinResolution,
   type SpreadsheetPreview,
   type SpreadsheetSheetChoice,
   type SpreadsheetSheetPreview,
@@ -589,6 +599,98 @@ export function parseNumericValue(raw: string): { value: number; isCurrency: boo
   return { value, isCurrency, isPercent, isInt: !isPercent && !isCurrency && Number.isInteger(n) && !normalized.includes(".") };
 }
 
+/**
+ * Canonicalizes a spreadsheet cell using the exact same coercion rules as sqlLiteral()
+ * so "$1,001", "1,001", and "1001.0" collapse to the same numeric key "1001",
+ * dates normalize to YYYY-MM-DD, and blanks become null.
+ */
+export function canonicalizeSpreadsheetValue(raw: string, sqlType: SpreadsheetValueType): string | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+  if (sqlType === "DATE") {
+    return normalizeDateValue(trimmed);
+  }
+  if (sqlType === "BIGINT") {
+    const num = parseNumericValue(trimmed);
+    if (!num) return null;
+    const rounded = Math.round(num.value);
+    return String(rounded === 0 ? 0 : rounded);
+  }
+  if (sqlType === "DOUBLE") {
+    const num = parseNumericValue(trimmed);
+    if (!num) return null;
+    return String(num.value === 0 ? 0 : num.value);
+  }
+  return trimmed;
+}
+
+const ID_COLUMN_NAME_RE = /(^|_)(id|key|code|uuid)$|^(order|invoice|ticket|txn|transaction)(?:_(?:num|number|no))?$|^sku$/;
+const CURRENCY_HINT_RE = /\$|usd|eur|rev|mrr|arr|sales|spend|cost|price|amount|profit|budget/i;
+
+function isAvgLikeMetricName(colName: string, formatHint: SpreadsheetFormatHint): boolean {
+  return formatHint === "percent" || /rate|avg|average|ratio|price|margin|discount|score/.test(colName);
+}
+
+function roundTwo(n: number): number {
+  const r = Math.round(n * 100) / 100;
+  return r === 0 ? 0 : r;
+}
+
+export function formatImpactAmount(value: number, isCurrency: boolean): string {
+  const rounded = roundTwo(value);
+  const abs = Math.abs(rounded);
+  const formatted = Number.isInteger(abs)
+    ? abs.toLocaleString("en-US")
+    : abs.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const sign = rounded < 0 ? "-" : "";
+  return isCurrency ? `${sign}$${formatted}` : `${sign}${formatted}`;
+}
+
+export function formatJoinDedupeNote(opts: {
+  rightSheetName: string;
+  rightColumnLabel: string;
+  join: Pick<SpreadsheetDetectedJoin, "duplicateRightRows" | "duplicateKeys" | "fanoutImpact" | "allExactDuplicates">;
+  isCurrency?: boolean;
+  onRefresh?: boolean;
+}): string {
+  const count = opts.join.duplicateRightRows ?? opts.join.duplicateKeys?.length ?? 1;
+  const keys = (opts.join.duplicateKeys ?? []).map((d) => d.key);
+  const keySummary =
+    keys.length === 0
+      ? ""
+      : keys.length <= 2
+        ? ` (${keys.join(", ")})`
+        : ` (${keys.slice(0, 2).join(", ")}, +${keys.length - 2} more)`;
+  const conflictSuffix = opts.join.allExactDuplicates === false ? ", kept first row" : "";
+  const refreshSuffix = opts.onRefresh ? " on refresh" : "";
+  const impact = opts.join.fanoutImpact;
+  const currency =
+    opts.isCurrency ??
+    (impact ? CURRENCY_HINT_RE.test(`${impact.metricLabel} ${impact.metricColumn}`) : false);
+  if (impact && impact.delta > 0) {
+    const before = formatImpactAmount(impact.trueTotal, currency);
+    const after = formatImpactAmount(impact.inflatedTotal, currency);
+    return `${opts.rightSheetName}: Deduplicated ${count} duplicate ${opts.rightColumnLabel} row${count === 1 ? "" : "s"}${keySummary}${conflictSuffix}${refreshSuffix} — prevented ${before} → ${after} ${impact.metricLabel} double-count`;
+  }
+  return `${opts.rightSheetName}: Deduplicated ${count} duplicate ${opts.rightColumnLabel} row${count === 1 ? "" : "s"}${keySummary}${conflictSuffix}${refreshSuffix} to preserve unique lookup keys`;
+}
+
+export function formatDuplicateJoinErrorMessage(joins: SpreadsheetDetectedJoin[]): string {
+  const first = joins[0];
+  if (!first) return "Duplicate right-side join keys detected.";
+  const sampleKey = first.duplicateKeys?.[0]?.key ?? "duplicate ID";
+  const sampleRows = first.duplicateKeys?.[0]?.rightRows ?? 2;
+  const impact = first.fanoutImpact;
+  if (impact && impact.delta > 0) {
+    const isCurrency = CURRENCY_HINT_RE.test(`${impact.metricLabel} ${impact.metricColumn}`);
+    const trueStr = formatImpactAmount(impact.trueTotal, isCurrency);
+    const infStr = formatImpactAmount(impact.inflatedTotal, isCurrency);
+    const deltaStr = formatImpactAmount(impact.delta, isCurrency);
+    return `Duplicate key ${sampleKey} in ${first.rightTable}.${first.rightColumn} (${sampleRows} rows) would inflate ${impact.metricLabel} from ${trueStr} to ${infStr} (+${deltaStr} double-count).`;
+  }
+  return `Duplicate key ${sampleKey} in ${first.rightTable}.${first.rightColumn} (${sampleRows} rows) violates many-to-one join uniqueness.`;
+}
+
 export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet): SpreadsheetPreview {
   const sourceId = slugifySourceId(fileName);
   const tableName = sanitizeIdentifier(fileName.replace(/\.(csv|tsv|xlsx|xls)$/i, ""), "sheet_rows");
@@ -605,7 +707,6 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
     usedNames.add(name);
 
     const nonEmpty = parsed.rows.map((r) => (r[idx] ?? "").trim()).filter(Boolean);
-    const uniqueCount = new Set(nonEmpty).size;
     const sampleCheck = nonEmpty.slice(0, 200);
 
     let dateHits = 0, numHits = 0, intHits = 0, currencyHits = 0, percentHits = 0;
@@ -624,28 +725,52 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
     const isDate = total > 0 && dateHits / total >= 0.8;
     const isNum = !isDate && total > 0 && numHits / total >= 0.85;
     const headerLower = header.toLowerCase();
-    const isCurrency = isNum && (currencyHits / total >= 0.3 || /\$|usd|eur|rev|mrr|arr|sales|spend|cost|price|amount|profit|budget/.test(headerLower));
+    const isCurrency = isNum && (currencyHits / total >= 0.3 || CURRENCY_HINT_RE.test(headerLower));
     const isPercent = isNum && (percentHits / total >= 0.3 || /%|rate|pct|percent|margin|ratio|discount|churn|retention/.test(headerLower));
-    const looksLikeId =
-      /(^|_)id$|order|invoice|ticket|txn|transaction|sku|code|uuid/.test(name) &&
-      nonEmpty.length > 0 &&
-      uniqueCount / nonEmpty.length >= 0.9;
+    const isIdNamed = ID_COLUMN_NAME_RE.test(name);
     const looksLikeYear = isNum && intHits === numHits && /^(year|yr|fiscal_year)$/.test(name);
 
     let sqlType: SpreadsheetValueType = "VARCHAR";
+    if (isDate) {
+      sqlType = "DATE";
+    } else if (isIdNamed) {
+      // Numeric ID columns (e.g. "$1,001" / "1001" / "1001.0") use numeric SQL types when all non-empty values parse numerically,
+      // so DuckDB and canonical key checks coerce formatted numeric IDs identically. Alphanumeric IDs ("ORD-1001") stay VARCHAR.
+      const parsedNums = nonEmpty.length > 0 ? nonEmpty.map((v) => parseNumericValue(v)) : [];
+      if (parsedNums.length > 0 && parsedNums.every((n) => n !== null && !n.isPercent)) {
+        const allIntegerValues = parsedNums.every((n) => Number.isInteger(n!.value));
+        sqlType = allIntegerValues ? "BIGINT" : "DOUBLE";
+      } else {
+        sqlType = "VARCHAR";
+      }
+    } else if (isNum && !looksLikeYear) {
+      sqlType = !isCurrency && !isPercent && intHits === numHits ? "BIGINT" : "DOUBLE";
+    }
+
+    const canonicalVals = parsed.rows
+      .map((r) => canonicalizeSpreadsheetValue(r[idx] ?? "", sqlType))
+      .filter((v): v is string => v !== null);
+    const canonicalUniqueCount = new Set(canonicalVals).size;
+    // Strict 100% non-empty canonical uniqueness across all rows is required for primaryKey / "id" role.
+    const strictlyUniqueId =
+      isIdNamed &&
+      parsed.rows.length > 0 &&
+      canonicalVals.length === parsed.rows.length &&
+      canonicalUniqueCount === parsed.rows.length;
+
     let formatHint: SpreadsheetFormatHint = "text";
     let role: SpreadsheetColumnRole = "category";
 
     if (isDate) {
-      sqlType = "DATE";
       formatHint = "date";
       role = "date";
-    } else if (looksLikeId) {
-      sqlType = "VARCHAR";
+    } else if (strictlyUniqueId) {
       formatHint = "text";
       role = "id";
+    } else if (isIdNamed) {
+      formatHint = "text";
+      role = "category";
     } else if (isNum && !looksLikeYear) {
-      sqlType = !isCurrency && !isPercent && intHits === numHits ? "BIGINT" : "DOUBLE";
       formatHint = isCurrency ? "currency" : isPercent ? "percent" : "number";
       role = "metric";
     }
@@ -657,14 +782,21 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
       sqlType,
       formatHint,
       role,
-      uniqueCount,
-      nonEmptyCount: nonEmpty.length,
+      uniqueCount: canonicalUniqueCount,
+      nonEmptyCount: canonicalVals.length,
       samples: nonEmpty.slice(0, 3),
     };
   });
 
   const dateCol = columns.find((c) => c.role === "date")?.name ?? null;
-  const idCol = columns.find((c) => c.role === "id")?.name ?? null;
+  const idCol =
+    columns.find(
+      (c) =>
+        c.role === "id" &&
+        parsed.rows.length > 0 &&
+        c.nonEmptyCount === parsed.rows.length &&
+        c.uniqueCount === parsed.rows.length,
+    )?.name ?? null;
   const nameHint = `${fileName} ${columns.map((c) => c.name).join(" ")}`.toLowerCase();
   const suggestedGrain = /order|invoice|sale|deal|txn|transaction/.test(nameHint)
     ? "One sale or order"
@@ -689,11 +821,232 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
   };
 }
 
+function singularWord(w: string): string {
+  if (w.endsWith("ies") && w.length > 4) return `${w.slice(0, -3)}y`;
+  if ((w.endsWith("ses") || w.endsWith("xes")) && w.length > 4) return w.slice(0, -2);
+  if (w.endsWith("s") && !w.endsWith("ss") && w.length > 3) return w.slice(0, -1);
+  return w;
+}
+
+function tableMatchesKeyStem(tableName: string, keyColName: string): boolean {
+  const rawStem = keyColName.replace(/_?(id|key|code|uuid)$/i, "").toLowerCase();
+  if (!rawStem) return false;
+  const stem = singularWord(rawStem);
+  const tableLower = tableName.toLowerCase();
+  if (singularWord(tableLower) === stem) return true;
+  const tokens = tableLower.split(/_+/).filter(Boolean).map(singularWord);
+  return tokens.includes(stem);
+}
+
+function resolveJoinKeyType(leftType: SpreadsheetValueType, rightType: SpreadsheetValueType): SpreadsheetValueType | null {
+  if (leftType === rightType) return rightType;
+  const leftNum = leftType === "BIGINT" || leftType === "DOUBLE";
+  const rightNum = rightType === "BIGINT" || rightType === "DOUBLE";
+  if (leftNum && rightNum) {
+    return leftType === "DOUBLE" || rightType === "DOUBLE" ? "DOUBLE" : "BIGINT";
+  }
+  return null;
+}
+
+function pickPrimaryAdditiveMetricColumn(
+  columns: SpreadsheetColumnProfile[],
+): { col: SpreadsheetColumnProfile; idx: number } | null {
+  const candidates = columns
+    .map((col, idx) => ({ col, idx }))
+    .filter(({ col }) => col.role === "metric" && (col.sqlType === "DOUBLE" || col.sqlType === "BIGINT"));
+  if (candidates.length === 0) return null;
+  const additive = candidates.filter(({ col }) => !isAvgLikeMetricName(col.name, col.formatHint));
+  const pool = additive.length > 0 ? additive : candidates;
+  return pool.find(({ col }) => col.formatHint === "currency") ?? pool[0];
+}
+
+export function evaluateSheetJoinPair(
+  left: { tableName: string; columns: SpreadsheetColumnProfile[]; rows: string[][] },
+  lIdx: number,
+  right: { tableName: string; columns: SpreadsheetColumnProfile[]; rows: string[][] },
+  rIdx: number,
+): SpreadsheetDetectedJoin | null {
+  const lCol = left.columns[lIdx];
+  const rCol = right.columns[rIdx];
+  if (!lCol || !rCol) return null;
+  const effectiveKeyType = resolveJoinKeyType(lCol.sqlType, rCol.sqlType);
+  if (!effectiveKeyType) return null;
+  if (left.rows.length === 0 || right.rows.length === 0) return null;
+
+  const rowsByKey = new Map<string, number[]>();
+  for (let ri = 0; ri < right.rows.length; ri++) {
+    const k = canonicalizeSpreadsheetValue(right.rows[ri]?.[rIdx] ?? "", effectiveKeyType);
+    if (k === null) continue;
+    const existing = rowsByKey.get(k);
+    if (existing) existing.push(ri);
+    else rowsByKey.set(k, [ri]);
+  }
+  if (rowsByKey.size === 0) return null;
+
+  const leftTotalRows = left.rows.length;
+  let matched = 0;
+  const leftHitsByKey = new Map<string, number>();
+  for (let li = 0; li < leftTotalRows; li++) {
+    const lk = canonicalizeSpreadsheetValue(left.rows[li]?.[lIdx] ?? "", effectiveKeyType);
+    if (lk !== null && rowsByKey.has(lk)) {
+      matched++;
+      leftHitsByKey.set(lk, (leftHitsByKey.get(lk) ?? 0) + 1);
+    }
+  }
+  if (matched === 0) return null;
+
+  const unmatchedLeftRows = leftTotalRows - matched;
+  let matchRate: number;
+  if (matched === leftTotalRows) {
+    matchRate = 1;
+  } else {
+    const rawRate = matched / leftTotalRows;
+    const rounded4 = Number(rawRate.toFixed(4));
+    matchRate = Math.min(0.9999, Math.max(0.0001, rounded4 >= 1 ? 0.9999 : rounded4));
+  }
+
+  const dupEntries = [...rowsByKey.entries()].filter(([, idxs]) => idxs.length > 1);
+  if (dupEntries.length === 0) {
+    return {
+      leftTable: left.tableName,
+      leftColumn: lCol.name,
+      rightTable: right.tableName,
+      rightColumn: rCol.name,
+      matchRate,
+      include: matchRate >= 0.5,
+      rightKeyUnique: true,
+      ...(unmatchedLeftRows > 0 ? { unmatchedLeftRows } : {}),
+    };
+  }
+
+  const allDupDetails: (SpreadsheetDuplicateKeyDetail & { leftHits: number })[] = dupEntries.map(([key, idxs]) => {
+    const conflictingColumns: string[] = [];
+    for (let ci = 0; ci < right.columns.length; ci++) {
+      if (ci === rIdx) continue;
+      const distinctVals = new Set(
+        idxs.map((ri) => canonicalizeSpreadsheetValue(right.rows[ri]?.[ci] ?? "", right.columns[ci].sqlType) ?? ""),
+      );
+      if (distinctVals.size > 1) {
+        conflictingColumns.push(right.columns[ci].name);
+      }
+    }
+    return {
+      key,
+      rightRows: idxs.length,
+      rowNumbers: idxs.map((ri) => ri + 1),
+      exactDuplicate: conflictingColumns.length === 0,
+      conflictingColumns,
+      leftHits: leftHitsByKey.get(key) ?? 0,
+    };
+  });
+
+  allDupDetails.sort(
+    (a, b) =>
+      (b.leftHits > 0 ? 1 : 0) - (a.leftHits > 0 ? 1 : 0) ||
+      b.rightRows - a.rightRows ||
+      a.rowNumbers[0] - b.rowNumbers[0],
+  );
+
+  const allExactDuplicates = allDupDetails.every((d) => d.exactDuplicate);
+  const duplicateKeyCount = allDupDetails.length;
+  const duplicateRightRows = allDupDetails.reduce((sum, d) => sum + (d.rightRows - 1), 0);
+  const duplicateKeys: SpreadsheetDuplicateKeyDetail[] = allDupDetails.slice(0, 5).map(({ leftHits: _lh, ...rest }) => rest);
+
+  let fanoutImpact: SpreadsheetJoinFanoutImpact | undefined;
+  const metricTarget = pickPrimaryAdditiveMetricColumn(left.columns);
+  if (metricTarget) {
+    let trueTotal = 0;
+    let inflatedTotal = 0;
+    for (let li = 0; li < leftTotalRows; li++) {
+      const val = parseNumericValue(left.rows[li]?.[metricTarget.idx] ?? "")?.value ?? 0;
+      const lk = canonicalizeSpreadsheetValue(left.rows[li]?.[lIdx] ?? "", effectiveKeyType);
+      const mult = lk !== null ? Math.max(1, rowsByKey.get(lk)?.length ?? 0) : 1;
+      trueTotal += val;
+      inflatedTotal += val * mult;
+    }
+    const cleanTrue = roundTwo(trueTotal);
+    const cleanInflated = roundTwo(inflatedTotal);
+    const cleanDelta = roundTwo(cleanInflated - cleanTrue);
+    const multiplier = cleanTrue !== 0 ? Math.round((cleanInflated / cleanTrue) * 1000) / 1000 : 1;
+    fanoutImpact = {
+      metricColumn: metricTarget.col.name,
+      metricLabel: metricTarget.col.label,
+      trueTotal: cleanTrue,
+      inflatedTotal: cleanInflated,
+      delta: cleanDelta,
+      multiplier,
+    };
+  }
+
+  const resolution: SpreadsheetJoinResolution = allExactDuplicates ? "deduplicate" : "exclude";
+  const include = allExactDuplicates ? matchRate >= 0.5 : false;
+
+  return {
+    leftTable: left.tableName,
+    leftColumn: lCol.name,
+    rightTable: right.tableName,
+    rightColumn: rCol.name,
+    matchRate,
+    include,
+    rightKeyUnique: false,
+    duplicateKeyCount,
+    duplicateRightRows,
+    allExactDuplicates,
+    duplicateKeys,
+    ...(fanoutImpact ? { fanoutImpact } : {}),
+    resolution,
+    ...(unmatchedLeftRows > 0 ? { unmatchedLeftRows } : {}),
+  };
+}
+
+function scoreJoinDirection(
+  left: { tableName: string; columns: SpreadsheetColumnProfile[]; rows: string[][] },
+  lCol: SpreadsheetColumnProfile,
+  right: { tableName: string; columns: SpreadsheetColumnProfile[]; rows: string[][] },
+  rCol: SpreadsheetColumnProfile,
+  rightKeyUnique: boolean,
+  leftKeyUnique: boolean,
+): number {
+  let score = 0;
+  const rightOwnsKey =
+    (rCol.name === "id" && (lCol.name === `${right.tableName}_id` || lCol.name === `${singularWord(right.tableName)}_id`)) ||
+    tableMatchesKeyStem(right.tableName, rCol.name);
+  const leftOwnsKey =
+    (lCol.name === "id" && (rCol.name === `${left.tableName}_id` || rCol.name === `${singularWord(left.tableName)}_id`)) ||
+    tableMatchesKeyStem(left.tableName, lCol.name);
+
+  if (rightOwnsKey && !leftOwnsKey) score += 50;
+  else if (leftOwnsKey && !rightOwnsKey) score -= 50;
+
+  const leftHasMetrics = pickPrimaryAdditiveMetricColumn(left.columns) !== null;
+  const rightHasMetrics = pickPrimaryAdditiveMetricColumn(right.columns) !== null;
+  if (leftHasMetrics && !rightHasMetrics) score += 35;
+  else if (rightHasMetrics && !leftHasMetrics) score -= 35;
+
+  const leftHasDate = left.columns.some((c) => c.role === "date");
+  const rightHasDate = right.columns.some((c) => c.role === "date");
+  if (leftHasDate && !rightHasDate) score += 15;
+  else if (rightHasDate && !leftHasDate) score -= 15;
+
+  const leftHasDistinctPk = left.columns.some((c) => c.role === "id" && c.name !== lCol.name);
+  const rightHasDistinctPk = right.columns.some((c) => c.role === "id" && c.name !== rCol.name);
+  if (leftHasDistinctPk && !rightHasDistinctPk) score += 20;
+  else if (rightHasDistinctPk && !leftHasDistinctPk) score -= 20;
+
+  if (rightKeyUnique && !leftKeyUnique) score += 10;
+  else if (leftKeyUnique && !rightKeyUnique) score -= 10;
+
+  if (left.rows.length > right.rows.length) score += 5;
+  else if (right.rows.length > left.rows.length) score -= 5;
+
+  return score;
+}
+
 export function detectSheetJoins(
   sheets: { tableName: string; columns: SpreadsheetColumnProfile[]; rows: string[][] }[],
 ): SpreadsheetDetectedJoin[] {
-  const joins: SpreadsheetDetectedJoin[] = [];
-  const seen = new Set<string>();
+  const bestByPair = new Map<string, { join: SpreadsheetDetectedJoin; dirScore: number; order: number }>();
+  let order = 0;
 
   for (let li = 0; li < sheets.length; li++) {
     for (let ri = 0; ri < sheets.length; ri++) {
@@ -702,47 +1055,70 @@ export function detectSheetJoins(
       const right = sheets[ri];
       const rightKeyCols = right.columns
         .map((c, idx) => ({ col: c, idx }))
-        .filter(({ col }) => col.nonEmptyCount > 0 && col.uniqueCount / col.nonEmptyCount >= 0.95 && (col.role === "id" || /(^|_)id$|_code$|_key$/.test(col.name)));
+        .filter(({ col }) => col.nonEmptyCount > 0 && (col.role === "id" || /(^|_)id$|_code$|_key$/.test(col.name)));
 
       for (const { col: rCol, idx: rIdx } of rightKeyCols) {
-        const rightValues = new Set(right.rows.map((r) => (r[rIdx] ?? "").trim()).filter(Boolean));
-        if (rightValues.size === 0) continue;
-
         for (let lIdx = 0; lIdx < left.columns.length; lIdx++) {
           const lCol = left.columns[lIdx];
-          if (lCol.sqlType !== rCol.sqlType) continue;
+          if (!resolveJoinKeyType(lCol.sqlType, rCol.sqlType)) continue;
           const exactNameMatch = lCol.name === rCol.name;
           const fkNameMatch =
             rCol.name === "id" &&
-            (lCol.name === `${right.tableName}_id` || lCol.name === `${right.tableName.replace(/s$/, "")}_id`);
+            (lCol.name === `${right.tableName}_id` || lCol.name === `${singularWord(right.tableName)}_id`);
           if (!exactNameMatch && !fkNameMatch) continue;
 
-          const leftVals = left.rows.map((r) => (r[lIdx] ?? "").trim()).filter(Boolean);
-          if (leftVals.length === 0) continue;
-          let matched = 0;
-          for (const v of leftVals) if (rightValues.has(v)) matched++;
-          const matchRate = Math.round((matched / leftVals.length) * 1000) / 1000;
-          if (matchRate < 0.25) continue;
+          const evaluated = evaluateSheetJoinPair(left, lIdx, right, rIdx);
+          if (!evaluated || evaluated.matchRate < 0.25) continue;
 
-          // Prefer pointing from the larger / fact-like sheet to the unique lookup sheet.
+          const leftKeyUnique =
+            left.rows.length > 0 &&
+            lCol.nonEmptyCount === left.rows.length &&
+            lCol.uniqueCount === left.rows.length;
+          const dirScore = scoreJoinDirection(left, lCol, right, rCol, evaluated.rightKeyUnique, leftKeyUnique);
+          // Skip clearly inverted lookup -> fact candidate when reverse direction is strongly preferred.
+          if (dirScore < 0 && leftKeyUnique && !evaluated.rightKeyUnique && pickPrimaryAdditiveMetricColumn(right.columns) !== null) {
+            continue;
+          }
+
           const pairKey = [left.tableName, right.tableName].sort().join("::");
-          if (seen.has(pairKey)) continue;
-          if (left.rows.length < right.rows.length && left.columns[lIdx].uniqueCount === leftVals.length) continue;
-
-          seen.add(pairKey);
-          joins.push({
-            leftTable: left.tableName,
-            leftColumn: lCol.name,
-            rightTable: right.tableName,
-            rightColumn: rCol.name,
-            matchRate,
-            include: matchRate >= 0.5,
-          });
+          const prev = bestByPair.get(pairKey);
+          const curOrder = order++;
+          if (
+            !prev ||
+            dirScore > prev.dirScore ||
+            (dirScore === prev.dirScore && evaluated.matchRate > prev.join.matchRate) ||
+            (dirScore === prev.dirScore && evaluated.matchRate === prev.join.matchRate && curOrder < prev.order)
+          ) {
+            bestByPair.set(pairKey, { join: evaluated, dirScore, order: curOrder });
+          }
         }
       }
     }
   }
-  return joins.sort((a, b) => b.matchRate - a.matchRate);
+
+  return [...bestByPair.values()]
+    .map((entry) => entry.join)
+    .sort((a, b) => b.matchRate - a.matchRate);
+}
+
+export function deduplicateSheetRowsOnKey(
+  rows: string[][],
+  keyColIdx: number,
+  keySqlType: SpreadsheetValueType,
+): { rows: string[][]; removedCount: number } {
+  const seen = new Set<string>();
+  const kept: string[][] = [];
+  for (const r of rows) {
+    const k = canonicalizeSpreadsheetValue(r[keyColIdx] ?? "", keySqlType);
+    if (k === null) {
+      kept.push(r);
+      continue;
+    }
+    if (seen.has(k)) continue;
+    seen.add(k);
+    kept.push(r);
+  }
+  return { rows: kept, removedCount: rows.length - kept.length };
 }
 
 export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadsheet[]): SpreadsheetPreview {
@@ -781,7 +1157,15 @@ export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadshee
   const detectedJoins = detectSheetJoins(
     profiled.map((p) => ({ tableName: p.tableName, columns: p.columns, rows: p.rows })),
   );
-  const rightSideTargets = new Set(detectedJoins.filter((j) => j.include).map((j) => j.rightTable));
+  const rightSideTargets = new Set(
+    detectedJoins
+      .filter((j) => {
+        if (j.include) return true;
+        const targetSheet = profiled.find((p) => p.tableName === j.rightTable);
+        return targetSheet ? pickPrimaryAdditiveMetricColumn(targetSheet.columns) === null : false;
+      })
+      .map((j) => j.rightTable),
+  );
 
   const sheets: SpreadsheetSheetPreview[] = profiled.map((p) => ({
     sheetName: p.sheetName,
@@ -798,6 +1182,25 @@ export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadshee
   const allCleaningNotes = parsedSheets.flatMap((s) =>
     (s.cleaningNotes ?? []).map((n) => (parsedSheets.length > 1 ? `${s.sheetName}: ${n}` : n)),
   );
+  for (const j of detectedJoins) {
+    if (!j.rightKeyUnique && j.include && j.resolution === "deduplicate") {
+      const rightSheet = profiled.find((p) => p.tableName === j.rightTable);
+      const rightCol = rightSheet?.columns.find((c) => c.name === j.rightColumn);
+      const leftSheet = profiled.find((p) => p.tableName === j.leftTable);
+      const metricCol = leftSheet?.columns.find((c) => c.name === j.fanoutImpact?.metricColumn);
+      if (rightSheet && rightCol) {
+        allCleaningNotes.push(
+          formatJoinDedupeNote({
+            rightSheetName: rightSheet.sheetName,
+            rightColumnLabel: rightCol.originalHeader || rightCol.label || rightCol.name,
+            join: j,
+            isCurrency: metricCol ? metricCol.formatHint === "currency" : undefined,
+          }),
+        );
+      }
+    }
+  }
+
   const primary = sheets.find((s) => s.kind === "fact") ?? sheets[0];
   return {
     sourceId,
@@ -816,17 +1219,195 @@ export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadshee
   };
 }
 
+export type SpreadsheetProposalJoin = Proposal["joins"][number] & {
+  cardinality?: JoinCardinality;
+};
+
+export type SpreadsheetProposedMetric = ProposedMetric & {
+  importance?: number;
+  unit?: Metric["unit"];
+};
+
+export interface SpreadsheetProposal extends Omit<Proposal, "joins" | "metrics"> {
+  joins: SpreadsheetProposalJoin[];
+  metrics: SpreadsheetProposedMetric[];
+  hygieneNotes?: string[];
+}
+
+export type RequestedSpreadsheetJoin = Pick<
+  SpreadsheetDetectedJoin,
+  "leftTable" | "leftColumn" | "rightTable" | "rightColumn" | "matchRate" | "include"
+> & {
+  resolution?: SpreadsheetJoinResolution;
+  cardinality?: JoinCardinality;
+};
+
+/**
+ * Server-side validation & preparation for multi-sheet workbook import:
+ * Recomputes canonical right-key uniqueness directly from parsedSheets (never trusting client flags),
+ * applies requested deduplication, marks 1:N joins with cardinality: "one_to_many", or rejects
+ * unsafe many_to_one joins with duplicate keys before any Parquet or YAML is written.
+ */
+export function prepareWorkbookImport(opts: {
+  parsedSheets: ParsedSpreadsheet[];
+  preview: SpreadsheetPreview;
+  joins?: RequestedSpreadsheetJoin[];
+}):
+  | {
+      ok: true;
+      sheets: SpreadsheetSheetPreview[];
+      sheetRows: string[][][];
+      joins: (SpreadsheetDetectedJoin & { cardinality?: JoinCardinality })[];
+      hygieneNotes: string[];
+    }
+  | {
+      ok: false;
+      message: string;
+      duplicateJoins: SpreadsheetDetectedJoin[];
+    } {
+  const baseSheets = (opts.preview.sheets ?? []).map((s) => ({
+    ...s,
+    columns: s.columns.map((c) => ({ ...c })),
+  }));
+  const sheetRows = opts.parsedSheets.map((ps) => ps.rows.map((r) => [...r]));
+  const baseHygieneNotes = opts.parsedSheets.flatMap((s) =>
+    (s.cleaningNotes ?? []).map((n) => (opts.parsedSheets.length > 1 ? `${s.sheetName}: ${n}` : n)),
+  );
+  const hygieneNotes = [...baseHygieneNotes];
+
+  const rawJoins: RequestedSpreadsheetJoin[] = opts.joins ?? opts.preview.detectedJoins ?? [];
+  const resolvedJoins: (SpreadsheetDetectedJoin & { cardinality?: JoinCardinality })[] = [];
+  const duplicateJoins: SpreadsheetDetectedJoin[] = [];
+
+  for (const reqJoin of rawJoins) {
+    // Skip joins explicitly excluded by include === false (or resolution === "exclude" unless include was forced true without resolution)
+    if (!reqJoin.include) continue;
+    if (reqJoin.resolution === "exclude" && opts.joins === undefined) continue;
+
+    const lSheetIdx = baseSheets.findIndex((s) => s.tableName === reqJoin.leftTable);
+    const rSheetIdx = baseSheets.findIndex((s) => s.tableName === reqJoin.rightTable);
+    if (lSheetIdx < 0 || rSheetIdx < 0) continue;
+
+    const lSheet = baseSheets[lSheetIdx];
+    const rSheet = baseSheets[rSheetIdx];
+    const lColIdx = lSheet.columns.findIndex((c) => c.name === reqJoin.leftColumn);
+    const rColIdx = rSheet.columns.findIndex((c) => c.name === reqJoin.rightColumn);
+    if (lColIdx < 0 || rColIdx < 0) continue;
+
+    const evaluated = evaluateSheetJoinPair(
+      { tableName: lSheet.tableName, columns: lSheet.columns, rows: sheetRows[lSheetIdx] },
+      lColIdx,
+      { tableName: rSheet.tableName, columns: rSheet.columns, rows: sheetRows[rSheetIdx] },
+      rColIdx,
+    );
+    if (!evaluated) continue;
+
+    if (evaluated.rightKeyUnique) {
+      resolvedJoins.push({ ...evaluated, include: true, cardinality: reqJoin.cardinality ?? "many_to_one" });
+      continue;
+    }
+
+    const wantsOneToMany =
+      reqJoin.resolution === "one_to_many" ||
+      reqJoin.cardinality === "one_to_many" ||
+      reqJoin.cardinality === "many_to_many";
+    if (wantsOneToMany) {
+      const card: JoinCardinality = reqJoin.cardinality === "many_to_many" ? "many_to_many" : "one_to_many";
+      resolvedJoins.push({
+        ...evaluated,
+        include: true,
+        resolution: "one_to_many",
+        cardinality: card,
+      });
+      hygieneNotes.push(
+        `${rSheet.sheetName}: Joined ${lSheet.tableName}.${lSheet.columns[lColIdx].name} → ${rSheet.tableName}.${rSheet.columns[rColIdx].name} as ${card} (fan-out sums blocked)`,
+      );
+      continue;
+    }
+
+    if (reqJoin.resolution === "deduplicate") {
+      const keyType =
+        resolveJoinKeyType(lSheet.columns[lColIdx].sqlType, rSheet.columns[rColIdx].sqlType) ??
+        rSheet.columns[rColIdx].sqlType;
+      const deduped = deduplicateSheetRowsOnKey(sheetRows[rSheetIdx], rColIdx, keyType);
+      sheetRows[rSheetIdx] = deduped.rows;
+      rSheet.rowCount = deduped.rows.length;
+      rSheet.previewRows = deduped.rows.slice(0, 5);
+      // Refresh canonical counts & primaryKey on deduplicated sheet
+      for (let ci = 0; ci < rSheet.columns.length; ci++) {
+        const col = rSheet.columns[ci];
+        const cVals = deduped.rows
+          .map((r) => canonicalizeSpreadsheetValue(r[ci] ?? "", col.sqlType))
+          .filter((v): v is string => v !== null);
+        col.nonEmptyCount = cVals.length;
+        col.uniqueCount = new Set(cVals).size;
+        if (ci === rColIdx && deduped.rows.length > 0 && col.nonEmptyCount === deduped.rows.length && col.uniqueCount === deduped.rows.length) {
+          col.role = "id";
+        }
+      }
+      rSheet.suggestedPrimaryKey =
+        rSheet.columns.find(
+          (c) => c.role === "id" && rSheet.rowCount > 0 && c.nonEmptyCount === rSheet.rowCount && c.uniqueCount === rSheet.rowCount,
+        )?.name ?? rSheet.suggestedPrimaryKey;
+
+      const metricCol = lSheet.columns.find((c) => c.name === evaluated.fanoutImpact?.metricColumn);
+      hygieneNotes.push(
+        formatJoinDedupeNote({
+          rightSheetName: rSheet.sheetName,
+          rightColumnLabel: rSheet.columns[rColIdx].originalHeader || rSheet.columns[rColIdx].label || rSheet.columns[rColIdx].name,
+          join: evaluated,
+          isCurrency: metricCol ? metricCol.formatHint === "currency" : undefined,
+        }),
+      );
+
+      const postCheck = evaluateSheetJoinPair(
+        { tableName: lSheet.tableName, columns: lSheet.columns, rows: sheetRows[lSheetIdx] },
+        lColIdx,
+        { tableName: rSheet.tableName, columns: rSheet.columns, rows: sheetRows[rSheetIdx] },
+        rColIdx,
+      );
+      resolvedJoins.push({
+        ...(postCheck ?? evaluated),
+        rightKeyUnique: true,
+        include: true,
+        resolution: "deduplicate",
+        cardinality: "many_to_one",
+      });
+      continue;
+    }
+
+    duplicateJoins.push(evaluated);
+  }
+
+  if (duplicateJoins.length > 0) {
+    return {
+      ok: false,
+      message: formatDuplicateJoinErrorMessage(duplicateJoins),
+      duplicateJoins,
+    };
+  }
+
+  return {
+    ok: true,
+    sheets: baseSheets,
+    sheetRows,
+    joins: resolvedJoins,
+    hygieneNotes,
+  };
+}
+
 export function buildWorkbookProposal(opts: {
   sourceId: string;
   label: string;
   sheets: SpreadsheetSheetPreview[];
   sheetChoices?: SpreadsheetSheetChoice[];
-  joins?: SpreadsheetDetectedJoin[];
+  joins?: (SpreadsheetDetectedJoin & { cardinality?: JoinCardinality })[];
   primaryGrain?: string;
   primaryTimeColumn?: string | null;
   primaryReportingLag?: number;
   primaryChoices?: SpreadsheetColumnChoice[];
-}): Proposal {
+  hygieneNotes?: string[];
+}): SpreadsheetProposal {
   if (opts.sheets.length <= 1) {
     const only = opts.sheets[0];
     return buildSpreadsheetProposal({
@@ -839,14 +1420,21 @@ export function buildWorkbookProposal(opts: {
       reportingLag: opts.primaryReportingLag,
       columns: only.columns,
       choices: opts.primaryChoices,
+      hygieneNotes: opts.hygieneNotes,
     });
   }
 
   const choiceByTable = new Map((opts.sheetChoices ?? []).map((c) => [c.tableName, c]));
   const allTables: Proposal["tables"] = [];
-  const allMetrics: ProposedMetric[] = [];
+  const allMetrics: SpreadsheetProposedMetric[] = [];
   const usedMetricNames = new Set<string>();
   const primaryTable = opts.sheets.find((s) => s.kind === "fact")?.tableName ?? opts.sheets[0].tableName;
+  const activeJoins = (opts.joins ?? []).filter((j) => j.include && j.resolution !== "exclude");
+  const oneToManyRightTables = new Set(
+    activeJoins
+      .filter((j) => j.resolution === "one_to_many" || j.cardinality === "one_to_many" || j.cardinality === "many_to_many")
+      .map((j) => j.rightTable),
+  );
 
   for (const sheet of opts.sheets) {
     const isPrimary = sheet.tableName === primaryTable;
@@ -865,9 +1453,9 @@ export function buildWorkbookProposal(opts: {
     const tbl = { ...single.tables[0], kind: sheet.kind };
     allTables.push(tbl);
 
-    // Emit metrics primarily for fact sheets (and record count for dimensions only if unique name).
+    // Emit metrics primarily for fact sheets (and 1:N detail sheets), plus record count for dimensions if unique name.
     for (const m of single.metrics) {
-      if (sheet.kind === "dimension" && m.expression.startsWith("SUM(")) continue;
+      if (sheet.kind === "dimension" && !oneToManyRightTables.has(sheet.tableName) && m.expression.startsWith("SUM(")) continue;
       let name = m.name;
       if (usedMetricNames.has(name)) name = `${sheet.tableName}_${m.name}`;
       usedMetricNames.add(name);
@@ -875,20 +1463,29 @@ export function buildWorkbookProposal(opts: {
     }
   }
 
-  const joins: Proposal["joins"] = (opts.joins ?? [])
-    .filter((j) => j.include)
-    .map((j) => ({
+  const joins: SpreadsheetProposalJoin[] = activeJoins.map((j) => {
+    const cardinality: JoinCardinality =
+      j.cardinality ??
+      (j.resolution === "one_to_many" ? "one_to_many" : "many_to_one");
+    const rateLabel = formatSpreadsheetMatchRate(j.matchRate);
+    return {
       left: j.leftTable,
       leftOn: j.leftColumn,
       right: j.rightTable,
       rightOn: j.rightColumn,
       type: "left",
+      cardinality,
       include: true,
-      evidence: `Auto-detected cross-sheet key match (${Math.round(j.matchRate * 100)}% of rows matched).`,
+      evidence:
+        cardinality === "one_to_many" || cardinality === "many_to_many"
+          ? `Cross-sheet ${cardinality} relationship (${rateLabel} of left rows matched; fan-out aggregates blocked).`
+          : `Auto-detected cross-sheet key match (${rateLabel} of rows matched; unique lookup key verified).`,
       resolution: j.matchRate,
-    }));
+    };
+  });
 
   const totalRows = opts.sheets.reduce((sum, s) => sum + s.rowCount, 0);
+  const hygieneNotes = opts.hygieneNotes?.filter((n) => n.trim().length > 0);
   return {
     model: {
       name: opts.label,
@@ -898,6 +1495,7 @@ export function buildWorkbookProposal(opts: {
     joins,
     metrics: allMetrics,
     warnings: [],
+    ...(hygieneNotes?.length ? { hygieneNotes } : {}),
   };
 }
 
@@ -911,7 +1509,8 @@ export function buildSpreadsheetProposal(opts: {
   reportingLag?: number;
   columns: SpreadsheetColumnProfile[];
   choices?: SpreadsheetColumnChoice[];
-}): Proposal {
+  hygieneNotes?: string[];
+}): SpreadsheetProposal {
   const choiceByName = new Map((opts.choices ?? []).map((c) => [c.name, c]));
   const resolvedColumns = opts.columns.map((c) => {
     const choice = choiceByName.get(c.name);
@@ -922,13 +1521,20 @@ export function buildSpreadsheetProposal(opts: {
     };
   });
 
-  const primaryKey = resolvedColumns.find((c) => c.role === "id")?.name ?? null;
+  const primaryKey =
+    resolvedColumns.find(
+      (c) =>
+        c.role === "id" &&
+        opts.rowCount > 0 &&
+        c.nonEmptyCount === opts.rowCount &&
+        c.uniqueCount === opts.rowCount,
+    )?.name ?? null;
   const timeColumn =
     opts.timeColumn && resolvedColumns.some((c) => c.name === opts.timeColumn && c.sqlType === "DATE")
       ? opts.timeColumn
       : resolvedColumns.find((c) => c.role === "date" && c.sqlType === "DATE")?.name ?? null;
 
-  const metrics: ProposedMetric[] = [];
+  const metrics: SpreadsheetProposedMetric[] = [];
   const usedMetricNames = new Set<string>();
 
   for (const col of resolvedColumns) {
@@ -937,8 +1543,20 @@ export function buildSpreadsheetProposal(opts: {
     if (usedMetricNames.has(metricName)) metricName = `${metricName}_total`;
     usedMetricNames.add(metricName);
 
-    const isAvg = col.formatHint === "percent" || /rate|avg|average|ratio|price|margin|discount|score/.test(col.name);
+    const isAvg = isAvgLikeMetricName(col.name, col.formatHint);
     const expr = isAvg ? `AVG(${col.name})` : `SUM(${col.name})`;
+    const hay = `${col.name} ${col.label} ${col.originalHeader}`.toLowerCase();
+    const isCostLike = /cost|expense|spend|cogs|opex|capex|fee|loss|curtailment/.test(hay) && !/rev|sales|income|profit|mrr|arr/.test(hay);
+    const isRevenueLike =
+      !isCostLike &&
+      (col.formatHint === "currency" || /rev|sales|mrr|arr|gmv|income|profit|bookings|amount|pnl/.test(hay));
+    const importance = isAvg ? 60 : isCostLike ? 75 : isRevenueLike ? 100 : 85;
+    const unit: Metric["unit"] =
+      col.formatHint === "currency"
+        ? "currency"
+        : col.formatHint === "percent"
+          ? "percent"
+          : undefined;
     const unitNote = col.formatHint === "currency" ? " (currency)" : col.formatHint === "percent" ? " (percentage)" : "";
     const formattedLabel =
       col.formatHint === "percent" && !/\b(rate|pct|percent|margin|ratio|retention|conversion|share)\b/i.test(col.label)
@@ -951,6 +1569,8 @@ export function buildSpreadsheetProposal(opts: {
       label: formattedLabel,
       baseTable: opts.tableName,
       expression: expr,
+      ...(unit ? { unit } : {}),
+      importance,
       description: `${isAvg ? "Average" : "Total"} ${col.label}${unitNote} from ${opts.label}.`,
       include: true,
       evidence: `Spreadsheet numeric column "${col.originalHeader}" (${col.sqlType}) confirmed as metric.`,
@@ -975,11 +1595,13 @@ export function buildSpreadsheetProposal(opts: {
     label: countLabel,
     baseTable: opts.tableName,
     expression: primaryKey ? `COUNT(DISTINCT ${primaryKey})` : "COUNT(*)",
+    importance: 15,
     description: `Count of records in ${opts.label} (${opts.grain}).`,
     include: true,
     evidence: primaryKey ? `Distinct count of confirmed ID column ${primaryKey}.` : `Row count across ${opts.rowCount} imported spreadsheet rows.`,
   });
 
+  const hygieneNotes = opts.hygieneNotes?.filter((n) => n.trim().length > 0);
   return {
     model: {
       name: opts.label,
@@ -1008,6 +1630,7 @@ export function buildSpreadsheetProposal(opts: {
     joins: [],
     metrics,
     warnings: [],
+    ...(hygieneNotes?.length ? { hygieneNotes } : {}),
   };
 }
 
@@ -1059,4 +1682,326 @@ export async function writeSpreadsheetParquet(
     instance.closeSync();
   }
   return parquetPath;
+}
+
+/**
+ * Validates staged refreshed Parquet files alongside un-refreshed live Parquet files in DuckDB:
+ * checks every many_to_one / one_to_one join rightOn key and declared primaryKey across existing.model,
+ * computes exact DuckDB SQL fan-out dollar impact, and optionally deduplicates staged right keys.
+ */
+export async function validateSpreadsheetRefreshInDuckDb(opts: {
+  model: Model;
+  lakeRoot: string;
+  stagingRoot: string;
+  stagedTables: Set<string>;
+  deduplicateKeys?: boolean;
+  sheetNamesByTable?: Map<string, string>;
+}): Promise<
+  | {
+      ok: true;
+      rowCountsByTable: Map<string, number>;
+      dedupeNotes: string[];
+    }
+  | {
+      ok: false;
+      message: string;
+      duplicateJoins: SpreadsheetDetectedJoin[];
+      canDeduplicate: boolean;
+    }
+> {
+  const qId = (s: string) => `"${s.replace(/"/g, '""')}"`;
+  const qLit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const parquetFor = (table: string) =>
+    opts.stagedTables.has(table)
+      ? resolve(opts.stagingRoot, table, "part-0.parquet")
+      : resolve(opts.lakeRoot, table, "part-0.parquet");
+
+  const instance = await DuckDBInstance.create(":memory:");
+  const conn = await instance.connect();
+  try {
+    const availableTables = new Set<string>();
+    const tableColumns = new Map<string, string[]>();
+
+    for (const tableName of Object.keys(opts.model.tables)) {
+      const p = parquetFor(tableName);
+      if (!existsSync(p)) continue;
+      await conn.run(`CREATE OR REPLACE VIEW ${qId(tableName)} AS SELECT * FROM read_parquet(${qLit(p)})`);
+      const desc = await conn.runAndReadAll(`DESCRIBE SELECT * FROM ${qId(tableName)}`);
+      const cols = desc.getRows().map((r) => String(r[0]));
+      tableColumns.set(tableName, cols);
+      availableTables.add(tableName);
+    }
+
+    type CheckItem = {
+      left: string;
+      leftOn: string;
+      right: string;
+      rightOn: string;
+      isSelfPrimaryKey: boolean;
+    };
+    const checks: CheckItem[] = [];
+    const seenRightKeys = new Set<string>();
+
+    for (const j of opts.model.joins) {
+      if (fansOut(j)) continue;
+      if (!availableTables.has(j.left) || !availableTables.has(j.right)) continue;
+      checks.push({
+        left: j.left,
+        leftOn: j.leftOn,
+        right: j.right,
+        rightOn: j.rightOn,
+        isSelfPrimaryKey: false,
+      });
+      seenRightKeys.add(`${j.right}::${j.rightOn}`);
+    }
+
+    for (const [tableName, tbl] of Object.entries(opts.model.tables)) {
+      if (!tbl.primaryKey || !opts.stagedTables.has(tableName) || !availableTables.has(tableName)) continue;
+      if (seenRightKeys.has(`${tableName}::${tbl.primaryKey}`)) continue;
+      checks.push({
+        left: tableName,
+        leftOn: tbl.primaryKey,
+        right: tableName,
+        rightOn: tbl.primaryKey,
+        isSelfPrimaryKey: true,
+      });
+      seenRightKeys.add(`${tableName}::${tbl.primaryKey}`);
+    }
+
+    const duplicateJoins: SpreadsheetDetectedJoin[] = [];
+
+    for (const chk of checks) {
+      const rCols = tableColumns.get(chk.right) ?? [];
+      const lCols = tableColumns.get(chk.left) ?? [];
+      if (!rCols.includes(chk.rightOn)) {
+        throw Object.assign(
+          new Error(`Refreshed sheet "${chk.right}" is missing required key column "${chk.rightOn}".`),
+          { status: 400 },
+        );
+      }
+      if (!lCols.includes(chk.leftOn)) {
+        throw Object.assign(
+          new Error(`Refreshed sheet "${chk.left}" is missing required foreign-key column "${chk.leftOn}".`),
+          { status: 400 },
+        );
+      }
+
+      const dupReader = await conn.runAndReadAll(
+        `SELECT CAST(${qId(chk.rightOn)} AS VARCHAR) AS k, COUNT(*) AS cnt
+         FROM ${qId(chk.right)}
+         WHERE ${qId(chk.rightOn)} IS NOT NULL
+         GROUP BY ${qId(chk.rightOn)}
+         HAVING COUNT(*) > 1
+         ORDER BY cnt DESC, k ASC`,
+      );
+      const dupRows = dupReader.getRows();
+      if (dupRows.length === 0) continue;
+
+      const duplicateKeyCount = dupRows.length;
+      const duplicateRightRows = dupRows.reduce((sum, r) => sum + (Number(r[1]) - 1), 0);
+
+      // Compute matchRate from left -> distinct right keys
+      const matchReader = await conn.runAndReadAll(
+        `SELECT COUNT(*) AS left_total, COUNT(__r.__rk) AS matched
+         FROM ${qId(chk.left)} AS __l
+         LEFT JOIN (SELECT DISTINCT ${qId(chk.rightOn)} AS __rk FROM ${qId(chk.right)} WHERE ${qId(chk.rightOn)} IS NOT NULL) AS __r
+           ON __l.${qId(chk.leftOn)} = __r.__rk`,
+      );
+      const mRow = matchReader.getRows()[0] ?? [0, 0];
+      const leftTotal = Number(mRow[0] ?? 0);
+      const matched = Number(mRow[1] ?? 0);
+      const unmatchedLeftRows = Math.max(0, leftTotal - matched);
+      const matchRate =
+        leftTotal === 0
+          ? 0
+          : matched === leftTotal
+            ? 1
+            : Math.min(0.9999, Math.max(0.0001, Number((matched / leftTotal).toFixed(4)) >= 1 ? 0.9999 : Number((matched / leftTotal).toFixed(4))));
+
+      // Inspect rows for duplicate keys (with 1-based data row numbers) to identify exact vs conflicting attributes
+      const detailReader = await conn.runAndReadAll(
+        `SELECT * FROM (
+           SELECT row_number() OVER () AS __rn, *
+           FROM ${qId(chk.right)}
+         ) AS __numbered
+         WHERE ${qId(chk.rightOn)} IN (
+           SELECT ${qId(chk.rightOn)}
+           FROM ${qId(chk.right)}
+           WHERE ${qId(chk.rightOn)} IS NOT NULL
+           GROUP BY ${qId(chk.rightOn)}
+           HAVING COUNT(*) > 1
+         )
+         ORDER BY __rn ASC`,
+      );
+      const dCols = detailReader.columnNames();
+      const rnIdx = dCols.indexOf("__rn");
+      const keyColIdx = dCols.indexOf(chk.rightOn);
+      const byKey = new Map<string, any[][]>();
+      for (const row of detailReader.getRows()) {
+        const keyStr = String(row[keyColIdx] ?? "");
+        const arr = byKey.get(keyStr);
+        if (arr) arr.push(row);
+        else byKey.set(keyStr, [row]);
+      }
+
+      const allDetails: SpreadsheetDuplicateKeyDetail[] = [];
+      for (const [rawKey] of dupRows) {
+        const key = String(rawKey ?? "");
+        const group = byKey.get(key) ?? [];
+        const conflictingColumns: string[] = [];
+        for (let ci = 0; ci < dCols.length; ci++) {
+          if (ci === rnIdx || ci === keyColIdx) continue;
+          const distinctVals = new Set(group.map((r) => (r[ci] === null || r[ci] === undefined ? "" : String(r[ci]))));
+          if (distinctVals.size > 1) conflictingColumns.push(dCols[ci]);
+        }
+        allDetails.push({
+          key,
+          rightRows: group.length,
+          rowNumbers: group.map((r) => Number(r[rnIdx])),
+          exactDuplicate: conflictingColumns.length === 0,
+          conflictingColumns,
+        });
+      }
+
+      const allExactDuplicates = allDetails.every((d) => d.exactDuplicate);
+      const duplicateKeys = allDetails.slice(0, 5);
+
+      // Compute exact DuckDB SQL fan-out impact over the primary additive SUM() metric on chk.left
+      let fanoutImpact: SpreadsheetJoinFanoutImpact | undefined;
+      const sumMetrics = Object.values(opts.model.metrics).filter(
+        (m) => (m.type ?? "simple") === "simple" && m.baseTable === chk.left && /^\s*sum\s*\(/i.test(m.expression),
+      );
+      const chosenMetric =
+        sumMetrics.find((m) => m.unit === "currency" || CURRENCY_HINT_RE.test(`${m.label} ${m.name}`)) ?? sumMetrics[0];
+
+      if (chosenMetric) {
+        const filterClause = chosenMetric.filter ? ` WHERE (${chosenMetric.filter})` : "";
+        let trueTotal = 0;
+        let inflatedTotal = 0;
+        if (chk.isSelfPrimaryKey) {
+          const infRes = await conn.runAndReadAll(
+            `SELECT COALESCE(CAST(${chosenMetric.expression} AS DOUBLE), 0) FROM ${qId(chk.left)}${filterClause}`,
+          );
+          inflatedTotal = roundTwo(Number(infRes.getRows()[0]?.[0] ?? 0));
+          const dedupTrueRes = await conn.runAndReadAll(
+            `SELECT COALESCE(CAST(${chosenMetric.expression} AS DOUBLE), 0)
+             FROM (
+               SELECT * EXCLUDE (__rn, __ord) FROM (
+                 SELECT *,
+                   CASE WHEN ${qId(chk.rightOn)} IS NULL THEN 1
+                        ELSE row_number() OVER (PARTITION BY ${qId(chk.rightOn)} ORDER BY __ord)
+                   END AS __rn
+                 FROM (SELECT row_number() OVER () AS __ord, * FROM ${qId(chk.left)})
+               ) WHERE __rn = 1
+             ) AS ${qId(chk.left)}${filterClause}`,
+          );
+          trueTotal = roundTwo(Number(dedupTrueRes.getRows()[0]?.[0] ?? 0));
+        } else {
+          const trueRes = await conn.runAndReadAll(
+            `SELECT COALESCE(CAST(${chosenMetric.expression} AS DOUBLE), 0) FROM ${qId(chk.left)}${filterClause}`,
+          );
+          trueTotal = roundTwo(Number(trueRes.getRows()[0]?.[0] ?? 0));
+          const infRes = await conn.runAndReadAll(
+            `SELECT COALESCE(CAST(${chosenMetric.expression} AS DOUBLE), 0)
+             FROM (
+               SELECT ${qId(chk.left)}.*
+               FROM ${qId(chk.left)}
+               LEFT JOIN (SELECT ${qId(chk.rightOn)} AS __rk FROM ${qId(chk.right)}) AS __r
+                 ON ${qId(chk.left)}.${qId(chk.leftOn)} = __r.__rk
+             ) AS ${qId(chk.left)}${filterClause}`,
+          );
+          inflatedTotal = roundTwo(Number(infRes.getRows()[0]?.[0] ?? 0));
+        }
+        const delta = roundTwo(inflatedTotal - trueTotal);
+        const multiplier = trueTotal !== 0 ? Math.round((inflatedTotal / trueTotal) * 1000) / 1000 : 1;
+        const colMatch = chosenMetric.expression.match(/\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?"?([A-Za-z_][A-Za-z0-9_]*)"?\s*\)/);
+        fanoutImpact = {
+          metricColumn: colMatch?.[1] ?? chosenMetric.name,
+          metricLabel: chosenMetric.label,
+          trueTotal,
+          inflatedTotal,
+          delta,
+          multiplier,
+        };
+      }
+
+      duplicateJoins.push({
+        leftTable: chk.left,
+        leftColumn: chk.leftOn,
+        rightTable: chk.right,
+        rightColumn: chk.rightOn,
+        matchRate,
+        include: true,
+        rightKeyUnique: false,
+        duplicateKeyCount,
+        duplicateRightRows,
+        allExactDuplicates,
+        duplicateKeys,
+        ...(fanoutImpact ? { fanoutImpact } : {}),
+        ...(unmatchedLeftRows > 0 ? { unmatchedLeftRows } : {}),
+      });
+    }
+
+    if (duplicateJoins.length > 0 && !opts.deduplicateKeys) {
+      return {
+        ok: false,
+        message: formatDuplicateJoinErrorMessage(duplicateJoins),
+        duplicateJoins,
+        canDeduplicate: true,
+      };
+    }
+
+    const dedupeNotes: string[] = [];
+    if (duplicateJoins.length > 0 && opts.deduplicateKeys) {
+      for (const dj of duplicateJoins) {
+        if (!opts.stagedTables.has(dj.rightTable)) {
+          const destDir = resolve(opts.stagingRoot, dj.rightTable);
+          await mkdir(destDir, { recursive: true, mode: 0o700 });
+          await copyFile(
+            resolve(opts.lakeRoot, dj.rightTable, "part-0.parquet"),
+            resolve(destDir, "part-0.parquet"),
+          );
+          opts.stagedTables.add(dj.rightTable);
+        }
+        const stagedParquet = resolve(opts.stagingRoot, dj.rightTable, "part-0.parquet");
+        const tempDedup = `${stagedParquet}.dedup.parquet`;
+        await conn.run(
+          `COPY (
+             SELECT * EXCLUDE (__rn, __ord) FROM (
+               SELECT *,
+                 CASE WHEN ${qId(dj.rightColumn)} IS NULL THEN 1
+                      ELSE row_number() OVER (PARTITION BY ${qId(dj.rightColumn)} ORDER BY __ord)
+                 END AS __rn
+               FROM (SELECT row_number() OVER () AS __ord, * FROM read_parquet(${qLit(stagedParquet)}))
+             )
+             WHERE __rn = 1
+             ORDER BY __ord
+           ) TO ${qLit(tempDedup)} (FORMAT PARQUET)`,
+        );
+        await rename(tempDedup, stagedParquet);
+        await conn.run(`CREATE OR REPLACE VIEW ${qId(dj.rightTable)} AS SELECT * FROM read_parquet(${qLit(stagedParquet)})`);
+
+        const rightLabel = opts.sheetNamesByTable?.get(dj.rightTable) ?? dj.rightTable;
+        dedupeNotes.push(
+          formatJoinDedupeNote({
+            rightSheetName: rightLabel,
+            rightColumnLabel: dj.rightColumn,
+            join: dj,
+            onRefresh: true,
+          }),
+        );
+      }
+    }
+
+    const rowCountsByTable = new Map<string, number>();
+    for (const tName of opts.stagedTables) {
+      const cntRes = await conn.runAndReadAll(`SELECT COUNT(*) FROM ${qId(tName)}`);
+      rowCountsByTable.set(tName, Number(cntRes.getRows()[0]?.[0] ?? 0));
+    }
+
+    return { ok: true, rowCountsByTable, dedupeNotes };
+  } finally {
+    conn.closeSync();
+    instance.closeSync();
+  }
 }

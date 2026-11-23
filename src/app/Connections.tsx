@@ -10,6 +10,8 @@ import { UnreviewedBadge, dataAsOf } from "./connected.tsx";
 import { PublishDialog } from "./PublishDialog.tsx";
 import { PrivateKeyInput } from "./PrivateKeyInput.tsx";
 import { isRefreshableSpreadsheetSource } from "../security/sandbox.ts";
+import type { SpreadsheetDetectedJoin } from "../modeler/spreadsheetTypes.ts";
+import { formatFanoutImpactSummary, isCurrencyMetricHint } from "./SpreadsheetImport.tsx";
 
 export interface SourceInfo {
   id: string; label: string; adapter: string;
@@ -20,6 +22,99 @@ export interface SourceInfo {
 interface ConnectedTable { dataset: string; status: "unreviewed" | "published"; importId: string; provenance: ConnectedProvenance; loadedAt: string; registeredBy: string; columns: number; metrics: { name: string; label: string; reviewed: boolean }[] }
 export interface RlsPolicy { id: string; field: string; claim: string }
 export interface Principal { id: string; name: string }
+
+export interface SpreadsheetRefreshConflict {
+  sourceId: string;
+  fileName: string;
+  format: "csv" | "xlsx";
+  content: string;
+  message: string;
+  duplicateJoins: SpreadsheetDetectedJoin[];
+  canDeduplicate: boolean;
+}
+
+export function canShowSpreadsheetRefresh(source: SourceInfo, sandboxMode = false): boolean {
+  if (!isRefreshableSpreadsheetSource(source)) return false;
+  if (sandboxMode && !isRefreshableSpreadsheetSource(source.id)) return false;
+  return true;
+}
+
+export function SpreadsheetRefreshConflictCard({
+  conflict,
+  busy = false,
+  onDeduplicate,
+  onDismiss,
+}: {
+  conflict: SpreadsheetRefreshConflict;
+  busy?: boolean;
+  onDeduplicate: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      className="sheet-refresh-conflict-card"
+      role="alert"
+      aria-label="Refresh paused — Data error caught"
+    >
+      <div className="sheet-join-fanout-kicker">⚠️ REFRESH PAUSED — DATA ERROR CAUGHT</div>
+      <p className="sheet-join-fanout-copy">
+        <strong>{conflict.message}</strong>
+      </p>
+      <p className="sheet-join-fanout-sub">
+        Live governed Parquet tables were kept untouched so existing dashboards cannot silently double-count.
+      </p>
+
+      {conflict.duplicateJoins.length > 0 && (
+        <ul className="sheet-join-dup-list">
+          {conflict.duplicateJoins.map((j) => {
+            const currency = j.fanoutImpact
+              ? isCurrencyMetricHint(j.fanoutImpact.metricColumn, j.fanoutImpact.metricLabel)
+              : false;
+            return (
+              <li key={`${j.leftTable}.${j.leftColumn}->${j.rightTable}.${j.rightColumn}`}>
+                <span className="mono">
+                  {j.leftTable}.{j.leftColumn} → {j.rightTable}.{j.rightColumn}
+                </span>
+                {j.fanoutImpact && j.fanoutImpact.delta > 0 ? (
+                  <> — {formatFanoutImpactSummary(j.fanoutImpact, currency)}</>
+                ) : null}
+                {j.duplicateKeys && j.duplicateKeys.length > 0 && (
+                  <span>
+                    {" "}
+                    (duplicate IDs:{" "}
+                    {j.duplicateKeys
+                      .map((dk) => {
+                        const rowsNote =
+                          dk.rowNumbers.length > 0 ? `, rows ${dk.rowNumbers.map((n) => `#${n}`).join(", ")}` : "";
+                        const conflictNote =
+                          !dk.exactDuplicate && dk.conflictingColumns.length > 0
+                            ? `, conflicts in ${dk.conflictingColumns.join(", ")}`
+                            : "";
+                        return `${dk.key} ×${dk.rightRows}${rowsNote}${conflictNote}`;
+                      })
+                      .join("; ")}
+                    )
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <div className="sheet-refresh-conflict-actions">
+        {conflict.canDeduplicate && (
+          <button type="button" className="primary small" disabled={busy} onClick={onDeduplicate}>
+            {busy ? "Deduplicating & refreshing…" : "Deduplicate key & refresh"}
+          </button>
+        )}
+        <button type="button" className="review-action" disabled={busy} onClick={onDismiss}>
+          Keep current clean data
+        </button>
+      </div>
+    </div>
+  );
+}
 
 type FormMode = { kind: "add" } | { kind: "edit"; id: string } | null;
 
@@ -33,12 +128,85 @@ export function Connections({ sources, activeId, sandboxMode = false, onSelect, 
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [refreshingSheet, setRefreshingSheet] = useState<string | null>(null);
-  const [sheetRefreshMsg, setSheetRefreshMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const [sheetRefreshMsg, setSheetRefreshMsg] = useState<
+    Record<string, { ok: boolean; text: string; cleaningNotes?: string[] }>
+  >({});
+  const [sheetRefreshConflict, setSheetRefreshConflict] = useState<Record<string, SpreadsheetRefreshConflict>>({});
+
+  const submitSpreadsheetRefresh = async (
+    sourceId: string,
+    upload: { fileName: string; format: "csv" | "xlsx"; content: string },
+    deduplicateKeys = false,
+  ) => {
+    setRefreshingSheet(sourceId);
+    setSheetRefreshMsg((prev) => ({
+      ...prev,
+      [sourceId]: {
+        ok: true,
+        text: deduplicateKeys ? "Deduplicating lookup keys & refreshing…" : "Updating spreadsheet data…",
+      },
+    }));
+    try {
+      const response = await fetch(`/api/modeler/spreadsheet/refresh/${encodeURIComponent(sourceId)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...upload,
+          ...(deduplicateKeys ? { deduplicateKeys: true } : {}),
+        }),
+      });
+      if (response.status === 409) {
+        const body = await response.json().catch(() => null);
+        if (body?.error === "duplicate_join_key") {
+          setSheetRefreshMsg((prev) => {
+            const next = { ...prev };
+            delete next[sourceId];
+            return next;
+          });
+          setSheetRefreshConflict((prev) => ({
+            ...prev,
+            [sourceId]: {
+              sourceId,
+              ...upload,
+              message:
+                typeof body.message === "string" && body.message.trim()
+                  ? body.message
+                  : "Duplicate join key detected in uploaded spreadsheet — refresh paused to prevent double-counting.",
+              duplicateJoins: Array.isArray(body.duplicateJoins) ? body.duplicateJoins : [],
+              canDeduplicate: body.canDeduplicate !== false,
+            },
+          }));
+          return;
+        }
+      }
+      const res = await readResponse(response);
+      setSheetRefreshConflict((prev) => {
+        const next = { ...prev };
+        delete next[sourceId];
+        return next;
+      });
+      const cleaningNotes = Array.isArray(res.cleaningNotes)
+        ? res.cleaningNotes.filter((n: unknown): n is string => typeof n === "string" && n.trim().length > 0)
+        : [];
+      setSheetRefreshMsg((prev) => ({
+        ...prev,
+        [sourceId]: {
+          ok: true,
+          text: `Refreshed ${res.rowsUpdated} rows across ${(res.tablesUpdated ?? []).join(", ")}.`,
+          ...(cleaningNotes.length > 0 ? { cleaningNotes } : {}),
+        },
+      }));
+      onRefresh();
+    } catch (e: any) {
+      setSheetRefreshMsg((prev) => ({ ...prev, [sourceId]: { ok: false, text: String(e?.message ?? e) } }));
+    } finally {
+      setRefreshingSheet(null);
+    }
+  };
 
   const refreshSpreadsheet = async (sourceId: string, file?: File | null) => {
     if (!file) return;
     setRefreshingSheet(sourceId);
-    setSheetRefreshMsg((prev) => ({ ...prev, [sourceId]: { ok: true, text: "Updating spreadsheet data…" } }));
     try {
       const lower = file.name.toLowerCase();
       let format: "csv" | "xlsx";
@@ -53,19 +221,9 @@ export function Connections({ sources, activeId, sandboxMode = false, onSelect, 
         format = "csv";
         content = await file.text();
       }
-      const res = await fetch(`/api/modeler/spreadsheet/refresh/${encodeURIComponent(sourceId)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ fileName: file.name, format, content }),
-      }).then(readResponse);
-      setSheetRefreshMsg((prev) => ({
-        ...prev,
-        [sourceId]: { ok: true, text: `Refreshed ${res.rowsUpdated} rows across ${(res.tablesUpdated ?? []).join(", ")}.` },
-      }));
-      onRefresh();
+      await submitSpreadsheetRefresh(sourceId, { fileName: file.name, format, content }, false);
     } catch (e: any) {
       setSheetRefreshMsg((prev) => ({ ...prev, [sourceId]: { ok: false, text: String(e?.message ?? e) } }));
-    } finally {
       setRefreshingSheet(null);
     }
   };
@@ -122,7 +280,7 @@ export function Connections({ sources, activeId, sandboxMode = false, onSelect, 
               {s.status === "error" && <span className="active-badge err">Unavailable</span>}
               {canAdmin && form === null && confirmRemove !== s.id && (
                 <>
-                  {isRefreshableSpreadsheetSource(s) && (
+                  {canShowSpreadsheetRefresh(s, sandboxMode) && (
                     <label className="link conn-action" style={{ cursor: "pointer" }} title="Upload an updated .xlsx or .csv file to refresh this source in place">
                       {refreshingSheet === s.id ? "Refreshing…" : "↻ Refresh sheet"}
                       <input
@@ -148,10 +306,46 @@ export function Connections({ sources, activeId, sandboxMode = false, onSelect, 
                 </>
               )}
             </div>
+            {sheetRefreshConflict[s.id] && (
+              <SpreadsheetRefreshConflictCard
+                conflict={sheetRefreshConflict[s.id]}
+                busy={refreshingSheet === s.id}
+                onDeduplicate={() => {
+                  const pending = sheetRefreshConflict[s.id];
+                  if (!pending) return;
+                  void submitSpreadsheetRefresh(
+                    s.id,
+                    { fileName: pending.fileName, format: pending.format, content: pending.content },
+                    true,
+                  );
+                }}
+                onDismiss={() => {
+                  setSheetRefreshConflict((prev) => {
+                    const next = { ...prev };
+                    delete next[s.id];
+                    return next;
+                  });
+                  setSheetRefreshMsg((prev) => ({
+                    ...prev,
+                    [s.id]: { ok: true, text: "Kept current clean data — refresh cancelled." },
+                  }));
+                }}
+              />
+            )}
             {sheetRefreshMsg[s.id] && (
-              <p className={sheetRefreshMsg[s.id].ok ? "conn-meta" : "conn-err"} role="status">
-                {sheetRefreshMsg[s.id].text}
-              </p>
+              <>
+                <p className={sheetRefreshMsg[s.id].ok ? "conn-meta" : "conn-err"} role="status">
+                  {sheetRefreshMsg[s.id].text}
+                </p>
+                {sheetRefreshMsg[s.id].cleaningNotes && sheetRefreshMsg[s.id].cleaningNotes!.length > 0 && (
+                  <div className="sheet-cleaning-banner conn-hygiene-banner" role="status">
+                    <div>
+                      <strong>✨ Data hygiene verified on refresh:</strong>{" "}
+                      <span>{sheetRefreshMsg[s.id].cleaningNotes!.join(" · ")}</span>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
             {s.status === "ready" ? (
               <p className="mono conn-meta">
