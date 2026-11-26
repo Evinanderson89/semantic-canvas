@@ -116,6 +116,8 @@ export function reviewDataHonesty(input: HonestyInput): HonestyFinding[] {
   const newestEnd = bucketEnd(newest, grain);
   const dataThrough = iso(addDays(newestEnd, -1));
   const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const todayIso = iso(todayUtc);
+  const throughDate = dataThrough > todayIso ? todayIso : dataThrough;
   const lag = Math.max(0, Math.floor(tbl.reportingLagDays ?? 0));
   const title = tile.title ?? tile.metrics.map((m) => metricOf(model, m)?.label ?? m).join(", ");
   const findings: HonestyFinding[] = [];
@@ -127,7 +129,7 @@ export function reviewDataHonesty(input: HonestyInput): HonestyFinding[] {
     findings.push({
       rule: "future", tileId: tile.id, title, key: `future:${tile.id}:${iso(newest)}`,
       text: `The newest ${periodWord(grain)} starts ${sayDate(iso(newest), today)}, after today: some rows are dated in the future, so the newest periods are not real and the edge of the data cannot be judged.`,
-      fixes: [{ kind: "exclude-future", field: `${owner}.${column}`, through: iso(todayUtc) }],
+      fixes: [{ kind: "exclude-future", field: `${owner}.${column}`, through: todayIso }],
     });
     return findings;
   }
@@ -137,22 +139,31 @@ export function reviewDataHonesty(input: HonestyInput): HonestyFinding[] {
   const comparing = tile.compare === "prior" || tile.compare === "yoy";
   if (comparing) {
     const against = tile.compare === "yoy" ? "the same period last year" : `the ${periodWord(grain)} before`;
-    // The newest bucket is complete by the calendar but inside the table's
-    // reporting lag: its rows are still arriving, so its change reads low.
+    // The newest bucket is either still open on the calendar (newestEnd > todayUtc)
+    // or inside the table's reporting lag: its rows are still arriving, so its change reads low.
     if (lag > 0 && addDays(newestEnd, lag) > todayUtc) {
       findings.push({
         rule: "lagging", tileId: tile.id, title, key: `lagging:${tile.id}:${iso(newest)}:settling`,
         text: `${tbl.name} settles after ${lag} day${lag === 1 ? "" : "s"}, so the ${periodWord(grain)} starting ${sayDate(iso(newest), today)} is still filling in; its change against ${against} reads low.`,
         fixes: [
           { kind: "exclude-unsettled", field: `${owner}.${column}`, before: iso(newest) },
-          { kind: "label-through", date: dataThrough },
+          { kind: "label-through", date: throughDate },
+        ],
+      });
+    } else if (newestEnd > todayUtc) {
+      findings.push({
+        rule: "lagging", tileId: tile.id, title, key: `lagging:${tile.id}:${iso(newest)}:open`,
+        text: `The ${periodWord(grain)} starting ${sayDate(iso(newest), today)} has not ended yet (today is ${sayDate(todayIso, today)}), so its change against ${against} compares an open ${periodWord(grain)} with a full one.`,
+        fixes: [
+          { kind: "exclude-unsettled", field: `${owner}.${column}`, before: iso(newest) },
+          { kind: "label-through", date: throughDate },
         ],
       });
     } else if (partial.end) {
       findings.push({
         rule: "lagging", tileId: tile.id, title, key: `lagging:${tile.id}:${iso(newest)}:partial`,
-        text: `The newest ${periodWord(grain)} is not finished and is left out, so the change shown is the ${periodWord(grain)} through ${sayDate(dataThrough, today)} against ${against}. Say so, or readers will take it for the current ${periodWord(grain)}.`,
-        fixes: [{ kind: "label-through", date: dataThrough }],
+        text: `The newest ${periodWord(grain)} is not finished and is left out, so the change shown is the ${periodWord(grain)} through ${sayDate(throughDate, today)} against ${against}. Say so, or readers will take it for the current ${periodWord(grain)}.`,
+        fixes: [{ kind: "label-through", date: throughDate }],
       });
     }
   }
@@ -183,7 +194,9 @@ const SUFFIX = /\s*\((?:through|as of) [^)]*\)\s*$/;
 export function labelTile(tile: TileSpec, baseTitle: string, fix: Extract<HonestyFix, { kind: "label-through" | "label-as-of" }>, today: Date): TileSpec {
   const clean = (tile.title ?? baseTitle).replace(SUFFIX, "");
   const word = fix.kind === "label-through" ? "through" : "as of";
-  return { ...tile, title: `${clean} (${word} ${sayDate(fix.date, today)})` };
+  const todayIso = iso(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())));
+  const effectiveDate = fix.kind === "label-through" && fix.date > todayIso ? todayIso : fix.date;
+  return { ...tile, title: `${clean} (${word} ${sayDate(effectiveDate, today)})` };
 }
 
 /** Exclude tomorrow onward. Using exclusion preserves observed-edge checks;

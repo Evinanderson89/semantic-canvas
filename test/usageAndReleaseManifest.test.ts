@@ -81,19 +81,19 @@ describe("releaseManifest and verifySuiteCompatibility", () => {
   it("returns version-pinned suite release manifest and merges runtime options", () => {
     expect(RELEASE_MANIFEST.product).toBe("semantic-canvas");
     expect(RELEASE_MANIFEST.supportedAdapters).toEqual(["duckglue", "dbt", "snowflake-semantic", "cube"]);
-    expect(RELEASE_MANIFEST.supportedConnectors).toEqual(["duckdb", "duckdb-db", "snowflake"]);
+    expect(RELEASE_MANIFEST.supportedConnectors).toEqual(["duckdb", "duckdb-db", "postgres", "bigquery", "snowflake"]);
 
     const manifest = getReleaseManifest({ mode: "gateway", aiProvider: "openai" });
     expect(manifest).toEqual({
       product: "semantic-canvas",
-      version: "0.1.0",
+      version: "0.3.6",
       libraryFormatVersion: 2,
       connectedOverlayVersion: 1,
       gatewayPolicyVersion: 1,
       mcpProtocolVersion: "2025-03-26",
       scimSchemaVersion: "2.0",
       supportedAdapters: ["duckglue", "dbt", "snowflake-semantic", "cube"],
-      supportedConnectors: ["duckdb", "duckdb-db", "snowflake"],
+      supportedConnectors: ["duckdb", "duckdb-db", "postgres", "bigquery", "snowflake"],
       supportedAiProviders: ["anthropic", "openai", "gemini", "openai-compatible"],
       compatibility: {
         gatewayMinVersion: "0.1.0",

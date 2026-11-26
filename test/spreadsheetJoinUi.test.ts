@@ -15,7 +15,11 @@ import {
   type SourceInfo,
   type SpreadsheetRefreshConflict,
 } from "../src/app/Connections.tsx";
-import { BroadsideHygieneProvenance, ReportPresentation } from "../src/app/ReportPresentation.tsx";
+import {
+  BroadsideHygieneProvenance,
+  buildTileLineageSummary,
+  ReportPresentation,
+} from "../src/app/ReportPresentation.tsx";
 import {
   buildSampleWorkbookPayload,
   type SpreadsheetDetectedJoin,
@@ -340,5 +344,90 @@ describe("Broadside colophon hygiene provenance UI", () => {
     expect(posterHtml).toContain("✓ Data hygiene &amp; join safety verified");
     expect(posterHtml).toContain("Excluded 1 Total/Subtotal summary row to prevent double-counting");
     expect(posterHtml).toContain("prevented $376,400 → $489,300 Net Sales double-count");
+    expect(posterHtml).not.toContain("SHA-256");
+
+    const signedPosterHtml = renderToStaticMarkup(
+      React.createElement(ReportPresentation, {
+        spec,
+        model: modelWithHygiene,
+        mode: "infographic",
+        queryContext: "ctx",
+        filtersByTile: {},
+        scopeWarnings: {},
+        drills: {},
+        checks: {},
+        digestOverride: "a1b2c3d4e5f67890abcdef12",
+        onReadiness: () => {},
+      }),
+    );
+    expect(signedPosterHtml).toContain("sha256: a1b2c3d4e5f6…");
+
+    const orphanJoin: SpreadsheetDetectedJoin = {
+      leftTable: "cafe_orders",
+      leftColumn: "store_id",
+      rightTable: "store_directory",
+      rightColumn: "store_id",
+      matchRate: 0.94,
+      unmatchedLeftRows: 2,
+      orphanLeftDollarTotal: 14500,
+      orphanMetricLabel: "Net Sales ($)",
+      include: true,
+      rightKeyUnique: true,
+    };
+    const orphanHtml = renderToStaticMarkup(
+      React.createElement(SpreadsheetJoinsSection, {
+        joins: [orphanJoin],
+        onChange: () => {},
+      }),
+    );
+    expect(orphanHtml).toContain("$14,500 of Net Sales ($) across 2 unmatched cafe_orders rows");
+    expect(orphanHtml).toContain("Unassigned");
+
+    const lineageModel: Model = {
+      ...baseModel,
+      tables: {
+        ...baseModel.tables,
+        store_directory: {
+          name: "store_directory",
+          grain: "One store",
+          synonyms: [],
+          partitionKeys: [],
+          columns: [
+            { name: "store_id", type: "VARCHAR" },
+            { name: "city", type: "VARCHAR" },
+          ],
+        },
+      },
+      joins: [
+        {
+          left: "cafe_orders",
+          leftOn: "store_id",
+          right: "store_directory",
+          rightOn: "store_id",
+          type: "left",
+          cardinality: "many_to_one",
+        },
+      ],
+    };
+    const lineage = buildTileLineageSummary(
+      lineageModel,
+      {
+        id: "t-sales",
+        title: "Sales by City",
+        metrics: ["net_sales"],
+        dimensions: ["store_directory.city"],
+        layout: { x: 0, y: 0, w: 400, h: 240 },
+      },
+      {
+        id: "t-sales",
+        metrics: ["net_sales"],
+        dimensions: ["store_directory.city"],
+        where: [],
+        limit: undefined,
+        compare: undefined,
+      },
+    );
+    expect(lineage.joins).toContain("cafe_orders.store_id → store_directory.store_id (many_to_one)");
+    expect(lineage.sql).toContain("LEFT JOIN store_directory ON cafe_orders.store_id = store_directory.store_id");
   });
 });

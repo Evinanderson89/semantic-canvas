@@ -77,14 +77,44 @@ export function crossTableCompanions(model: Model, matches: Matches): {
   return { companionMetrics, companionTables };
 }
 
+export function buildBriefFromPrompt(model: Model, rawText: string): Brief {
+  const text = rawText.trim();
+  const baseBrief: Brief = { ...DEFAULT_BRIEF, ...loadPrefs() };
+  const matches = matchModel(model, text);
+  const byTable = metricsByTable(model);
+  const subject =
+    baseBrief.table ??
+    matches.subject ??
+    Object.entries(byTable).sort((a, b) => b[1].length - a[1].length)[0]?.[0] ??
+    null;
+  const available = subject ? byTable[subject] ?? [] : [];
+  const hits = matches.metrics.filter((m) => m.metric.baseTable === subject).map((m) => m.metric.name);
+  const cap = baseBrief.audience === "analyst" ? 6 : baseBrief.audience === "operator" ? 4 : 3;
+  const chosen = (
+    hits.length
+      ? hits
+      : [...available]
+          .sort((a, b) => (b.importance ?? 50) - (a.importance ?? 50))
+          .map((m) => m.name)
+  ).slice(0, cap);
+  return {
+    ...baseBrief,
+    text,
+    table: subject,
+    metrics: chosen.length > 0 ? chosen : undefined,
+  };
+}
+
 export function InterviewReadback({
   model,
   matches,
   onInstantDraft,
+  ctaLabel = "Build instant draft →",
 }: {
   model: Model;
   matches: Matches;
   onInstantDraft?: () => void;
+  ctaLabel?: string;
 }) {
   const { companionMetrics, companionTables } = useMemo(
     () => crossTableCompanions(model, matches),
@@ -116,7 +146,7 @@ export function InterviewReadback({
       </div>
       {matches.metrics.length > 0 && onInstantDraft && (
         <button type="button" className="instant-draft-btn" onClick={onInstantDraft}>
-          Build instant draft →
+          {ctaLabel}
         </button>
       )}
     </div>

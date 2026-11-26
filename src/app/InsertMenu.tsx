@@ -28,7 +28,7 @@ export function InsertMenu({ model, onInsert, onInsertMany, onOpenPicker, onFilt
     <div className="insert">
       {open === "views" && (
         <div className="pop">
-          <h5>CoreCanvas Library</h5>
+          <h5>Workspace Library</h5>
           <button className="pop-item" onClick={() => { setOpen(null); onLibrary(); }}><b>Browse saved views</b><small>Add a chart or section you’ve already composed.</small></button>
           <button className="pop-item" disabled={!canSaveView} onClick={() => { setOpen(null); onSaveView(); }}><b>Save a view</b><small>Keep selected tiles or the current tab for reuse.</small></button>
           <h5 className="view-starters-heading">Quick starters</h5>

@@ -34,7 +34,7 @@ export interface SegmentDriver {
   latest: number;
   delta: number;
   percentChange: number | null;
-  shareOfChange: number;
+  shareOfChange: number | null;
 }
 
 export interface DimensionContribution {
@@ -268,7 +268,10 @@ export async function analyzeMetricDrivers(
         const p = prior ?? 0;
         const l = latest ?? 0;
         const segmentDelta = l - p;
-        const shareOfChange = delta === 0 ? 0 : segmentDelta / Math.abs(delta);
+        const rawShare = delta === 0 ? 0 : segmentDelta / Math.abs(delta);
+        // Suppress misleading >100% shareOfChange on non-additive ratios/averages
+        // or when offsetting segment swings make |share| > 1.
+        const shareOfChange = !additive || Math.abs(rawShare) > 1 ? null : rawShare;
         const segPct = p === 0 ? null : segmentDelta / Math.abs(p);
         return [
           {

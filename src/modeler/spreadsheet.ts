@@ -3,7 +3,8 @@ import { copyFile, mkdir, rename } from "node:fs/promises";
 import { resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { DuckDBInstance } from "@duckdb/node-api";
-import { fansOut, type JoinCardinality, type Metric, type Model } from "../semantic/model.ts";
+import { isCalendarDate } from "../semantic/calendar.ts";
+import { fansOut, type JoinCardinality, type Metric, type Model, type TimeGrain } from "../semantic/model.ts";
 import type { Proposal, ProposedMetric } from "./propose.ts";
 import {
   formatSpreadsheetMatchRate,
@@ -45,7 +46,9 @@ export {
 
 const MAX_ROWS = 25_000;
 const MAX_COLS = 100;
+const MAX_ZIP_ENTRIES = 64;
 const MAX_ZIP_ENTRY_BYTES = 12 * 1024 * 1024;
+const MAX_ZIP_TOTAL_BYTES = 24 * 1024 * 1024;
 
 export function slugifySourceId(name: string): string {
   const base = name.replace(/\.(csv|tsv|xlsx|xls)$/i, "");
@@ -77,10 +80,14 @@ export function friendlyLabel(raw: string): string {
 }
 
 function detectDelimiter(sampleText: string): "," | "\t" | ";" {
-  const lines = sampleText.split(/\r?\n/).slice(0, 10);
-  let bestDelim: "," | "\t" | ";" = ",";
-  let bestScore = 0;
-  for (const line of lines) {
+  const lines = sampleText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .slice(0, 12);
+  if (lines.length === 0) return ",";
+
+  const counts = lines.map((line) => {
     let commas = 0, tabs = 0, semis = 0, inQuotes = false;
     for (let i = 0; i < line.length; i++) {
       const ch = line[i];
@@ -91,17 +98,44 @@ function detectDelimiter(sampleText: string): "," | "\t" | ";" {
         else if (ch === ";") semis++;
       }
     }
-    const top = Math.max(commas, tabs, semis);
-    if (top > bestScore) {
-      bestScore = top;
-      bestDelim = tabs > commas && tabs >= semis ? "\t" : semis > commas && semis > tabs ? ";" : ",";
+    return { commas, tabs, semis };
+  });
+
+  // Score each delimiter by consistent positive counts across lines (so European `;` CSVs
+  // with `1.234,56` decimal commas in data rows still pick `;` when `;` is consistent).
+  const scoreDelim = (key: "commas" | "tabs" | "semis") => {
+    const vals = counts.map((c) => c[key]).filter((n) => n > 0);
+    if (vals.length === 0) return 0;
+    const freq = new Map<number, number>();
+    for (const v of vals) freq.set(v, (freq.get(v) ?? 0) + 1);
+    let bestMode = 0, bestFreq = 0;
+    for (const [mode, f] of freq) {
+      if (f > bestFreq || (f === bestFreq && mode > bestMode)) {
+        bestMode = mode;
+        bestFreq = f;
+      }
     }
+    // Bonus when line 0 (typically header) uses this delimiter and no competing decimal commas
+    const headerBonus = counts[0][key] === bestMode ? 2 : 0;
+    return bestFreq * 10 + Math.min(bestMode, 20) + headerBonus;
+  };
+
+  const tabScore = scoreDelim("tabs");
+  const semiScore = scoreDelim("semis");
+  const commaScore = scoreDelim("commas");
+
+  if (tabScore > 0 && tabScore >= semiScore && tabScore >= commaScore) return "\t";
+  if (semiScore > 0 && (semiScore > commaScore || (semiScore === commaScore && counts[0].semis > 0 && counts[0].commas === 0))) {
+    return ";";
   }
-  return bestDelim;
+  return ",";
 }
 
 const EXCEL_ERROR_RE = /^#(N\/A|DIV\/0!|VALUE!|REF!|NAME\?|NUM!|NULL!|SPILL!|CALC!)$/i;
-const SUMMARY_ROW_LABEL_RE = /^(grand\s+total|sub\s*-?\s*total|total|totals|net\s+total|ytd\s+total|overall\s+total)(\s*[:\-–—].*)?$/i;
+const SUMMARY_ROW_LABEL_RE =
+  /^(?:(?:grand|net|ytd|overall)\s+|sub\s*-?\s*)?totals?(?:[\s:\-–—]+.+)?$|^.+\s+(?:sub\s*-?\s*)?totals?$/i;
+const WIDE_SUMMARY_COL_RE =
+  /^(?:(?:grand|sub\s*-?|row|net|annual|year|fy|full\s+year|ytd|qtd|mtd|q[1-4]|h[1-2])\s+)?totals?$|^totals?\b|^.+?\s+totals?$|^(?:ytd|qtd|mtd|ltm|ttm|full\s+year|fy\s*'?\d{2,4}|yoy(?:\s*%)?|mom(?:\s*%)?|qoq(?:\s*%)?|variance(?:\s*%)?|var(?:\s*%)?|budget\s*vs\.?\s*actual|bva|delta|%\s*change|chg\s*%)$/i;
 const MONTH_MAP: Record<string, string> = {
   jan: "01", january: "01",
   feb: "02", february: "02",
@@ -117,36 +151,53 @@ const MONTH_MAP: Record<string, string> = {
   dec: "12", december: "12",
 };
 
-/** Parses wide spreadsheet period headers like "Jan 2026", "2026-03", "Q2 2026", "Mar-26" into YYYY-MM-DD. */
-export function parseWidePeriodHeader(raw: string): string | null {
+function parseWidePeriodHeaderWithGrain(raw: string): { iso: string; grain: "month" | "quarter" | "day" } | null {
   const s = raw.trim();
-  if (!s) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return normalizeDateValue(s);
-  if (/^\d{4}-\d{2}$/.test(s)) return normalizeDateValue(s);
+  if (!s || WIDE_SUMMARY_COL_RE.test(s)) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const iso = normalizeDateValue(s);
+    return iso ? { iso, grain: "day" } : null;
+  }
+  if (/^\d{4}-\d{2}$/.test(s)) {
+    const iso = normalizeDateValue(s);
+    return iso ? { iso, grain: "month" } : null;
+  }
   const slashYm = s.match(/^(\d{1,2})\/(\d{4})$/);
   if (slashYm) {
     const m = Number(slashYm[1]), y = Number(slashYm[2]);
-    if (m >= 1 && m <= 12 && y >= 1990 && y <= 2100) return `${y}-${String(m).padStart(2, "0")}-01`;
+    if (m >= 1 && m <= 12 && y >= 1990 && y <= 2100) {
+      const iso = `${y}-${String(m).padStart(2, "0")}-01`;
+      return isCalendarDate(iso) ? { iso, grain: "month" } : null;
+    }
   }
-  const m1 = s.match(/^([A-Za-z]{3,9})[\s\-_'/]+(\d{2}|\d{4})$/);
+  const m1 = s.match(/^([A-Za-z]{3,9})\.?[\s\-_'/]+(\d{2}|\d{4})$/);
   if (m1) {
     const mon = MONTH_MAP[m1[1].toLowerCase()];
     if (mon) {
-      const yr = m1[2].length === 2 ? 2000 + Number(m1[2]) : Number(m1[2]);
-      if (yr >= 1990 && yr <= 2100) return `${yr}-${mon}-01`;
+      const yr = m1[2].length === 2 ? (Number(m1[2]) <= 69 ? 2000 + Number(m1[2]) : 1900 + Number(m1[2])) : Number(m1[2]);
+      if (yr >= 1990 && yr <= 2100) {
+        const iso = `${yr}-${mon}-01`;
+        return isCalendarDate(iso) ? { iso, grain: "month" } : null;
+      }
     }
   }
   const q1 = s.match(/^(?:Q([1-4])[\s\-_'/]+(\d{2}|\d{4})|(\d{4})[\s\-_]*Q([1-4]))$/i);
   if (q1) {
     const q = Number(q1[1] ?? q1[4]);
     const rawYr = q1[2] ?? q1[3];
-    const yr = rawYr.length === 2 ? 2000 + Number(rawYr) : Number(rawYr);
+    const yr = rawYr.length === 2 ? (Number(rawYr) <= 69 ? 2000 + Number(rawYr) : 1900 + Number(rawYr)) : Number(rawYr);
     if (yr >= 1990 && yr <= 2100) {
       const mon = String((q - 1) * 3 + 1).padStart(2, "0");
-      return `${yr}-${mon}-01`;
+      const iso = `${yr}-${mon}-01`;
+      return isCalendarDate(iso) ? { iso, grain: "quarter" } : null;
     }
   }
   return null;
+}
+
+/** Parses wide spreadsheet period headers like "Jan 2026", "2026-03", "Q2 2026", "Mar-26" into YYYY-MM-DD. */
+export function parseWidePeriodHeader(raw: string): string | null {
+  return parseWidePeriodHeaderWithGrain(raw)?.iso ?? null;
 }
 
 function inferWideValueHeader(sheetName: string): string {
@@ -225,12 +276,18 @@ export function cleanTabularGrid(sheetName: string, rawRecords: string[][], maxC
     .slice(headerIdx + 1, headerIdx + 1 + MAX_ROWS)
     .map((r) => Array.from({ length: width }, (_, i) => r[i] ?? ""));
 
-  // 2. Strip Total / Subtotal / Grand Total summary rows so aggregations never double-count.
+  // 2. Strip Total / Subtotal / Grand Total / <Name> Total / Total <Name> summary rows so aggregations never double-count.
   let droppedTotals = 0;
   const filteredRows = rows.filter((r) => {
-    const firstText = r.find((c) => c !== "" && parseNumericValue(c) === null) ?? "";
+    const textCells = r.filter((c) => c !== "" && parseNumericValue(c) === null);
+    const firstText = (textCells[0] ?? "").trim();
+    const secondText = (textCells[1] ?? "").trim();
     const hasNumeric = r.some((c) => parseNumericValue(c) !== null);
-    if (hasNumeric && SUMMARY_ROW_LABEL_RE.test(firstText.trim())) {
+    if (
+      hasNumeric &&
+      (SUMMARY_ROW_LABEL_RE.test(firstText) ||
+        (firstText !== "" && /^(?:(?:grand|sub\s*-?)\s*)?totals?$/i.test(secondText)))
+    ) {
       droppedTotals++;
       return false;
     }
@@ -245,39 +302,93 @@ export function cleanTabularGrid(sheetName: string, rawRecords: string[][], maxC
     cleaningNotes.push(`Cleaned ${scrubbedErrors} formula error cell${scrubbedErrors === 1 ? "" : "s"} (#N/A, #DIV/0!)`);
   }
 
-  // 3. Auto-unpivot wide period columns (e.g. Region | Segment | Jan 2026 | Feb 2026 | Mar 2026).
-  const periodByCol = headers.map((h) => parseWidePeriodHeader(h));
-  const periodIndices = periodByCol.map((iso, idx) => (iso ? idx : -1)).filter((idx) => idx >= 0);
-  const dimIndices = periodByCol.map((iso, idx) => (iso ? -1 : idx)).filter((idx) => idx >= 0);
+  // 3. Auto-unpivot wide period columns (e.g. Region | Segment | Jan 2026 | Feb 2026 | Mar 2026 | Q1 Total),
+  //    keeping period grains pure (never mixing Q1 2026 quarterly rollups into monthly unpivots) and
+  //    stripping summary/variance rollup columns (Total, Q1 Total, YTD, Full Year, YoY, Variance).
+  const parsedPeriodByCol = headers.map((h) => parseWidePeriodHeaderWithGrain(h));
+  const monthIndices = parsedPeriodByCol.map((p, idx) => (p?.grain === "month" ? idx : -1)).filter((idx) => idx >= 0);
+  const quarterIndices = parsedPeriodByCol.map((p, idx) => (p?.grain === "quarter" ? idx : -1)).filter((idx) => idx >= 0);
+  const dayIndices = parsedPeriodByCol.map((p, idx) => (p?.grain === "day" ? idx : -1)).filter((idx) => idx >= 0);
+
+  let periodIndices: number[] = [];
+  let mixedRollupIndices: number[] = [];
+  let unpivotedGrain: "month" | "quarter" | undefined;
+
+  if (monthIndices.length >= 3) {
+    periodIndices = monthIndices;
+    mixedRollupIndices = quarterIndices;
+    unpivotedGrain = "month";
+  } else if (quarterIndices.length >= 2) {
+    periodIndices = quarterIndices;
+    unpivotedGrain = "quarter";
+  } else if (dayIndices.length >= 3) {
+    periodIndices = dayIndices;
+    if (dayIndices.every((idx) => parsedPeriodByCol[idx]!.iso.endsWith("-01"))) {
+      unpivotedGrain = "month";
+    }
+  }
+
+  const periodIndexSet = new Set(periodIndices);
+  const mixedRollupSet = new Set(mixedRollupIndices);
+  const nonPeriodIndices = headers.map((_, idx) => idx).filter((idx) => !periodIndexSet.has(idx));
+  const summaryColIndices = nonPeriodIndices.filter(
+    (idx) => mixedRollupSet.has(idx) || WIDE_SUMMARY_COL_RE.test(headers[idx].trim()),
+  );
+  const summaryColSet = new Set(summaryColIndices);
+  const dimIndices = nonPeriodIndices.filter((idx) => !summaryColSet.has(idx));
+
   const existingDateCol = dimIndices.some((idx) => {
     const nonEmpty = rows.slice(0, 30).map((r) => r[idx]).filter(Boolean);
     return nonEmpty.length > 0 && nonEmpty.filter((v) => normalizeDateValue(v) !== null).length / nonEmpty.length >= 0.8;
   });
 
-  if (periodIndices.length >= 3 && dimIndices.length >= 1 && !existingDateCol) {
+  const canUnpivot =
+    (periodIndices.length >= 3 || (unpivotedGrain === "quarter" && periodIndices.length >= 2)) &&
+    dimIndices.length >= 1 &&
+    !existingDateCol;
+
+  if (canUnpivot) {
     const unpivotedRows: string[][] = [];
     for (const r of rows) {
       const dimVals = dimIndices.map((idx) => r[idx] ?? "");
       for (const pIdx of periodIndices) {
         const cellVal = (r[pIdx] ?? "").trim();
         if (cellVal === "") continue;
-        unpivotedRows.push([...dimVals, periodByCol[pIdx]!, cellVal]);
+        unpivotedRows.push([...dimVals, parsedPeriodByCol[pIdx]!.iso, cellVal]);
         if (unpivotedRows.length >= MAX_ROWS) break;
       }
       if (unpivotedRows.length >= MAX_ROWS) break;
     }
     if (unpivotedRows.length >= 2) {
+      if (summaryColIndices.length > 0) {
+        const droppedLabels = summaryColIndices.map((idx) => headers[idx].trim());
+        const previewLabels =
+          droppedLabels.length <= 3 ? droppedLabels.join(", ") : `${droppedLabels.slice(0, 3).join(", ")}, +${droppedLabels.length - 3} more`;
+        cleaningNotes.push(
+          `Excluded ${summaryColIndices.length} summary/variance column${summaryColIndices.length === 1 ? "" : "s"} (${previewLabels}) before unpivoting`,
+        );
+      }
       headers = [...dimIndices.map((idx) => headers[idx]), "Period Date", inferWideValueHeader(sheetName)];
       rows = unpivotedRows;
       cleaningNotes.push(`Unpivoted ${periodIndices.length} wide period columns into tidy time-series rows`);
+    } else {
+      unpivotedGrain = undefined;
     }
+  } else {
+    unpivotedGrain = undefined;
   }
 
   if (rows.length === 0) {
     throw Object.assign(new Error("Spreadsheet must include at least one non-summary data row."), { status: 400 });
   }
 
-  return { sheetName, headers, rows, ...(cleaningNotes.length ? { cleaningNotes } : {}) };
+  return {
+    sheetName,
+    headers,
+    rows,
+    ...(cleaningNotes.length ? { cleaningNotes } : {}),
+    ...(unpivotedGrain ? { unpivotedGrain } : {}),
+  };
 }
 
 export function parseCsv(rawText: string, sheetName = "Sheet1"): ParsedSpreadsheet {
@@ -356,13 +467,22 @@ function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
     throw Object.assign(new Error("Invalid .xlsx file: ZIP directory header not found."), { status: 400 });
   }
   const totalEntries = view.getUint16(eocd + 10, true);
+  if (totalEntries > MAX_ZIP_ENTRIES) {
+    throw Object.assign(new Error(`Excel archive exceeds the ${MAX_ZIP_ENTRIES}-entry safety limit.`), { status: 413 });
+  }
   const centralOffset = view.getUint32(eocd + 16, true);
   const decoder = new TextDecoder("utf-8");
   const files = new Map<string, Uint8Array>();
 
   let pos = centralOffset;
+  let seenEntries = 0;
+  let cumulativeInflatedBytes = 0;
   for (let i = 0; i < totalEntries && pos + 46 <= bytes.byteLength; i++) {
     if (view.getUint32(pos, true) !== 0x02014b50) break;
+    seenEntries++;
+    if (seenEntries > MAX_ZIP_ENTRIES) {
+      throw Object.assign(new Error(`Excel archive exceeds the ${MAX_ZIP_ENTRIES}-entry safety limit.`), { status: 413 });
+    }
     const method = view.getUint16(pos + 10, true);
     const compressedSize = view.getUint32(pos + 20, true);
     const uncompressedSize = view.getUint32(pos + 24, true);
@@ -377,15 +497,32 @@ function readZipEntries(bytes: Uint8Array): Map<string, Uint8Array> {
     if (uncompressedSize > MAX_ZIP_ENTRY_BYTES || compressedSize > MAX_ZIP_ENTRY_BYTES) {
       throw Object.assign(new Error("Spreadsheet worksheet exceeds the 12 MB safety limit."), { status: 413 });
     }
+    if (cumulativeInflatedBytes + uncompressedSize > MAX_ZIP_TOTAL_BYTES) {
+      throw Object.assign(new Error("Excel workbook exceeds the 24 MB cumulative uncompressed safety limit."), { status: 413 });
+    }
     if (localHeaderOffset + 30 > bytes.byteLength) continue;
     const localNameLen = view.getUint16(localHeaderOffset + 26, true);
     const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
     const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
     const slice = bytes.subarray(dataStart, dataStart + compressedSize);
     if (method === 0) {
+      cumulativeInflatedBytes += slice.byteLength;
+      if (cumulativeInflatedBytes > MAX_ZIP_TOTAL_BYTES) {
+        throw Object.assign(new Error("Excel workbook exceeds the 24 MB cumulative uncompressed safety limit."), { status: 413 });
+      }
       files.set(name, slice);
     } else if (method === 8) {
-      const inflated = inflateRawSync(slice, { maxOutputLength: MAX_ZIP_ENTRY_BYTES });
+      const remainingBudget = MAX_ZIP_TOTAL_BYTES - cumulativeInflatedBytes;
+      let inflated: Buffer;
+      try {
+        inflated = inflateRawSync(slice, { maxOutputLength: Math.min(MAX_ZIP_ENTRY_BYTES, remainingBudget) });
+      } catch {
+        throw Object.assign(new Error("Excel workbook exceeds the 24 MB cumulative uncompressed safety limit."), { status: 413 });
+      }
+      cumulativeInflatedBytes += inflated.byteLength;
+      if (cumulativeInflatedBytes > MAX_ZIP_TOTAL_BYTES) {
+        throw Object.assign(new Error("Excel workbook exceeds the 24 MB cumulative uncompressed safety limit."), { status: 413 });
+      }
       files.set(name, new Uint8Array(inflated.buffer, inflated.byteOffset, inflated.byteLength));
     }
   }
@@ -408,20 +545,33 @@ function excelSerialToIsoDate(serial: number): string {
   return Number.isFinite(+d) ? d.toISOString().slice(0, 10) : String(serial);
 }
 
-function extractDateStyleIndices(stylesXml: string): Set<number> {
+export function extractDateStyleIndices(stylesXml: string): Set<number> {
   const builtinDateFmtIds = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47]);
   const customDateFmtIds = new Set<number>();
-  for (const m of stylesXml.matchAll(/<numFmt\b[^>]*numFmtId="(\d+)"[^>]*formatCode="([^"]+)"/g)) {
-    const id = Number(m[1]);
-    const code = m[2].toLowerCase().replace(/"[^"]*"/g, "");
-    if (/[ymd]/.test(code) && !/^[0#.,%$]+$/.test(code)) customDateFmtIds.add(id);
+  for (const m of stylesXml.matchAll(/<numFmt\b([^>]*)>/g)) {
+    const attrs = m[1];
+    const idMatch = attrs.match(/\bnumFmtId="(\d+)"/);
+    const codeMatch = attrs.match(/\bformatCode="([^"]+)"/);
+    if (!idMatch || !codeMatch) continue;
+    const id = Number(idMatch[1]);
+    // Strip quoted literals, escaped chars, layout padding, and bracket tokens ([Red], [ColorN], [$USD-409], [>0])
+    const cleaned = decodeXmlEntities(codeMatch[1])
+      .replace(/"[^"]*"/g, "")
+      .replace(/\\.|_.|\*./g, "")
+      .replace(/\[[^\]]*\]/g, "")
+      .toLowerCase();
+    // Numeric formats use # or 0 placeholders (aside from fractional seconds like ss.000); date formats use y/m/d
+    const withoutFracSec = cleaned.replace(/s\.0+/g, "s");
+    if (/[ymd]/.test(withoutFracSec) && !/[#?0]/.test(withoutFracSec)) {
+      customDateFmtIds.add(id);
+    }
   }
   const dateStyleIndices = new Set<number>();
   const xfsMatch = stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/);
   if (!xfsMatch) return dateStyleIndices;
   let idx = 0;
   for (const xf of xfsMatch[1].matchAll(/<xf\b[^>]*>/g)) {
-    const numFmtMatch = xf[0].match(/numFmtId="(\d+)"/);
+    const numFmtMatch = xf[0].match(/\bnumFmtId="(\d+)"/);
     const numFmtId = numFmtMatch ? Number(numFmtMatch[1]) : 0;
     if (builtinDateFmtIds.has(numFmtId) || customDateFmtIds.has(numFmtId)) {
       dateStyleIndices.add(idx);
@@ -525,16 +675,22 @@ export function parseXlsxWorkbook(bytes: Uint8Array): ParsedSpreadsheet[] {
 
   const workbookXml = entries.get("xl/workbook.xml") ? decoder.decode(entries.get("xl/workbook.xml")) : "";
   const sheetRefs: { name: string; path: string }[] = [];
+  const skippedHiddenSheets: string[] = [];
   let sheetIndex = 1;
   for (const s of workbookXml.matchAll(/<sheet\b[^>]*>/g)) {
+    const state = s[0].match(/\bstate="([^"]+)"/i)?.[1]?.toLowerCase();
     const name = decodeXmlEntities(s[0].match(/\bname="([^"]+)"/)?.[1] ?? `Sheet${sheetIndex}`);
     const rid = s[0].match(/\br:id="([^"]+)"/)?.[1];
     const path = (rid && relTargets.get(rid)) || `xl/worksheets/sheet${sheetIndex}.xml`;
-    sheetRefs.push({ name, path });
     sheetIndex++;
+    if (state === "hidden" || state === "veryhidden") {
+      skippedHiddenSheets.push(name);
+      continue;
+    }
+    sheetRefs.push({ name, path });
   }
 
-  if (sheetRefs.length === 0) {
+  if (sheetRefs.length === 0 && skippedHiddenSheets.length === 0) {
     for (const [k] of [...entries.entries()].sort(([a], [b]) => a.localeCompare(b))) {
       if (/^xl\/worksheets\/sheet\d+\.xml$/.test(k)) {
         sheetRefs.push({ name: `Sheet${sheetRefs.length + 1}`, path: k });
@@ -553,6 +709,13 @@ export function parseXlsxWorkbook(bytes: Uint8Array): ParsedSpreadsheet[] {
   if (parsedSheets.length === 0) {
     throw Object.assign(new Error("Excel workbook must include at least one worksheet with a header row and data rows."), { status: 400 });
   }
+  if (skippedHiddenSheets.length > 0) {
+    const hiddenNote = `Skipped ${skippedHiddenSheets.length} hidden worksheet${skippedHiddenSheets.length === 1 ? "" : "s"} (${skippedHiddenSheets.join(", ")})`;
+    parsedSheets[0] = {
+      ...parsedSheets[0],
+      cleaningNotes: [hiddenNote, ...(parsedSheets[0].cleaningNotes ?? [])],
+    };
+  }
   return parsedSheets;
 }
 
@@ -560,43 +723,185 @@ export function parseXlsxBuffer(bytes: Uint8Array): ParsedSpreadsheet {
   return parseXlsxWorkbook(bytes)[0];
 }
 
+function expandYearToken(rawYear: string): number {
+  if (rawYear.length === 2) {
+    const yy = Number(rawYear);
+    return yy <= 69 ? 2000 + yy : 1900 + yy;
+  }
+  return Number(rawYear);
+}
+
 export function normalizeDateValue(raw: string): string | null {
   const s = raw.trim();
   if (!s) return null;
   if (/^\d{4}-\d{2}-\d{2}(?:[T\s].*)?$/.test(s)) {
     const iso = s.slice(0, 10);
-    const d = new Date(`${iso}T00:00:00Z`);
-    return Number.isFinite(+d) && d.toISOString().slice(0, 10) === iso ? iso : null;
+    return isCalendarDate(iso) ? iso : null;
   }
   if (/^\d{4}-\d{2}$/.test(s)) {
     const iso = `${s}-01`;
-    const d = new Date(`${iso}T00:00:00Z`);
-    return Number.isFinite(+d) ? iso : null;
+    return isCalendarDate(iso) ? iso : null;
   }
-  const slash = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (slash) {
-    const m = Number(slash[1]), day = Number(slash[2]), y = Number(slash[3]);
-    if (m >= 1 && m <= 12 && day >= 1 && day <= 31) {
-      const iso = `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-      const d = new Date(`${iso}T00:00:00Z`);
-      return Number.isFinite(+d) ? iso : null;
+  const slashOrDash = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2}|\d{4})$/);
+  if (slashOrDash) {
+    const a = Number(slashOrDash[1]), b = Number(slashOrDash[2]), y = expandYearToken(slashOrDash[3]);
+    if (y >= 1900 && y <= 2100) {
+      // Standard US MM/DD/YY(YY), plus unambiguous European DD/MM/YY(YY) when first token > 12
+      const [m, day] = a > 12 && b >= 1 && b <= 12 ? [b, a] : [a, b];
+      if (m >= 1 && m <= 12 && day >= 1 && day <= 31) {
+        const iso = `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        return isCalendarDate(iso) ? iso : null;
+      }
+    }
+    return null;
+  }
+  // Month-name dates: "Mar 15, 2026", "March 15 2026", "Mar 15, 26"
+  const mdyText = s.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,\s*|\s+)(\d{2}|\d{4})$/);
+  if (mdyText) {
+    const mon = MONTH_MAP[mdyText[1].toLowerCase()];
+    const day = Number(mdyText[2]);
+    const y = expandYearToken(mdyText[3]);
+    if (mon && y >= 1900 && y <= 2100 && day >= 1 && day <= 31) {
+      const iso = `${String(y).padStart(4, "0")}-${mon}-${String(day).padStart(2, "0")}`;
+      return isCalendarDate(iso) ? iso : null;
+    }
+    return null;
+  }
+  // Day-month-name dates: "15-Mar-2026", "15 Mar 2026", "15-Mar-26"
+  const dmyText = s.match(/^(\d{1,2})(?:st|nd|rd|th)?[\s\-_\/]+([A-Za-z]{3,9})\.?[\s\-_,\/]+(\d{2}|\d{4})$/);
+  if (dmyText) {
+    const day = Number(dmyText[1]);
+    const mon = MONTH_MAP[dmyText[2].toLowerCase()];
+    const y = expandYearToken(dmyText[3]);
+    if (mon && y >= 1900 && y <= 2100 && day >= 1 && day <= 31) {
+      const iso = `${String(y).padStart(4, "0")}-${mon}-${String(day).padStart(2, "0")}`;
+      return isCalendarDate(iso) ? iso : null;
+    }
+    return null;
+  }
+  // Whole-month / whole-quarter period tokens inside a date column ("Mar 2026", "Q2 2026")
+  const myText = s.match(/^([A-Za-z]{3,9})\.?[\s\-_'/]+(\d{2}|\d{4})$/);
+  if (myText && MONTH_MAP[myText[1].toLowerCase()]) {
+    const mon = MONTH_MAP[myText[1].toLowerCase()]!;
+    const y = expandYearToken(myText[2]);
+    if (y >= 1900 && y <= 2100) {
+      const iso = `${String(y).padStart(4, "0")}-${mon}-01`;
+      return isCalendarDate(iso) ? iso : null;
     }
   }
   return null;
 }
 
+const ISO_CURRENCY_PREFIX_RE = /^(?:[-+(]\s*)?(USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY|INR|BRL|MXN|SEK|NOK|DKK)(?=[\s\d.,+-])/i;
+const ISO_CURRENCY_SUFFIX_RE = /(?<=[\d\s)])(USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY|INR|BRL|MXN|SEK|NOK|DKK)\)?$/i;
+
 export function parseNumericValue(raw: string): { value: number; isCurrency: boolean; isPercent: boolean; isInt: boolean } | null {
   const s = raw.trim();
   if (!s) return null;
-  const isCurrency = /^[-+]?[$€£]|^\([$€£]/.test(s);
-  const isPercent = /%$/.test(s);
-  let normalized = s.replace(/[$€£,\s%]/g, "");
-  if (/^\(.+\)$/.test(normalized)) normalized = `-${normalized.slice(1, -1)}`;
-  if (!/^[-+]?(?:\d+\.?\d*|\.\d+)$/.test(normalized)) return null;
+  const hasSymbolCurrency = /[$€£¥₹]/.test(s) && /^[-+(\s]*(?:[$€£¥₹]|[A-Za-z]{0}\d)|[$€£¥₹]\s*\)?$/.test(s);
+  const hasIsoCurrency = ISO_CURRENCY_PREFIX_RE.test(s) || ISO_CURRENCY_SUFFIX_RE.test(s);
+  const isCurrency = hasSymbolCurrency || hasIsoCurrency;
+  const isPercent = /%\s*\)?$/.test(s);
+
+  let core = s.replace(/[\s\u00A0\u202F]/g, "");
+  let isParenNeg = false;
+  if (core.startsWith("(") && core.endsWith(")")) {
+    isParenNeg = true;
+    core = core.slice(1, -1);
+  }
+  core = core
+    .replace(/^(?:[-+])?(?:USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY|INR|BRL|MXN|SEK|NOK|DKK)/i, (m) =>
+      m.startsWith("-") ? "-" : m.startsWith("+") ? "+" : "",
+    )
+    .replace(/(?:USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY|INR|BRL|MXN|SEK|NOK|DKK)$/i, "")
+    .replace(/[$€£¥₹%]/g, "");
+  if (core.startsWith("(") && core.endsWith(")")) {
+    isParenNeg = true;
+    core = core.slice(1, -1);
+  }
+  if (!core) return null;
+
+  let sign = "";
+  if (core.startsWith("-") || core.startsWith("+")) {
+    sign = core[0] === "-" ? "-" : "";
+    core = core.slice(1);
+  }
+  if (isParenNeg) sign = "-";
+  if (!core) return null;
+
+  // Separate optional scientific exponent
+  let expPart = "";
+  const expMatch = core.match(/^([0-9.,]+)([eE][-+]?\d+)$/);
+  if (expMatch) {
+    core = expMatch[1];
+    expPart = expMatch[2];
+  }
+
+  let normalizedMag: string;
+  const hasDot = core.includes(".");
+  const hasComma = core.includes(",");
+  if (hasDot && hasComma) {
+    if (core.lastIndexOf(",") > core.lastIndexOf(".")) {
+      // European format: 1.234,56 or 1.234.567,89
+      if (!/^\d{1,3}(?:\.\d{3})+,\d+$/.test(core)) return null;
+      normalizedMag = core.replace(/\./g, "").replace(",", ".");
+    } else {
+      // US/UK format: 1,234.56 or 1,234,567.89
+      if (!/^\d{1,3}(?:,\d{3})+\.\d*$/.test(core)) return null;
+      normalizedMag = core.replace(/,/g, "");
+    }
+  } else if (hasComma) {
+    const parts = core.split(",");
+    if (parts.length > 2) {
+      // Multiple commas must be 3-digit thousands groups: 1,234,567
+      if (!/^\d{1,3}(?:,\d{3})+$/.test(core)) return null;
+      normalizedMag = core.replace(/,/g, "");
+    } else {
+      const [intPart, fracPart] = parts;
+      if (!/^\d+$/.test(intPart) || !/^\d+$/.test(fracPart)) return null;
+      // Single comma: if fractional part is not 3 digits (e.g. 1234,56 or 14,5%) or intPart is "0" (0,125), it's European decimal comma
+      if (fracPart.length !== 3 || intPart === "0") {
+        normalizedMag = `${intPart}.${fracPart}`;
+      } else if (intPart.length <= 3) {
+        normalizedMag = `${intPart}${fracPart}`;
+      } else {
+        normalizedMag = `${intPart}.${fracPart}`;
+      }
+    }
+  } else if (hasDot) {
+    const parts = core.split(".");
+    if (parts.length > 2) {
+      // Multiple dots: European integer thousands like 1.234.567
+      if (!/^\d{1,3}(?:\.\d{3}){2,}$/.test(core)) return null;
+      normalizedMag = core.replace(/\./g, "");
+    } else {
+      normalizedMag = core;
+    }
+  } else {
+    normalizedMag = core;
+  }
+
+  const normalized = `${sign}${normalizedMag}${expPart}`;
+  if (!/^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/.test(normalized)) return null;
+
+  const hasDecimal = normalizedMag.includes(".");
+  const hasExponent = expPart !== "";
+  if (!hasDecimal && !hasExponent) {
+    const significantDigits = normalizedMag.replace(/^0+/, "");
+    if (significantDigits.length > 15) return null;
+  }
+
   const n = Number(normalized);
   if (!Number.isFinite(n)) return null;
+  if (!hasDecimal && !hasExponent && !Number.isSafeInteger(n)) return null;
+
   const value = isPercent ? n / 100 : n;
-  return { value, isCurrency, isPercent, isInt: !isPercent && !isCurrency && Number.isInteger(n) && !normalized.includes(".") };
+  return {
+    value,
+    isCurrency,
+    isPercent,
+    isInt: !isPercent && !isCurrency && !hasDecimal && !hasExponent && Number.isSafeInteger(n),
+  };
 }
 
 /**
@@ -625,10 +930,67 @@ export function canonicalizeSpreadsheetValue(raw: string, sqlType: SpreadsheetVa
 }
 
 const ID_COLUMN_NAME_RE = /(^|_)(id|key|code|uuid)$|^(order|invoice|ticket|txn|transaction)(?:_(?:num|number|no))?$|^sku$/;
-const CURRENCY_HINT_RE = /\$|usd|eur|rev|mrr|arr|sales|spend|cost|price|amount|profit|budget/i;
+const CURRENCY_HINT_RE =
+  /[$€£¥₹]|(?:^|[^a-z])(?:usd|eur|gbp|jpy|cad|aud|chf|rev|revenue|mrr|arr|sales?|spend|spending|costs?|prices?|pricing|amount|profits?|budget|fees?|gmv|cogs|ebitda)(?:$|[^a-z])/i;
+const PERCENT_HEADER_RE =
+  /%|(?:^|[^a-z])(?:rate|pct|percent|margin|ratio|discount|churn|retention)(?:$|[^a-z])/i;
+const AVG_METRIC_NAME_RE =
+  /(?:^|[^a-z])(?:rate|pct|percent|avg|average|ratio|price|margin|discount|churn|retention|score)(?:$|[^a-z])/i;
+const ZIP_PHONE_COL_RE =
+  /(?:^|[^a-z])(?:zip|zipcode|postal|postcode|phone|tel|telephone|mobile|fax|ssn|ein|iban)(?:$|[^a-z])/i;
+const DIMENSION_NUMBER_COL_RE =
+  /^(?:year|yr|fiscal_year|calendar_year|cohort_year|month|fiscal_month|calendar_month|quarter|qtr|fiscal_quarter|week|iso_week|day_of_week|day_of_month)$|(?:^|_)(?:year|month|quarter|week)_(?:num|number|no)$|_(?:num|number|no)$/i;
+const SNAPSHOT_BALANCE_RE =
+  /(?:^|[^a-z])(?:balance|balances|headcount|inventory|ending_mrr|starting_mrr|ending_arr|starting_arr)(?:$|[^a-z])/i;
 
 function isAvgLikeMetricName(colName: string, formatHint: SpreadsheetFormatHint): boolean {
-  return formatHint === "percent" || /rate|avg|average|ratio|price|margin|discount|score/.test(colName);
+  return formatHint === "percent" || AVG_METRIC_NAME_RE.test(colName);
+}
+
+function detectDatePeriodGrain(
+  header: string,
+  colName: string,
+  rawNonEmpty: string[],
+  canonicalDates: string[],
+  unpivotedGrain?: "month" | "quarter",
+): "month" | "quarter" | undefined {
+  if (unpivotedGrain && header === "Period Date") return unpivotedGrain;
+  if (canonicalDates.length === 0 || !canonicalDates.every((d) => d.endsWith("-01"))) return undefined;
+
+  const distinct = [...new Set(canonicalDates)].sort();
+  if (distinct.length === 0) return undefined;
+
+  const hay = `${header} ${colName}`.toLowerCase();
+  const hasQuarterHint = /(?:^|[^a-z])(?:quarter|quarterly|qtr)(?:$|[^a-z])/.test(hay);
+  const hasMonthHint = /(?:^|[^a-z])(?:month|monthly|period|billing_period|dispatch_month)(?:$|[^a-z])/.test(hay);
+  const isTransactionalDate = /(?:^|[^a-z])(?:order|invoice|ticket|txn|transaction|ship|delivery)_date(?:$|[^a-z])/.test(colName);
+
+  const rawQuarterTokens = rawNonEmpty.length > 0 && rawNonEmpty.every((v) => /^(?:Q[1-4][\s\-_'/]+\d{2,4}|\d{4}[\s\-_]*Q[1-4])$/i.test(v.trim()));
+  if (rawQuarterTokens) return "quarter";
+
+  const rawMonthTokens =
+    rawNonEmpty.length > 0 &&
+    rawNonEmpty.every((v) => {
+      const t = v.trim();
+      return /^\d{4}-\d{2}$/.test(t) || /^\d{1,2}\/\d{4}$/.test(t) || /^[A-Za-z]{3,9}\.?[\s\-_'/]+\d{2,4}$/.test(t);
+    });
+  if (rawMonthTokens) return "month";
+
+  const quarterMonths = new Set(["01", "04", "07", "10"]);
+  const allQuarterStarts = distinct.every((d) => quarterMonths.has(d.slice(5, 7)));
+  if (allQuarterStarts && !hasMonthHint) {
+    const monthNums = distinct.map((d) => Number(d.slice(0, 4)) * 12 + (Number(d.slice(5, 7)) - 1));
+    const steps = monthNums.slice(1).map((m, i) => m - monthNums[i]);
+    const validQuarterSteps = steps.length > 0 && steps.every((st) => st >= 3 && st % 3 === 0);
+    if (hasQuarterHint && distinct.length >= 1) return "quarter";
+    if (validQuarterSteps && (distinct.length >= 3 || (distinct.length >= 2 && steps.every((st) => st === 3) && !isTransactionalDate))) {
+      return "quarter";
+    }
+  }
+
+  if (hasMonthHint && distinct.length >= 1 && (distinct.length >= 2 || !isTransactionalDate)) return "month";
+  if (distinct.length >= 3) return "month";
+  return undefined;
 }
 
 function roundTwo(n: number): number {
@@ -709,9 +1071,10 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
     const nonEmpty = parsed.rows.map((r) => (r[idx] ?? "").trim()).filter(Boolean);
     const sampleCheck = nonEmpty.slice(0, 200);
 
-    let dateHits = 0, numHits = 0, intHits = 0, currencyHits = 0, percentHits = 0;
+    let dateHits = 0, numHits = 0, intHits = 0, currencyHits = 0, percentHits = 0, leadingZeroHits = 0;
     for (const v of sampleCheck) {
       if (normalizeDateValue(v)) dateHits++;
+      if (/^0\d+$/.test(v)) leadingZeroHits++;
       const num = parseNumericValue(v);
       if (num) {
         numHits++;
@@ -723,27 +1086,35 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
 
     const total = sampleCheck.length;
     const isDate = total > 0 && dateHits / total >= 0.8;
-    const isNum = !isDate && total > 0 && numHits / total >= 0.85;
     const headerLower = header.toLowerCase();
+    const isZipOrPhone = ZIP_PHONE_COL_RE.test(name) || ZIP_PHONE_COL_RE.test(headerLower);
+    const isNum = !isDate && !isZipOrPhone && total > 0 && numHits / total >= 0.85;
     const isCurrency = isNum && (currencyHits / total >= 0.3 || CURRENCY_HINT_RE.test(headerLower));
-    const isPercent = isNum && (percentHits / total >= 0.3 || /%|rate|pct|percent|margin|ratio|discount|churn|retention/.test(headerLower));
+    const isPercent = isNum && !isCurrency && (percentHits / total >= 0.3 || PERCENT_HEADER_RE.test(headerLower));
+    const hasLeadingZeroCodes = !isCurrency && !isPercent && leadingZeroHits > 0;
     const isIdNamed = ID_COLUMN_NAME_RE.test(name);
-    const looksLikeYear = isNum && intHits === numHits && /^(year|yr|fiscal_year)$/.test(name);
+    const isDimensionNumber =
+      isNum &&
+      !isIdNamed &&
+      !isCurrency &&
+      !isPercent &&
+      intHits === numHits &&
+      DIMENSION_NUMBER_COL_RE.test(name);
 
     let sqlType: SpreadsheetValueType = "VARCHAR";
     if (isDate) {
       sqlType = "DATE";
     } else if (isIdNamed) {
-      // Numeric ID columns (e.g. "$1,001" / "1001" / "1001.0") use numeric SQL types when all non-empty values parse numerically,
-      // so DuckDB and canonical key checks coerce formatted numeric IDs identically. Alphanumeric IDs ("ORD-1001") stay VARCHAR.
-      const parsedNums = nonEmpty.length > 0 ? nonEmpty.map((v) => parseNumericValue(v)) : [];
+      // Numeric ID columns (e.g. "$1,001" / "1001" / "1001.0") use numeric SQL types when all non-empty values parse numerically
+      // without leading zeros or >15-digit overflow, so DuckDB and canonical key checks coerce formatted numeric IDs identically.
+      const parsedNums = nonEmpty.length > 0 && !hasLeadingZeroCodes && !isZipOrPhone ? nonEmpty.map((v) => parseNumericValue(v)) : [];
       if (parsedNums.length > 0 && parsedNums.every((n) => n !== null && !n.isPercent)) {
-        const allIntegerValues = parsedNums.every((n) => Number.isInteger(n!.value));
+        const allIntegerValues = parsedNums.every((n) => Number.isSafeInteger(n!.value));
         sqlType = allIntegerValues ? "BIGINT" : "DOUBLE";
       } else {
         sqlType = "VARCHAR";
       }
-    } else if (isNum && !looksLikeYear) {
+    } else if (isNum && !isDimensionNumber && !hasLeadingZeroCodes) {
       sqlType = !isCurrency && !isPercent && intHits === numHits ? "BIGINT" : "DOUBLE";
     }
 
@@ -760,17 +1131,21 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
 
     let formatHint: SpreadsheetFormatHint = "text";
     let role: SpreadsheetColumnRole = "category";
+    let periodGrain: "month" | "quarter" | undefined;
 
     if (isDate) {
       formatHint = "date";
       role = "date";
+      if (canonicalVals.length === nonEmpty.length) {
+        periodGrain = detectDatePeriodGrain(header, name, nonEmpty, canonicalVals, parsed.unpivotedGrain);
+      }
     } else if (strictlyUniqueId) {
       formatHint = "text";
       role = "id";
-    } else if (isIdNamed) {
+    } else if (isIdNamed || isZipOrPhone || hasLeadingZeroCodes || isDimensionNumber) {
       formatHint = "text";
       role = "category";
-    } else if (isNum && !looksLikeYear) {
+    } else if (isNum) {
       formatHint = isCurrency ? "currency" : isPercent ? "percent" : "number";
       role = "metric";
     }
@@ -785,10 +1160,16 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
       uniqueCount: canonicalUniqueCount,
       nonEmptyCount: canonicalVals.length,
       samples: nonEmpty.slice(0, 3),
+      ...(periodGrain ? { periodGrain } : {}),
     };
   });
 
-  const dateCol = columns.find((c) => c.role === "date")?.name ?? null;
+  const dateColProfile = columns.find((c) => c.role === "date");
+  const dateCol = dateColProfile?.name ?? null;
+  const suggestedPeriod =
+    dateColProfile && dateColProfile.periodGrain
+      ? { column: dateColProfile.name, grain: dateColProfile.periodGrain }
+      : null;
   const idCol =
     columns.find(
       (c) =>
@@ -798,13 +1179,15 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
         c.uniqueCount === parsed.rows.length,
     )?.name ?? null;
   const nameHint = `${fileName} ${columns.map((c) => c.name).join(" ")}`.toLowerCase();
-  const suggestedGrain = /order|invoice|sale|deal|txn|transaction/.test(nameHint)
+  const suggestedGrain = /(?:^|[^a-z])(?:orders?|invoices?|sales?|deals?|txn|transactions?)(?:$|[^a-z])/.test(nameHint)
     ? "One sale or order"
-    : /customer|account|user|client|subscriber/.test(nameHint)
+    : /(?:^|[^a-z])(?:customers?|accounts?|users?|clients?|subscribers?)(?:$|[^a-z])/.test(nameHint)
       ? "One customer or account"
-      : /month|monthly|summary|budget|forecast/.test(nameHint)
-        ? "One monthly summary"
-        : "One row per record";
+      : suggestedPeriod?.grain === "quarter" || /(?:^|[^a-z])(?:quarter|quarterly)(?:$|[^a-z])/.test(nameHint)
+        ? "One quarterly summary"
+        : suggestedPeriod?.grain === "month" || /(?:^|[^a-z])(?:month|monthly|summary|budget|forecast)(?:$|[^a-z])/.test(nameHint)
+          ? "One monthly summary"
+          : "One row per record";
 
   return {
     sourceId,
@@ -817,6 +1200,7 @@ export function profileSpreadsheet(fileName: string, parsed: ParsedSpreadsheet):
     suggestedGrain,
     suggestedTimeColumn: dateCol,
     suggestedPrimaryKey: idCol,
+    ...(suggestedPeriod ? { suggestedPeriod } : {}),
     ...(parsed.cleaningNotes?.length ? { cleaningNotes: parsed.cleaningNotes } : {}),
   };
 }
@@ -884,18 +1268,29 @@ export function evaluateSheetJoinPair(
   if (rowsByKey.size === 0) return null;
 
   const leftTotalRows = left.rows.length;
+  const metricTarget = pickPrimaryAdditiveMetricColumn(left.columns);
   let matched = 0;
+  let orphanSum = 0;
   const leftHitsByKey = new Map<string, number>();
   for (let li = 0; li < leftTotalRows; li++) {
     const lk = canonicalizeSpreadsheetValue(left.rows[li]?.[lIdx] ?? "", effectiveKeyType);
     if (lk !== null && rowsByKey.has(lk)) {
       matched++;
       leftHitsByKey.set(lk, (leftHitsByKey.get(lk) ?? 0) + 1);
+    } else if (metricTarget) {
+      orphanSum += parseNumericValue(left.rows[li]?.[metricTarget.idx] ?? "")?.value ?? 0;
     }
   }
   if (matched === 0) return null;
 
   const unmatchedLeftRows = leftTotalRows - matched;
+  const orphanProps =
+    unmatchedLeftRows > 0 && metricTarget
+      ? {
+          orphanLeftDollarTotal: roundTwo(orphanSum),
+          orphanMetricLabel: metricTarget.col.label,
+        }
+      : {};
   let matchRate: number;
   if (matched === leftTotalRows) {
     matchRate = 1;
@@ -915,7 +1310,7 @@ export function evaluateSheetJoinPair(
       matchRate,
       include: matchRate >= 0.5,
       rightKeyUnique: true,
-      ...(unmatchedLeftRows > 0 ? { unmatchedLeftRows } : {}),
+      ...(unmatchedLeftRows > 0 ? { unmatchedLeftRows, ...orphanProps } : {}),
     };
   }
 
@@ -953,7 +1348,6 @@ export function evaluateSheetJoinPair(
   const duplicateKeys: SpreadsheetDuplicateKeyDetail[] = allDupDetails.slice(0, 5).map(({ leftHits: _lh, ...rest }) => rest);
 
   let fanoutImpact: SpreadsheetJoinFanoutImpact | undefined;
-  const metricTarget = pickPrimaryAdditiveMetricColumn(left.columns);
   if (metricTarget) {
     let trueTotal = 0;
     let inflatedTotal = 0;
@@ -995,7 +1389,7 @@ export function evaluateSheetJoinPair(
     duplicateKeys,
     ...(fanoutImpact ? { fanoutImpact } : {}),
     resolution,
-    ...(unmatchedLeftRows > 0 ? { unmatchedLeftRows } : {}),
+    ...(unmatchedLeftRows > 0 ? { unmatchedLeftRows, ...orphanProps } : {}),
   };
 }
 
@@ -1133,6 +1527,7 @@ export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadshee
       suggestedGrain: single.suggestedGrain,
       suggestedTimeColumn: single.suggestedTimeColumn,
       suggestedPrimaryKey: single.suggestedPrimaryKey,
+      ...(single.suggestedPeriod ? { suggestedPeriod: single.suggestedPeriod } : {}),
       kind: "fact",
     };
     return { ...single, sheets: [sheetEntry], detectedJoins: [] };
@@ -1176,11 +1571,15 @@ export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadshee
     suggestedGrain: p.suggestedGrain,
     suggestedTimeColumn: p.suggestedTimeColumn,
     suggestedPrimaryKey: p.suggestedPrimaryKey,
+    ...(p.suggestedPeriod ? { suggestedPeriod: p.suggestedPeriod } : {}),
     kind: rightSideTargets.has(p.tableName) ? "dimension" : "fact",
   }));
 
+  const formatSheetNote = (sheetName: string, note: string) =>
+    parsedSheets.length > 1 && !/^Skipped \d+ hidden worksheet/.test(note) ? `${sheetName}: ${note}` : note;
+
   const allCleaningNotes = parsedSheets.flatMap((s) =>
-    (s.cleaningNotes ?? []).map((n) => (parsedSheets.length > 1 ? `${s.sheetName}: ${n}` : n)),
+    (s.cleaningNotes ?? []).map((n) => formatSheetNote(s.sheetName, n)),
   );
   for (const j of detectedJoins) {
     if (!j.rightKeyUnique && j.include && j.resolution === "deduplicate") {
@@ -1213,11 +1612,16 @@ export function profileWorkbook(fileName: string, parsedSheets: ParsedSpreadshee
     suggestedGrain: primary.suggestedGrain,
     suggestedTimeColumn: primary.suggestedTimeColumn,
     suggestedPrimaryKey: primary.suggestedPrimaryKey,
+    ...(primary.suggestedPeriod ? { suggestedPeriod: primary.suggestedPeriod } : {}),
     sheets,
     detectedJoins,
     ...(allCleaningNotes.length ? { cleaningNotes: allCleaningNotes } : {}),
   };
 }
+
+export type SpreadsheetProposalTable = Proposal["tables"][number] & {
+  period?: { column: string; grain: TimeGrain };
+};
 
 export type SpreadsheetProposalJoin = Proposal["joins"][number] & {
   cardinality?: JoinCardinality;
@@ -1226,9 +1630,12 @@ export type SpreadsheetProposalJoin = Proposal["joins"][number] & {
 export type SpreadsheetProposedMetric = ProposedMetric & {
   importance?: number;
   unit?: Metric["unit"];
+  timeGrains?: TimeGrain[];
+  timeDimension?: string;
 };
 
-export interface SpreadsheetProposal extends Omit<Proposal, "joins" | "metrics"> {
+export interface SpreadsheetProposal extends Omit<Proposal, "tables" | "joins" | "metrics"> {
+  tables: SpreadsheetProposalTable[];
   joins: SpreadsheetProposalJoin[];
   metrics: SpreadsheetProposedMetric[];
   hygieneNotes?: string[];
@@ -1271,7 +1678,9 @@ export function prepareWorkbookImport(opts: {
   }));
   const sheetRows = opts.parsedSheets.map((ps) => ps.rows.map((r) => [...r]));
   const baseHygieneNotes = opts.parsedSheets.flatMap((s) =>
-    (s.cleaningNotes ?? []).map((n) => (opts.parsedSheets.length > 1 ? `${s.sheetName}: ${n}` : n)),
+    (s.cleaningNotes ?? []).map((n) =>
+      opts.parsedSheets.length > 1 && !/^Skipped \d+ hidden worksheet/.test(n) ? `${s.sheetName}: ${n}` : n,
+    ),
   );
   const hygieneNotes = [...baseHygieneNotes];
 
@@ -1425,7 +1834,7 @@ export function buildWorkbookProposal(opts: {
   }
 
   const choiceByTable = new Map((opts.sheetChoices ?? []).map((c) => [c.tableName, c]));
-  const allTables: Proposal["tables"] = [];
+  const allTables: SpreadsheetProposalTable[] = [];
   const allMetrics: SpreadsheetProposedMetric[] = [];
   const usedMetricNames = new Set<string>();
   const primaryTable = opts.sheets.find((s) => s.kind === "fact")?.tableName ?? opts.sheets[0].tableName;
@@ -1533,6 +1942,11 @@ export function buildSpreadsheetProposal(opts: {
     opts.timeColumn && resolvedColumns.some((c) => c.name === opts.timeColumn && c.sqlType === "DATE")
       ? opts.timeColumn
       : resolvedColumns.find((c) => c.role === "date" && c.sqlType === "DATE")?.name ?? null;
+  const timeColProfile = timeColumn ? resolvedColumns.find((c) => c.name === timeColumn) : undefined;
+  const tablePeriod =
+    timeColumn && timeColProfile?.role === "date" && timeColProfile.periodGrain
+      ? { column: timeColumn, grain: timeColProfile.periodGrain }
+      : undefined;
 
   const metrics: SpreadsheetProposedMetric[] = [];
   const usedMetricNames = new Set<string>();
@@ -1543,14 +1957,22 @@ export function buildSpreadsheetProposal(opts: {
     if (usedMetricNames.has(metricName)) metricName = `${metricName}_total`;
     usedMetricNames.add(metricName);
 
-    const isAvg = isAvgLikeMetricName(col.name, col.formatHint);
-    const expr = isAvg ? `AVG(${col.name})` : `SUM(${col.name})`;
     const hay = `${col.name} ${col.label} ${col.originalHeader}`.toLowerCase();
-    const isCostLike = /cost|expense|spend|cogs|opex|capex|fee|loss|curtailment/.test(hay) && !/rev|sales|income|profit|mrr|arr/.test(hay);
+    const isSnapshotBalance = Boolean(timeColumn) && SNAPSHOT_BALANCE_RE.test(hay);
+    const isAvg = isAvgLikeMetricName(col.name, col.formatHint) || (isSnapshotBalance && !tablePeriod);
+    const expr = isAvg ? `AVG(${col.name})` : `SUM(${col.name})`;
+    const snapshotGrainRestriction =
+      isSnapshotBalance && tablePeriod && timeColumn
+        ? {
+            timeGrains: [tablePeriod.grain] as TimeGrain[],
+            timeDimension: `${opts.tableName}.${timeColumn}`,
+          }
+        : {};
+    const isCostLike = /(?:^|[^a-z])(?:costs?|expenses?|spend|spending|cogs|opex|capex|fees?|loss|curtailment)(?:$|[^a-z])/.test(hay) && !/(?:^|[^a-z])(?:rev|revenue|sales?|income|profits?|mrr|arr)(?:$|[^a-z])/.test(hay);
     const isRevenueLike =
       !isCostLike &&
-      (col.formatHint === "currency" || /rev|sales|mrr|arr|gmv|income|profit|bookings|amount|pnl/.test(hay));
-    const importance = isAvg ? 60 : isCostLike ? 75 : isRevenueLike ? 100 : 85;
+      (col.formatHint === "currency" || /(?:^|[^a-z])(?:rev|revenue|sales?|mrr|arr|gmv|income|profits?|bookings|amount|pnl)(?:$|[^a-z])/.test(hay));
+    const importance = isAvg && !isSnapshotBalance ? 60 : isCostLike ? 75 : isRevenueLike ? 100 : 85;
     const unit: Metric["unit"] =
       col.formatHint === "currency"
         ? "currency"
@@ -1559,9 +1981,9 @@ export function buildSpreadsheetProposal(opts: {
           : undefined;
     const unitNote = col.formatHint === "currency" ? " (currency)" : col.formatHint === "percent" ? " (percentage)" : "";
     const formattedLabel =
-      col.formatHint === "percent" && !/\b(rate|pct|percent|margin|ratio|retention|conversion|share)\b/i.test(col.label)
+      col.formatHint === "percent" && !/(?:^|[^a-z])(?:rate|pct|percent|margin|ratio|retention|conversion|share)(?:$|[^a-z])/i.test(col.label)
         ? `${col.label} rate`
-        : col.formatHint === "currency" && !/\$|usd|revenue|sales|mrr|arr|cost|spend|price|profit|budget/i.test(col.label)
+        : col.formatHint === "currency" && !/[$€£¥₹]|(?:^|[^a-z])(?:usd|eur|gbp|revenue|sales?|mrr|arr|costs?|spend|prices?|profits?|budget|balance)(?:$|[^a-z])/i.test(col.label)
           ? `${col.label} (USD)`
           : col.label;
     metrics.push({
@@ -1570,6 +1992,7 @@ export function buildSpreadsheetProposal(opts: {
       baseTable: opts.tableName,
       expression: expr,
       ...(unit ? { unit } : {}),
+      ...snapshotGrainRestriction,
       importance,
       description: `${isAvg ? "Average" : "Total"} ${col.label}${unitNote} from ${opts.label}.`,
       include: true,
@@ -1618,6 +2041,7 @@ export function buildSpreadsheetProposal(opts: {
         description: `${opts.label} spreadsheet table (${opts.grain.trim() || "one row per record"}).`,
         synonyms: [opts.label.toLowerCase(), opts.tableName],
         timeColumn,
+        ...(tablePeriod ? { period: tablePeriod } : {}),
         ...(opts.reportingLag && opts.reportingLag > 0 ? { reportingLag: opts.reportingLag } : {}),
         columns: resolvedColumns.map((c) => ({
           name: c.name,

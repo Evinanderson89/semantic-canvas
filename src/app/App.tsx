@@ -29,7 +29,7 @@ import { DashboardBeautify } from "./DashboardBeautify.tsx";
 import { AiRedesign } from "./AiRedesign.tsx";
 import { validateRedesign } from "../suggest/redesign.ts";
 import { InsertMenu } from "./InsertMenu.tsx";
-import { Interview } from "./Interview.tsx";
+import { Interview, InterviewReadback, buildBriefFromPrompt } from "./Interview.tsx";
 import { AgentQuestions } from "./AgentQuestions.tsx";
 import { AgentChat } from "./AgentChat.tsx";
 import { Inspector } from "./Inspector.tsx";
@@ -51,8 +51,9 @@ import {
   starterNeedsSaasSwitch,
   type SandboxTourStep,
 } from "./SandboxTour.tsx";
-import { SAMPLE_WORKBOOKS, type SampleWorkbookId } from "../modeler/spreadsheetTypes.ts";
-import type { Brief } from "../suggest/match.ts";
+import { SAMPLE_WORKBOOKS, type SampleWorkbookId, type SpreadsheetDetectedJoin } from "../modeler/spreadsheetTypes.ts";
+import { matchModel, type Brief } from "../suggest/match.ts";
+import { applyThemeToDocument, formatSourceDisplayLabel, resolveInitialTheme, THEME_STORAGE_KEY, type AppTheme } from "./themeInit.ts";
 import { DEFAULT_CANVAS, THEME_PRESETS, type CanvasSpec } from "../canvas/presets.ts";
 import { overlaps } from "../canvas/geometry.ts";
 import { applyLayout } from "../canvas/layouts.ts";
@@ -89,14 +90,48 @@ export function App() {
   const draftStorageKey = session.user ? `sc:team:${session.user.id}:drafts` : "sc:drafts";
   const sourceStorageKey = session.user ? `sc:team:${session.user.id}:source` : "sc:source";
   const [bootError, setBootError] = useState("");
+  const [bootRateLimited, setBootRateLimited] = useState(false);
+  const [theme, setTheme] = useState<AppTheme>(() => resolveInitialTheme());
+  useEffect(() => {
+    applyThemeToDocument(theme);
+  }, [theme]);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleScheme = (e: MediaQueryListEvent) => {
+      try {
+        if (localStorage.getItem(THEME_STORAGE_KEY)) return;
+      } catch {}
+      setTheme(e.matches ? "dark" : "light");
+    };
+    mql.addEventListener("change", handleScheme);
+    return () => mql.removeEventListener("change", handleScheme);
+  }, []);
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => {
+      const next: AppTheme = prev === "light" ? "dark" : "light";
+      applyThemeToDocument(next);
+      try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch {}
+      return next;
+    });
+  }, []);
+  const recordBootFailure = useCallback((err: any) => {
+    const msg = String(err?.message ?? err ?? "Could not load semantic model");
+    const is429 = err?.status === 429 || /429|rate limit|too many requests/i.test(msg);
+    setBootRateLimited(is429);
+    setBootError(msg);
+  }, []);
   const [model, setModel] = useState<Model | null>(null);
   const [book, setBook] = useState<DashboardSpec | null>(null);
   const [activeTabId, setActiveTabId] = useState("main");
   const [referenceImport, setReferenceImport] = useState(false);
+  const [droppedRefFile, setDroppedRefFile] = useState<File | null>(null);
   const [spreadsheetImport, setSpreadsheetImport] = useState(false);
+  const [droppedSheetFile, setDroppedSheetFile] = useState<File | null>(null);
   const [initialSample, setInitialSample] = useState<SampleWorkbookId | null>(null);
+  const [interviewSeed, setInterviewSeed] = useState("");
+  const [tourStepOneJoins, setTourStepOneJoins] = useState<SpreadsheetDetectedJoin[] | undefined>(undefined);
   const [worldBusy, setWorldBusy] = useState<string | null>(null);
-  const [sandboxToolsOpen, setSandboxToolsOpen] = useState(false);
   const [completedQuests, setCompletedQuests] = useState<string[]>([]);
   const [topbarLinkCopied, setTopbarLinkCopied] = useState(false);
   const markQuest = useCallback((q: "story" | "poster" | "messy") => {
@@ -120,7 +155,7 @@ export function App() {
   const [picking, setPicking] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
-    const compact = window.matchMedia("(max-width: 650px)");
+    const compact = window.matchMedia("(max-width: 700px)");
     const resize = () => setCollapsed(compact.matches);
     resize(); compact.addEventListener("change", resize);
     return () => compact.removeEventListener("change", resize);
@@ -230,8 +265,16 @@ export function App() {
   }, []);
 
   const refreshSources = useCallback(() =>
-    fetch("/api/sources").then((r) => r.json())
+    fetch("/api/sources").then(async (r) => {
+      if (r.status === 429) {
+        const body = await r.json().catch(() => null);
+        recordBootFailure({ status: 429, message: body?.error ?? "Too many requests (429)" });
+        return null;
+      }
+      return r.json();
+    })
       .then((d) => {
+        if (!d) return;
         const list: SourceInfo[] = d.sources ?? [];
         setSources(list);
         setAutoSourceId(d.active ?? null);
@@ -257,8 +300,8 @@ export function App() {
           try { storage.setItem(sourceStorageKey, d.active); } catch {}
           const epoch = documentEpoch.current;
           fetch("/api/model").then(readResponse).then((m) => {
-            if (documentEpoch.current === epoch) { setModel(m); setBootError(""); }
-          }).catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
+            if (documentEpoch.current === epoch) { setModel(m); setBootError(""); setBootRateLimited(false); }
+          }).catch((e) => { if (documentEpoch.current === epoch) recordBootFailure(e); });
         } else if (!sourceRef.current) {
           sourceRef.current = d.active ?? "";
         }
@@ -267,7 +310,7 @@ export function App() {
           localStorage.setItem("sc:principal", d.defaultPrincipal);
         } })
       .catch(() => {}),
-  []);
+  [recordBootFailure, storage, sourceStorageKey]);
   React.useEffect(() => { refreshSources(); }, [refreshSources]);
 
   const [dashId, setDashId] = useState<string | null>(null);
@@ -446,10 +489,10 @@ export function App() {
     setView("home"); setModel(null);
     const epoch = documentEpoch.current;
     fetch("/api/model").then(readResponse).then((m) => {
-      if (documentEpoch.current === epoch) { setModel(m); setBootError(""); }
-    }).catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
+      if (documentEpoch.current === epoch) { setModel(m); setBootError(""); setBootRateLimited(false); }
+    }).catch((e) => { if (documentEpoch.current === epoch) recordBootFailure(e); });
     refreshSaved();
-  }, [refreshSaved, beginDocument]);
+  }, [refreshSaved, beginDocument, recordBootFailure, storage, sourceStorageKey]);
 
   useEffect(() => {
     if (!sourcesLoaded || !link.current) return;
@@ -539,9 +582,10 @@ export function App() {
     } catch (e: any) { setNotice(`Could not open dashboard: ${e.message}`); }
   };
   const browseLibrary = (folder: string | null) => {
-    if (beginDocument(null)) { setView("library"); setLibraryFolder(folder); if (window.matchMedia("(max-width: 650px)").matches) setCollapsed(true); coreLibrary.refresh(); }
+    if (beginDocument(null)) { setView("library"); setLibraryFolder(folder); if (window.matchMedia("(max-width: 700px)").matches) setCollapsed(true); coreLibrary.refresh(); }
   };
   const openLibraryItem = (item: LibraryItem) => {
+    if (window.matchMedia("(max-width: 700px)").matches) setCollapsed(true);
     if (item.kind === "dashboard") void openSaved(item.id); else setViewPreview(item);
   };
   const addSavedView = (view: LibraryView) => {
@@ -608,6 +652,17 @@ export function App() {
     ? dash.tiles.find((t) => t.id === selected[0]) ?? null : null;
   const inspecting = !!selectedTile && selectedTile.kind !== "filter" && !canvas.locked;
 
+  useEffect(() => {
+    if (inspecting && typeof window !== "undefined" && window.matchMedia("(max-width: 1100px)").matches) {
+      setCollapsed(true);
+    }
+  }, [inspecting]);
+
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    scrollRef.current?.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [tourStep]);
+
   // Selection opens the Inspector without moving the user's canvas. Fit and
   // zoom remain explicit controls; revealing newly inserted content is separate.
   /** Zoom so the authored canvas fits the space actually available. */
@@ -670,11 +725,30 @@ export function App() {
     el.scrollTo({ left: Math.max(0, scrollLeft), top: Math.max(0, scrollTop), behavior: "auto" });
   }, [dash, zoom]);
 
+  const retryBoot = useCallback(() => {
+    setBootError("");
+    setBootRateLimited(false);
+    refreshSources();
+    const epoch = documentEpoch.current;
+    fetch("/api/model")
+      .then(readResponse)
+      .then((m) => {
+        if (documentEpoch.current === epoch) {
+          setModel(m);
+          setBootError("");
+          setBootRateLimited(false);
+        }
+      })
+      .catch((e) => {
+        if (documentEpoch.current === epoch) recordBootFailure(e);
+      });
+  }, [refreshSources, recordBootFailure]);
+
   useEffect(() => {
     const epoch = documentEpoch.current;
-    fetch("/api/model").then(readResponse).then((m) => { if (documentEpoch.current === epoch) { setModel(m); setBootError(""); } })
-      .catch((e) => { if (documentEpoch.current === epoch) setBootError(e.message); });
-  }, []);
+    fetch("/api/model").then(readResponse).then((m) => { if (documentEpoch.current === epoch) { setModel(m); setBootError(""); setBootRateLimited(false); } })
+      .catch((e) => { if (documentEpoch.current === epoch) recordBootFailure(e); });
+  }, [recordBootFailure]);
 
   useEffect(() => { if (investigating) markQuest("story"); }, [investigating, markQuest]);
   useEffect(() => { if (handoff && (handoffMode === "infographic" || handoffMode === "story")) markQuest("poster"); }, [handoff, handoffMode, markQuest]);
@@ -873,13 +947,18 @@ export function App() {
     [freshCanvas, model, activeSourceId, sources, switchToSaasWorld, beginDocument, applyStarterOpenOptions, setNotice],
   );
 
-  const activateSampleWorld = useCallback(async (sampleId: SampleWorkbookId, opts?: { silentNotice?: boolean }): Promise<boolean> => {
+  const activateSampleWorld = useCallback(async (sampleId: SampleWorkbookId, opts?: { silentNotice?: boolean; customJoins?: SpreadsheetDetectedJoin[] }): Promise<boolean> => {
     const meta = SAMPLE_WORKBOOKS.find((w) => w.id === sampleId);
     if (!meta || worldBusy) return false;
     markQuest("messy");
     setWorldBusy(sampleId);
     try {
-      const existing = sources.find((s) => s.id === meta.preferredSourceId && s.status === "ready");
+      const hasNonDefaultJoin = Boolean(
+        opts?.customJoins?.some((j) => !j.include || j.resolution === "exclude" || j.resolution === "one_to_many"),
+      );
+      const existing = !hasNonDefaultJoin
+        ? sources.find((s) => s.id === meta.preferredSourceId && s.status === "ready")
+        : undefined;
       if (existing) {
         if (!beginDocument(null, { canvas: { ...freshCanvas(), locked: true } })) return false;
         sourceRef.current = existing.id;
@@ -892,6 +971,7 @@ export function App() {
         if (documentEpoch.current !== epoch) return false;
         setModel(nextModel);
         setBootError("");
+        setBootRateLimited(false);
         const primaryTable = Object.keys(nextModel.tables)[0];
         const metricNames = pickPrimaryBusinessMetrics(nextModel);
         if (primaryTable && metricNames.length) {
@@ -899,7 +979,12 @@ export function App() {
         }
         return true;
       }
-      const imported = await quickImportSampleWorkbook(sampleId);
+      const imported = await quickImportSampleWorkbook(sampleId, {
+        joinsOverride: opts?.customJoins,
+        customSourceId: hasNonDefaultJoin
+          ? `${meta.preferredSourceId}-custom-${Date.now().toString(36)}`
+          : undefined,
+      });
       refreshSources();
       sourceRef.current = imported.sourceId;
       setSourceId(imported.sourceId);
@@ -911,6 +996,7 @@ export function App() {
       if (documentEpoch.current !== epoch) return false;
       setModel(nextModel);
       setBootError("");
+      setBootRateLimited(false);
       await build({
         table: imported.tableName,
         metrics: pickPrimaryBusinessMetrics(nextModel, imported.metrics),
@@ -930,16 +1016,23 @@ export function App() {
     }
   }, [worldBusy, markQuest, sources, beginDocument, freshCanvas, storage, sourceStorageKey, pickPrimaryBusinessMetrics, build, refreshSources, setNotice]);
 
-  const handleTourNext = useCallback(async () => {
+  const handleTourNext = useCallback(async (explicitJoins?: SpreadsheetDetectedJoin[]) => {
     if (tourStep === 1) {
-      if (dash && activeSourceId.startsWith("coffee-roastery-2tab")) {
+      const chosenJoins = explicitJoins ?? tourStepOneJoins;
+      const hasNonDefaultJoin = Boolean(
+        chosenJoins?.some((j) => !j.include || j.resolution === "exclude" || j.resolution === "one_to_many"),
+      );
+      if (!hasNonDefaultJoin && dash && activeSourceId === "coffee-roastery-2tab") {
         setHandoff(false);
         setTourStep(2);
         pendingFit.current = true;
         requestAnimationFrame(() => fit());
         return;
       }
-      const ok = await activateSampleWorld("roastery-2tab-xlsx", { silentNotice: true });
+      const ok = await activateSampleWorld("roastery-2tab-xlsx", {
+        silentNotice: true,
+        customJoins: chosenJoins,
+      });
       if (ok) {
         setHandoff(false);
         setTourStep(2);
@@ -965,7 +1058,7 @@ export function App() {
       pendingFit.current = true;
       requestAnimationFrame(() => fit());
     }
-  }, [tourStep, dash, activeSourceId, activateSampleWorld, fit]);
+  }, [tourStep, tourStepOneJoins, dash, activeSourceId, activateSampleWorld, fit]);
 
   const handleTourSkip = useCallback(() => {
     markSandboxTourCompleted();
@@ -1158,7 +1251,12 @@ export function App() {
     }
   }, [sourcesLoaded, sandboxMode, tourStep, model, book, view, freshCanvas, beginDocument, pickPrimaryBusinessMetrics, build]);
 
-  if (!model) return bootError ? <div className="setup-empty"><Connections sources={sources} activeId={activeSourceId} sandboxMode={sandboxMode} onSelect={switchSource} onRefresh={() => { refreshSources(); switchSource(""); }} principals={principals} policies={policies} /><p role="alert">{session.canAdmin ? "Connect a source to open your metric catalogue." : "No accessible source is ready. Contact your workspace administrator."}</p></div> : <div className="boot">Loading semantic layer…</div>;
+  if (!model) {
+    if (bootError && bootRateLimited) {
+      return <BootRateLimitScreen message={bootError} onRetry={retryBoot} />;
+    }
+    return bootError ? <div className="setup-empty"><Connections sources={sources} activeId={activeSourceId} sandboxMode={sandboxMode} onSelect={switchSource} onRefresh={() => { refreshSources(); switchSource(""); }} principals={principals} policies={policies} /><p role="alert">{session.canAdmin ? "Connect a source to open your metric catalogue." : "No accessible source is ready. Contact your workspace administrator."}</p></div> : <div className="boot">Loading semantic layer…</div>;
+  }
 
   const nextId = () => `t${Math.random().toString(36).slice(2, 8)}`;
   // dropPoint pushes a tile below existing content when the natural spot is
@@ -1293,11 +1391,9 @@ export function App() {
         onSelect: () => {
           const surface = scrollRef.current?.querySelector<HTMLElement>(".canvas-surface");
           if (!surface) return;
-          try {
-            downloadSvg(`${slugForFilename(dash.title || "dashboard")}.svg`, surface);
-          } catch (e: any) {
+          void downloadSvg(`${slugForFilename(dash.title || "dashboard")}.svg`, surface).catch((e: any) => {
             setNotice(`Could not export SVG: ${e.message}`);
-          }
+          });
         },
       },
       {
@@ -1337,10 +1433,10 @@ export function App() {
     },
     {
       id: "nav:library",
-      label: "CoreCanvas Library",
+      label: "Workspace Library",
       subtitle: "Saved dashboards, folders & reusable chart views",
       category: "Navigate",
-      keywords: ["library", "corecanvas", "saved", "views", "folders", "templates"],
+      keywords: ["library", "workspace", "corecanvas", "saved", "views", "folders", "templates"],
       onSelect: () => browseLibrary(null),
     },
     {
@@ -1359,7 +1455,7 @@ export function App() {
       keywords: ["data", "model", "tables", "joins", "grain", "schema", "columns"],
       onSelect: () => { if (beginDocument(null)) { setRegistryTable(null); setView("model"); } },
     },
-    ...(session.canAdmin ? [{
+    ...(session.canAdmin && !sandboxMode ? [{
       id: "nav:modeler",
       label: "Modeler",
       subtitle: "Extend tables, relationships & governed semantic definitions",
@@ -1422,8 +1518,17 @@ export function App() {
         </button>
       )}
       {!tourStep && <Sidebar model={model} view={dash ? "" : view}
+               sandboxMode={sandboxMode}
+               theme={theme}
+               onToggleTheme={toggleTheme}
                library={<LibraryNavigation key={activeSourceId} data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} activeId={dashId ?? templateId} onBrowse={browseLibrary} onOpen={openLibraryItem} />}
-               onView={(v) => { if (beginDocument(null)) { setRegistryTable(null); setView(v); } }}
+               onView={(v) => {
+                 if (beginDocument(null)) {
+                   setRegistryTable(null);
+                   setView(v);
+                   if (window.matchMedia("(max-width: 700px)").matches) setCollapsed(true);
+                 }
+               }}
                collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}
                onSettings={() => setSettingsOpen(true)}
                principals={principals} principal={asWho}
@@ -1441,6 +1546,8 @@ export function App() {
             step={tourStep}
             hasDashboard={Boolean(dash && activeSourceId.startsWith("coffee-roastery-2tab"))}
             busy={worldBusy !== null}
+            theme={theme}
+            onToggleTheme={toggleTheme}
             onSelectStep={(nextStep) => {
               setHandoff(false);
               setTourStep(nextStep);
@@ -1619,7 +1726,8 @@ export function App() {
         {tourStep === 1 ? (
           <SandboxTourStepOne
             busy={worldBusy !== null}
-            onBuildDashboard={() => void handleTourNext()}
+            onJoinsChange={setTourStepOneJoins}
+            onBuildDashboard={(j) => void handleTourNext(j)}
           />
         ) : (tourStep === 3 || tourStep === 4) && dash ? (
           <SandboxTourPresentationStage
@@ -1667,39 +1775,72 @@ export function App() {
           <Connections sources={sources} activeId={activeSourceId} sandboxMode={sandboxMode} onSelect={switchSource}
                        onRefresh={() => { refreshSources(); fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message)); }} principals={principals} policies={policies} />
         ) : !dash && view === "registry" ? (
-          <MetricRegistry model={model} initialTable={registryTable} sourceId={activeSourceId ?? ""}
+          <MetricRegistry model={model} initialTable={registryTable} sourceId={activeSourceId ?? ""} sandboxMode={sandboxMode}
             onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} onUse={(m) => {
             const t = metricOf(model, m).baseTable;
             setView("home"); build({ table: t, metrics: [m], audience: "operator", grain });
           }} />
         ) : !dash && view === "model" ? (
-          <DataModel model={model} sourceId={activeSourceId ?? ""} onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} />
+          <DataModel model={model} sourceId={activeSourceId ?? ""} sandboxMode={sandboxMode} onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} />
         ) : !dash && view === "modeler" ? (
-          <Modeler sources={sources} onPublished={() => refreshSources()} onImportSpreadsheet={session.canAdmin ? () => setSpreadsheetImport(true) : undefined} />
+          <Modeler sources={sources} sandboxMode={sandboxMode} onPublished={() => refreshSources()} onImportSpreadsheet={session.canAdmin ? () => { setInitialSample(null); setDroppedSheetFile(null); setSpreadsheetImport(true); } : undefined} />
         ) : !dash ? (
-          <>{session.canEdit ? <Entry model={model} worldBusy={worldBusy} onDemo={demoDashboardAvailable(model) ? () => { const c = freshCanvas(); if (beginDocument(demoDashboard(c.width), { canvas: c })) { pendingFit.current = true; setView("home"); } } : undefined} onSuggest={() => setInterview(true)} onReference={() => setReferenceImport(true)} onSpreadsheet={session.canAdmin ? () => { setInitialSample(null); setSpreadsheetImport(true); } : undefined} onOpenSaasStory={() => void switchToSaasWorld({ detail: "ending_mrr", story: true, preview: true })} onOpenSaasPoster={() => void switchToSaasWorld({ starterName: "SaaS overview", mode: "infographic", preview: true })} onQuickWorld={session.canAdmin ? (id: SampleWorkbookId) => void activateSampleWorld(id) : undefined} onInspectMessy={session.canAdmin ? () => { setInitialSample("messy-roastery-pnl"); setSpreadsheetImport(true); } : undefined}
-                 onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }} /> : <div className="explore"><span className="eyebrow">Company workspace</span><h1>Your metrics, in focus.</h1><p className="lede">Open a shared dashboard below, or browse CoreCanvas Library. Filters and drill-downs follow your company’s data permissions.</p></div>}
-        <div className="document-library"><div className="library-heading"><h3>Continue your work</h3><span>{session.mode === "team" ? "Shared dashboards and your drafts in this tab" : "Saved dashboards and drafts on this computer"}</span></div>
-          <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
-          {session.canEdit && <button className="link" onClick={() => backupInput.current?.click()}>Import backup</button>}
-          {drafts.filter((d) => d.source === activeSourceId).map((d) => <div key={d.key}>
-            <button className="link" onClick={() => {
-              const issues = validateDashboard(model, d.spec);
-              if (issues.length) {
-                setNotice(`Could not recover draft: ${issues[0].problem}`);
-                return;
-              }
-              beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key, folderId: d.folderId });
-            }}>Recover draft: {d.spec.title}</button>
-            <button className="link" aria-label={`Discard draft ${d.spec.title}`} onClick={() => {
-              try {
-                const current = parseDrafts(storage.getItem(draftStorageKey));
-                storage.setItem(draftStorageKey, JSON.stringify(current.filter(x => x.key !== d.key)));
-                readDrafts();
-              } catch { setNotice("Could not discard the draft. Recovery storage is unavailable or unreadable; your saved recovery data has not been replaced."); }
-            }}>Discard</button>
-          </div>)}
-        </div>
+          <>
+            {session.canEdit ? (
+              <Entry
+                model={model}
+                activeSourceLabel={formatSourceDisplayLabel(activeSource?.label ?? model.name, activeSource?.id ?? activeSourceId)}
+                worldBusy={worldBusy}
+                drafts={drafts.filter((d) => d.source === activeSourceId)}
+                onBuildBrief={(brief: Brief) => void build(brief)}
+                onCustomize={(seedText: string) => {
+                  setInterviewSeed(seedText);
+                  setInterview(true);
+                }}
+                onDemo={demoDashboardAvailable(model) ? () => { const c = freshCanvas(); if (beginDocument(demoDashboard(c.width), { canvas: c })) { pendingFit.current = true; setView("home"); } } : undefined}
+                onReference={() => { setDroppedRefFile(null); setReferenceImport(true); }}
+                onSpreadsheet={session.canAdmin ? () => { setInitialSample(null); setDroppedSheetFile(null); setSpreadsheetImport(true); } : undefined}
+                onDropSpreadsheetFile={session.canAdmin ? (f: File) => { setInitialSample(null); setDroppedSheetFile(f); setSpreadsheetImport(true); } : undefined}
+                onDropReferenceFile={(f: File) => { setDroppedRefFile(f); setReferenceImport(true); }}
+                onOpenSaasStory={() => void switchToSaasWorld({ detail: "ending_mrr", story: true, preview: true })}
+                onQuickWorld={session.canAdmin ? (id: SampleWorkbookId) => void activateSampleWorld(id) : undefined}
+                onScratch={() => { pendingFit.current = true; beginDocument({ title: "Untitled dashboard", tiles: [] }, { canvas: freshCanvas() }); }}
+                onOpenSaved={() => { refreshSaved(); setOpenList(true); }}
+                onImportBackup={() => backupInput.current?.click()}
+                onRecoverDraft={(d: Draft) => {
+                  const issues = validateDashboard(model, d.spec);
+                  if (issues.length) {
+                    setNotice(`Could not recover draft: ${issues[0].problem}`);
+                    return;
+                  }
+                  beginDocument(d.spec, { id: d.id, revision: d.revision, canvas: d.canvas, draftKey: d.key, folderId: d.folderId });
+                }}
+                onDiscardDraft={(d: Draft) => {
+                  try {
+                    const current = parseDrafts(storage.getItem(draftStorageKey));
+                    storage.setItem(draftStorageKey, JSON.stringify(current.filter((x) => x.key !== d.key)));
+                    readDrafts();
+                  } catch {
+                    setNotice("Could not discard the draft. Recovery storage is unavailable or unreadable; your saved recovery data has not been replaced.");
+                  }
+                }}
+              />
+            ) : (
+              <>
+                <div className="explore">
+                  <span className="eyebrow">Company workspace</span>
+                  <h1>Your metrics, in focus.</h1>
+                  <p className="lede">Open a shared dashboard below, or browse Workspace Library. Filters and drill-downs follow your company’s data permissions.</p>
+                </div>
+                <div className="document-library">
+                  <div className="library-heading">
+                    <h3>Continue your work</h3>
+                    <span>{session.mode === "team" ? "Shared dashboards and your drafts in this tab" : "Saved dashboards and drafts on this computer"}</span>
+                  </div>
+                  <button className="link" onClick={() => { refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
+                </div>
+              </>
+            )}
           </>
         ) : (
           <>
@@ -1730,7 +1871,19 @@ export function App() {
                 </select>
               </label>
               {(!canvas.locked || dashId || !session.canEdit) && (
-                <span className={"save-status" + (dirty ? " dirty" : "")} role="status">{!session.canEdit ? "Viewer access" : saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</span>
+                <span className={"save-status" + (dirty ? " dirty" : "")} role="status">
+                  {!session.canEdit
+                    ? "Viewer access"
+                    : saving
+                      ? "Saving…"
+                      : dirty
+                        ? "Unsaved changes"
+                        : dashId
+                          ? "Saved"
+                          : templateId
+                            ? "Starter copy — unsaved"
+                            : "Not saved yet"}
+                </span>
               )}
               <button
                 type="button"
@@ -1749,9 +1902,11 @@ export function App() {
                 <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M16 10a6 6 0 1 1-1.8-4.2M16 3v3.5h-3.5" /></svg>
               </button>
-              <button className="save-button" onClick={() => save()} disabled={saving || !session.canEdit} aria-label="Save dashboard">
-                {saving ? "Saving…" : "Save"}
-              </button>
+              {(!sandboxMode || !canvas.locked) && (
+                <button className="save-button" onClick={() => save()} disabled={saving || !session.canEdit || sandboxMode} title={sandboxMode ? "Self-host to save persistent dashboards to DuckDB" : undefined} aria-label="Save dashboard">
+                  {saving ? "Saving…" : "Save"}
+                </button>
+              )}
               <button
                 type="button"
                 className="review-action"
@@ -1771,10 +1926,10 @@ export function App() {
               <Popover label="Dashboard actions" trigger={<span aria-hidden="true">•••</span>} align="end" className="document-menu">
                 {(close) => <>
                   <button onClick={() => { close(); refreshSaved(); setOpenList(true); }}>Open saved dashboard</button>
-                  <button disabled={saving || !session.canEdit} onClick={() => { close(); save(true); }}>Save a copy</button>
-                  <button disabled={!session.canEdit} onClick={() => { close(); setDistributing(true); }}>Copy charts to…</button>
-                  <button disabled={!session.canEdit || !dash.tiles.length} onClick={() => { close(); coreLibrary.refresh(); setSaveViewOpen(true); }}>Save a view to library</button>
-                  <button disabled={!session.canEdit} onClick={() => { close(); setReferenceImport(true); }}>Recreate from reference</button>
+                  <button disabled={saving || !session.canEdit || sandboxMode} onClick={() => { close(); save(true); }}>Save a copy</button>
+                  <button disabled={!session.canEdit || sandboxMode} onClick={() => { close(); setDistributing(true); }}>Copy charts to…</button>
+                  <button disabled={!session.canEdit || !dash.tiles.length || sandboxMode} onClick={() => { close(); coreLibrary.refresh(); setSaveViewOpen(true); }}>Save a view to library</button>
+                  <button disabled={!session.canEdit} onClick={() => { close(); setDroppedRefFile(null); setReferenceImport(true); }}>Recreate from reference</button>
                   <button onClick={() => { close(); setDigestOpen(true); }}>Executive digest &amp; integrity snapshot</button>
                   <button onClick={() => { close(); setYamlSyncOpen(true); }}>Dashboard-as-Code (YAML)</button>
                   <button onClick={() => { close(); setCoachOpen(true); }}>Semantic layer coach</button>
@@ -1785,11 +1940,9 @@ export function App() {
                     close();
                     const surface = scrollRef.current?.querySelector<HTMLElement>(".canvas-surface");
                     if (!surface) return;
-                    try {
-                      downloadSvg(`${slugForFilename(dash?.title ?? "dashboard")}.svg`, surface);
-                    } catch (e: any) {
+                    void downloadSvg(`${slugForFilename(dash?.title ?? "dashboard")}.svg`, surface).catch((e: any) => {
                       setNotice(`Could not export SVG: ${e.message}`);
-                    }
+                    });
                   }}>Export dashboard as SVG</button>
                   <button onClick={() => { close(); setOpsAuditOpen(true); }}>Operations, ROI & audit log</button>
                   <button onClick={() => { close(); navigator.clipboard?.writeText(JSON.stringify(book, null, 2)); }}>Copy dashboard spec</button>
@@ -1804,6 +1957,7 @@ export function App() {
               hasTiles={dash.tiles.length > 0}
               dashId={dashId}
               revision={revision}
+              isStarterCopy={Boolean(templateId)}
               handoff={handoff}
               handoffMode={handoffMode}
               aiRedesign={aiRedesign}
@@ -1827,6 +1981,10 @@ export function App() {
                 setHandoffMode("infographic");
                 setHandoff(true);
               }}
+              onOpenShareExport={() => {
+                setHandoffMode("dashboard");
+                setHandoff(true);
+              }}
               onOpenRedesign={() => {
                 setHandoff(false);
                 if (canvas.locked) changeCanvas({ ...canvas, locked: false });
@@ -1836,12 +1994,9 @@ export function App() {
               onSetLocked={(nextLocked) => {
                 setHandoff(false);
                 changeCanvas({ ...canvas, locked: nextLocked });
-                if (!nextLocked && sandboxMode) {
-                  setSandboxToolsOpen(true);
-                  if (tourStep !== null) {
-                    markSandboxTourCompleted();
-                    setTourStep(null);
-                  }
+                if (!nextLocked && sandboxMode && tourStep !== null) {
+                  markSandboxTourCompleted();
+                  setTourStep(null);
                 }
               }}
             />
@@ -1852,13 +2007,14 @@ export function App() {
             {(book!.filters ?? []).some(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)) && <div className="shared-filter-shelf" aria-label="Dashboard filters">
               {(book!.filters ?? []).filter(f => (f.scope === "report" || f.tabId === currentTab(book!, activeTabId).id) && !dash.tiles.some(t => t.filterId === f.id)).map(f => <FilterControl key={f.id} compact filter={f} value={filterValues[f.id] ?? f.defaultValue ?? {}} onChange={v => setFilterValues(values => ({ ...values, [f.id]: v }))} spec={book!} model={model} activeTab={currentTab(book!, activeTabId).id} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onEdit={!canvas.locked ? () => setFilterEditing(f.id) : undefined} />)}
             </div>}
-            {!canvas.locked && (!sandboxMode || sandboxToolsOpen) && (
+            {!canvas.locked && (
               <EditBar model={model} canvas={canvas} onCanvas={changeCanvas} zoom={zoom} onZoom={setZoom} onFit={fit} onSettings={() => setSettingsOpen(true)} onRedesign={() => setAiRedesign(true)}
+                       aiAvailable={aiAvailable}
                        selected={selected} tiles={dash.tiles}
                        onCompose={(tiles, surface) => compose({ ...dash, tiles }, surface)}
                        onTiles={(t) => commit({ ...dash, tiles: t })}
                        beautify={<DashboardBeautify key={`${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} dash={dash} canvas={canvas} model={model} activeTabId={currentTab(book!, activeTabId).id}
-                                                     aiAvailable={aiAvailable} canConfigureAi={session.canAdmin} onConnections={() => setView("connections")} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, [...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))} />} />
+                                                     aiAvailable={aiAvailable} canConfigureAi={session.canAdmin && !sandboxMode} onConnections={() => { if (beginDocument(null)) setView("connections"); }} onDash={d => compose(d, { ...canvas, height: Math.max(canvas.height, ...d.tiles.map(t => t.layout.y + t.layout.h + 24)) })} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, [...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))} />} />
             )}
 
 
@@ -1955,8 +2111,8 @@ export function App() {
           pendingFit.current = true;
         } else throw new Error("Could not preserve your current draft. Download a backup before restoring.");
       }} />}
-      {saveViewOpen && book && <SaveViewDialog key={`${activeSourceId}:${asWho}`} book={book} canvas={canvas} activeTab={activeTabId} selected={selected} folders={coreLibrary.data.folders} defaultFolder={coreLibrary.data.folders.some(f => f.id === libraryFolder) ? libraryFolder : null} model={model} onClose={() => setSaveViewOpen(false)} onSaved={() => { setSaveViewOpen(false); coreLibrary.refresh(); setNotice("View saved to CoreCanvas Library. Find it under Views → Browse saved views.", "success"); }} />}
-      {viewPicker && book && <StudioDialog title="CoreCanvas Library" wide onClose={() => { if (!viewPickBusy) setViewPicker(false); }}>
+      {saveViewOpen && book && <SaveViewDialog key={`${activeSourceId}:${asWho}`} book={book} canvas={canvas} activeTab={activeTabId} selected={selected} folders={coreLibrary.data.folders} defaultFolder={coreLibrary.data.folders.some(f => f.id === libraryFolder) ? libraryFolder : null} model={model} onClose={() => setSaveViewOpen(false)} onSaved={() => { setSaveViewOpen(false); coreLibrary.refresh(); setNotice("View saved to Workspace Library. Find it under Views → Browse saved views.", "success"); }} />}
+      {viewPicker && book && <StudioDialog title="Workspace Library" wide onClose={() => { if (!viewPickBusy) setViewPicker(false); }}>
         <LibraryBrowser key={activeSourceId} viewsOnly data={coreLibrary.data} loading={coreLibrary.loading} error={coreLibrary.error} refresh={coreLibrary.refresh} folderId={libraryFolder} onFolder={setLibraryFolder} onOpen={chooseLibraryView} />
         {viewPickError && <p className="library-error" role="alert">{viewPickError}</p>}{viewPickBusy && <p className="library-error" role="status">Adding your view…</p>}
       </StudioDialog>}
@@ -1967,10 +2123,13 @@ export function App() {
       {spreadsheetImport && session.canAdmin && (
         <SpreadsheetImport
           initialSample={initialSample}
-          onClose={() => { setSpreadsheetImport(false); setInitialSample(null); }}
+          initialFile={droppedSheetFile}
+          sandboxMode={sandboxMode}
+          onClose={() => { setSpreadsheetImport(false); setInitialSample(null); setDroppedSheetFile(null); }}
           onImported={({ sourceId, label, tableName, metrics }) => {
             setSpreadsheetImport(false);
             setInitialSample(null);
+            setDroppedSheetFile(null);
             refreshSources();
             sourceRef.current = sourceId;
             setSourceId(sourceId);
@@ -1982,6 +2141,7 @@ export function App() {
               if (documentEpoch.current !== epoch) return;
               setModel(nextModel);
               setBootError("");
+              setBootRateLimited(false);
               build({
                 table: tableName,
                 metrics: pickPrimaryBusinessMetrics(nextModel, metrics),
@@ -1994,7 +2154,8 @@ export function App() {
           }}
         />
       )}
-      {referenceImport && <ReferenceImport key={`${activeSourceId}:${asWho}`} model={model} width={freshCanvas().width} aiAvailable={aiAvailable} onClose={() => setReferenceImport(false)} onConnections={() => { if (beginDocument(null)) setView("connections"); }} onCreate={(spec, height) => {
+      {referenceImport && <ReferenceImport key={`${activeSourceId}:${asWho}`} model={model} width={freshCanvas().width} aiAvailable={aiAvailable} sandboxMode={sandboxMode} initialFile={droppedRefFile} onClose={() => { setReferenceImport(false); setDroppedRefFile(null); }} onConnections={() => { setReferenceImport(false); setDroppedRefFile(null); if (beginDocument(null)) setView("connections"); }} onCreate={(spec, height) => {
+        setDroppedRefFile(null);
         if (beginDocument(spec, { canvas: { ...freshCanvas(), height } })) { setView("home"); pendingFit.current = true; setNotice("Reference recreated with live catalogue metrics. Review the matches and save when ready.", "success"); }
       }} />}
       {distributing && book && <DistributeDialog key={`${activeSourceId}:${asWho}`} spec={book} selected={selected} activeTab={activeTabId} currentId={dashId} model={model} canvas={canvas} filterValues={filterValues} onChange={(s, c) => { commitBook(s); setCanvas(c); }} onClose={() => setDistributing(false)} onNotice={message => setNotice(message, "success")} />}
@@ -2045,9 +2206,9 @@ export function App() {
         </StudioDialog>
       )}
       {interview && <div className="iv-scrim">
-        <Interview model={model} onCancel={() => setInterview(false)} onDone={build} />
+        <Interview model={model} initialText={interviewSeed} onCancel={() => setInterview(false)} onDone={build} />
       </div>}
-      <AgentQuestions />
+      <AgentQuestions disabled={sandboxMode} />
       {investigating && dash?.tiles.some(t => t.id === investigating.id) && (() => {
         const invTile = dash.tiles.find(t => t.id === investigating.id)!;
         return <Investigation
@@ -2089,9 +2250,9 @@ export function App() {
           if (canvas.locked) changeCanvas({ ...canvas, locked: false });
           setAiRedesign(true);
         } : undefined} />}
-      {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify([filterValues, dateWindow])} sandboxMode={sandboxMode} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, [...filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin}
+      {aiRedesign && dash && session.canEdit && <AiRedesign filterContext={JSON.stringify([filterValues, dateWindow])} sandboxMode={sandboxMode} activeTabId={currentTab(book!, activeTabId).id} resolveFilters={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, [...filtersForTile({ ...book!, filters: proposed.filters ?? book!.filters, tiles: proposed.tiles }, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))} key={`redesign:${activeSourceId}:${asWho}:${draftKey.current}:${activeTabId}`} spec={dash} canvas={canvas} model={model} available={aiAvailable} canConfigure={session.canAdmin && !sandboxMode}
         resolveScopeWarnings={proposed => Object.fromEntries(proposed.tiles.map(t => [t.id, unappliedFilters(proposed, t, filterValues, model)]))}
-        onClose={() => setAiRedesign(false)} onConfigure={() => { setAiRedesign(false); setView("connections"); }}
+        onClose={() => setAiRedesign(false)} onConfigure={() => { setAiRedesign(false); if (beginDocument(null)) setView("connections"); }}
         queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} drills={drills} filtersByTile={Object.fromEntries(dash.tiles.map(t => [t.id, [...filtersForTile(book!, t, filterValues, todayOf(model), calendarOf(model)), ...globalWindowFilterForTile(model, t, dateWindow, todayOf(model), calendarOf(model))]]))}
         onApply={(proposal, expected) => {
           if (!session.canEdit || canvas.locked || fingerprint(dash, canvas) !== expected) { setNotice("The dashboard changed. Generate a fresh redesign first."); return false; }
@@ -2112,73 +2273,330 @@ export function App() {
       {picking && <Picker model={model} queryContext={`${activeSourceId}:${asWho}:${refreshToken}`} onAdd={(d) => addTile(d)} onClose={() => setPicking(false)} />}
       {digestOpen && dash && <ExecutiveDigestDialog dashboardId={dashId} spec={dash} model={model} onClose={() => setDigestOpen(false)} />}
       {yamlSyncOpen && dash && <YamlCodeSyncDialog dashboardId={dashId} spec={dash} canvas={canvas} onApply={(nextSpec, nextCanvas) => { compose(nextSpec, nextCanvas ?? canvas); setNotice("Dashboard YAML applied to canvas.", "success"); }} onClose={() => setYamlSyncOpen(false)} />}
-      {opsAuditOpen && <OperationsAuditDialog onClose={() => setOpsAuditOpen(false)} />}
-      {coachOpen && <SemanticCoachDialog model={model} sourceId={activeSourceId ?? ""} onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} onClose={() => setCoachOpen(false)} />}
+      {opsAuditOpen && <OperationsAuditDialog sandboxMode={sandboxMode} onClose={() => setOpsAuditOpen(false)} />}
+      {coachOpen && <SemanticCoachDialog model={model} sourceId={activeSourceId ?? ""} sandboxMode={sandboxMode} onChanged={() => fetch("/api/model").then(readResponse).then(m => { setModel(m); refreshData(); }).catch(e => setNotice(e.message))} onClose={() => setCoachOpen(false)} />}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} items={paletteItems} />
     </div>
   );
 }
 
-function Entry({ model, worldBusy, onSuggest, onScratch, onReference, onSpreadsheet, onDemo, onOpenSaasStory, onOpenSaasPoster, onQuickWorld, onInspectMessy }: any) {
+export function BootRateLimitScreen({
+  message,
+  onRetry,
+}: {
+  message?: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="boot-rate-limit" role="region" aria-label="Temporary rate limit">
+      <div className="boot-rate-card">
+        <span className="broadside-eyebrow">TEMPORARY RATE LIMIT · HTTP 429</span>
+        <h1>Catching our breath for a moment.</h1>
+        <p>
+          Several tabs or visitors on your network requested the workspace at once. Nothing in your session was lost—retry in a few seconds to continue.
+        </p>
+        {message && <p className="muted sm mono">{message}</p>}
+        <div className="story-actions">
+          <button type="button" className="primary" onClick={onRetry}>
+            Retry workspace →
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function classifyComposerFile(fileName: string, mimeType = ""): "spreadsheet" | "reference" | null {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".xlsx") || lower.endsWith(".csv") || lower.endsWith(".tsv") || mimeType.includes("csv") || mimeType.includes("spreadsheet")) {
+    return "spreadsheet";
+  }
+  if (
+    lower.endsWith(".png") ||
+    lower.endsWith(".jpg") ||
+    lower.endsWith(".jpeg") ||
+    lower.endsWith(".webp") ||
+    lower.endsWith(".pdf") ||
+    mimeType.startsWith("image/") ||
+    mimeType === "application/pdf"
+  ) {
+    return "reference";
+  }
+  return null;
+}
+
+export function Entry({
+  model,
+  activeSourceLabel,
+  worldBusy = null,
+  drafts = [],
+  onBuildBrief,
+  onCustomize,
+  onScratch,
+  onReference,
+  onSpreadsheet,
+  onDropSpreadsheetFile,
+  onDropReferenceFile,
+  onDemo,
+  onOpenSaasStory,
+  onQuickWorld,
+  onOpenSaved,
+  onImportBackup,
+  onRecoverDraft,
+  onDiscardDraft,
+}: {
+  model: Model;
+  activeSourceLabel?: string;
+  worldBusy?: string | null;
+  drafts?: Draft[];
+  onBuildBrief: (brief: Brief) => void;
+  onCustomize: (seedText: string) => void;
+  onScratch: () => void;
+  onReference: () => void;
+  onSpreadsheet?: () => void;
+  onDropSpreadsheetFile?: (file: File) => void;
+  onDropReferenceFile?: (file: File) => void;
+  onDemo?: () => void;
+  onOpenSaasStory?: () => void;
+  onQuickWorld?: (id: SampleWorkbookId) => void;
+  onOpenSaved?: () => void;
+  onImportBackup?: () => void;
+  onRecoverDraft?: (draft: Draft) => void;
+  onDiscardDraft?: (draft: Draft) => void;
+}) {
+  const [question, setQuestion] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const [dropError, setDropError] = useState("");
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const matches = React.useMemo(() => matchModel(model, question), [model, question]);
+  const submitQuestion = () => {
+    onBuildBrief(buildBriefFromPrompt(model, question));
+  };
+
+  const routeFile = (file?: File | null) => {
+    if (!file) return;
+    setDropError("");
+    const kind = classifyComposerFile(file.name, file.type);
+    if (kind === "spreadsheet") {
+      if (onDropSpreadsheetFile) {
+        onDropSpreadsheetFile(file);
+      } else if (onSpreadsheet) {
+        onSpreadsheet();
+      } else {
+        setDropError("Spreadsheet uploads require workspace admin permissions.");
+      }
+      return;
+    }
+    if (kind === "reference") {
+      if (onDropReferenceFile) {
+        onDropReferenceFile(file);
+      } else {
+        onReference();
+      }
+      return;
+    }
+    setDropError("Drop an .xlsx / .csv spreadsheet or a .png / .jpg / .webp / .pdf reference.");
+  };
+
+  const displaySource = activeSourceLabel || prettifyModelName(model.name);
+
   return (
     <div className="entry">
       <div className="eyebrow">Semantic Canvas</div>
-      <h2>Dashboards from<br /><em>governed metrics.</em></h2>
-      <p className="lede">Drop an Excel or CSV sheet, ask a question in plain English, or sketch a layout. Every chart uses reviewed definitions, and the brief shows what it leaves out.</p>
-      <div className="entry-playgrounds" role="region" aria-label="1-click interactive playgrounds">
-        <span className="broadside-eyebrow">JUMP STRAIGHT IN · 1-CLICK LIVE PLAYGROUNDS</span>
-        <div className="entry-playground-pills">
-          {onOpenSaasStory && (
-            <button type="button" className="entry-play-pill primary-pill" disabled={worldBusy !== null} onClick={onOpenSaasStory}>
-              📊 SaaS Overview + KPI Story Arcs
+      <h2>
+        Ask a question, or <em>drop your data.</em>
+      </h2>
+      <p className="lede">
+        Every chart compiles straight from governed metrics—never guessed formulas. Type what you want to see, or drop an Excel sheet, CSV, sketch, or PDF.
+      </p>
+
+      <div className="model-summary">
+        <span className="dot ready" />
+        <span>{displaySource}</span>
+        <span>· {Object.keys(model.metrics).length} governed metrics ready</span>
+        {model.hygieneNotes && model.hygieneNotes.length > 0 ? (
+          <span className="hygiene-provenance-pill static" title={model.hygieneNotes.join("\n")}>
+            ✓ {model.hygieneNotes.length} {model.hygieneNotes.length === 1 ? "data fix" : "data fixes"} verified
+          </span>
+        ) : null}
+      </div>
+
+      <div
+        className={`unified-composer${dragging ? " dragging" : ""}`}
+        role="region"
+        aria-label="Ask or drop start composer"
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          routeFile(e.dataTransfer.files?.[0]);
+        }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          hidden
+          aria-label="Upload spreadsheet or reference file"
+          accept=".xlsx,.csv,.tsv,.png,.jpg,.jpeg,.webp,.pdf,image/png,image/jpeg,image/webp,application/pdf,text/csv"
+          onChange={(e) => {
+            routeFile(e.target.files?.[0]);
+            e.target.value = "";
+          }}
+        />
+        <form
+          className="composer-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitQuestion();
+          }}
+        >
+          <input
+            type="text"
+            className="composer-input"
+            aria-label="Ask a question or describe a dashboard"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Ask a question in plain English (e.g., How is recurring revenue trending by plan?) or drop a file…"
+          />
+          {question.trim() && (
+            <InterviewReadback
+              model={model}
+              matches={matches}
+              onInstantDraft={submitQuestion}
+              ctaLabel="Build dashboard →"
+            />
+          )}
+          <div className="composer-actions">
+            <button
+              type="button"
+              className="composer-upload-btn"
+              onClick={() => (fileInputRef.current ? fileInputRef.current.click() : onSpreadsheet ? onSpreadsheet() : onReference())}
+            >
+              ⊞ Drop or upload file (.xlsx, .csv, image, PDF)
+            </button>
+            <span className="spacer" />
+            <button
+              type="button"
+              className="link composer-customize-btn"
+              onClick={() => onCustomize(question)}
+            >
+              Customize options…
+            </button>
+            <button type="submit" className="primary composer-build-btn">
+              Build dashboard →
+            </button>
+          </div>
+        </form>
+        {dropError && (
+          <p className="conn-err sm" role="alert">
+            {dropError}
+          </p>
+        )}
+      </div>
+
+      <div className="starter-cards-grid" role="region" aria-label="Starter cards">
+        <article className="starter-card">
+          <button
+            type="button"
+            className="starter-card-main"
+            disabled={worldBusy !== null}
+            onClick={() => (onOpenSaasStory ? onOpenSaasStory() : submitQuestion())}
+          >
+            <span className="starter-card-kicker">LIVE WAREHOUSE</span>
+            <h3>SaaS Revenue &amp; Story</h3>
+            <p>Explore governed MRR, retention, KPI story arcs, and Broadside poster views.</p>
+          </button>
+        </article>
+
+        <article className="starter-card">
+          <button
+            type="button"
+            className="starter-card-main"
+            disabled={worldBusy !== null}
+            onClick={() =>
+              onQuickWorld
+                ? onQuickWorld("roastery-2tab-xlsx")
+                : onSpreadsheet
+                  ? onSpreadsheet()
+                  : submitQuestion()
+            }
+          >
+            <span className="starter-card-kicker">MESSY EXCEL CLEANER</span>
+            <h3>
+              {worldBusy === "roastery-2tab-xlsx"
+                ? "Cleaning 2-Tab Excel…"
+                : "Specialty Coffee 2-Tab Excel"}
+            </h3>
+            <p>Auto-strips title rows, Grand Totals, and duplicate-ID fan-out in DuckDB.</p>
+          </button>
+        </article>
+
+        <article className="starter-card">
+          <button
+            type="button"
+            className="starter-card-main"
+            aria-label="Recreate from reference"
+            onClick={onReference}
+          >
+            <span className="starter-card-kicker">REFERENCE &amp; PLAYGROUND</span>
+            <h3>Recreate from Reference</h3>
+            <p>Map a screenshot, sketch, PDF, or 1-click sample blueprint onto governed metrics.</p>
+          </button>
+          {onDemo && (
+            <button type="button" className="link starter-sub-action" onClick={onDemo}>
+              Try the design playground <span aria-hidden="true">→</span>
             </button>
           )}
-          {onOpenSaasPoster && (
-            <button type="button" className="entry-play-pill" disabled={worldBusy !== null} onClick={onOpenSaasPoster}>
-              📰 Broadside Infographic Poster
-            </button>
+        </article>
+      </div>
+
+      <footer className="entry-quiet-footer" aria-label="Workspace actions">
+        <div className="entry-quiet-links">
+          <button type="button" className="link" onClick={onScratch}>
+            Start from scratch
+          </button>
+          {onOpenSaved && (
+            <>
+              <span aria-hidden="true">·</span>
+              <button type="button" className="link" onClick={onOpenSaved}>
+                Open saved dashboard
+              </button>
+            </>
           )}
-          {onQuickWorld && (
-            <button type="button" className="entry-play-pill" disabled={worldBusy !== null} onClick={() => onQuickWorld("roastery-2tab-xlsx")}>
-              {worldBusy === "roastery-2tab-xlsx" ? "Cleaning .xlsx…" : "☕ Specialty Coffee Roastery (2-Tab .xlsx)"}
-            </button>
-          )}
-          {onQuickWorld && (
-            <button type="button" className="entry-play-pill" disabled={worldBusy !== null} onClick={() => onQuickWorld("grid-renewables")}>
-              {worldBusy === "grid-renewables" ? "Cleaning CSV…" : "⚡ U.S. Grid Renewables & Spot Prices"}
-            </button>
-          )}
-          {onInspectMessy && (
-            <button type="button" className="entry-play-pill" disabled={worldBusy !== null} onClick={onInspectMessy}>
-              ✨ Inspect Messy Excel Cleaner
-            </button>
+          {onImportBackup && (
+            <>
+              <span aria-hidden="true">·</span>
+              <button type="button" className="link" onClick={onImportBackup}>
+                Import backup
+              </button>
+            </>
           )}
         </div>
-      </div>
-      {onDemo && <button className="demo-entry-link" onClick={onDemo}>Try the design playground <span aria-hidden="true">→</span><small>Start with a messy dashboard. Improve the charts, then shape the story.</small></button>}
-      <div className="model-summary"><span className="dot ready" />{prettifyModelName(model.name)}<span>· {Object.keys(model.metrics).length} metrics ready to explore</span>{model.hygieneNotes && model.hygieneNotes.length > 0 ? <span className="hygiene-provenance-pill static" title={model.hygieneNotes.join("\n")}>✓ {model.hygieneNotes.length} {model.hygieneNotes.length === 1 ? "data fix" : "data fixes"} verified</span> : null}</div>
-      <div className="paths">
-        {onSpreadsheet && (
-          <button className="path spreadsheet-path" onClick={onSpreadsheet}>
-            <span className="path-glyph" aria-hidden="true">⊞</span>
-            <h3>Drop an Excel or CSV sheet <span>↗</span></h3>
-            <p>Upload an .xlsx or .csv file—no SQL or YAML needed. Confirm 3 plain-English details on a 5-row preview and get an instant dashboard.</p>
-          </button>
+        {drafts.length > 0 && (
+          <div className="entry-drafts" aria-label="Local unsaved drafts">
+            {drafts.map((d) => (
+              <div key={d.key} className="entry-draft-row">
+                <button type="button" className="link" onClick={() => onRecoverDraft?.(d)}>
+                  Recover draft: {d.spec.title}
+                </button>
+                <button
+                  type="button"
+                  className="link muted"
+                  aria-label={`Discard draft ${d.spec.title}`}
+                  onClick={() => onDiscardDraft?.(d)}
+                >
+                  Discard
+                </button>
+              </div>
+            ))}
+          </div>
         )}
-        <button className="path suggested" onClick={onSuggest}>
-          <span className="path-glyph" aria-hidden="true">✧</span>
-          <h3>Suggest a dashboard <span>↗</span></h3>
-          <p>Start from a question. It proposes the metrics, trends and breakdowns, and you confirm before anything is built.</p>
-        </button>
-        <button className="path" onClick={onScratch}>
-          <span className="path-glyph" aria-hidden="true">+</span>
-          <h3>Start from scratch <span>↗</span></h3>
-          <p>An empty canvas. Add charts, headings and notes; arrange them yourself.</p>
-        </button>
-        <button className="path reference-path" aria-label="Recreate from reference" onClick={onReference}>
-          <span className="path-glyph" aria-hidden="true">▧</span><div><h3>Recreate from reference <span>↗</span></h3><p>A sketch, photo or PDF becomes a layout on catalogue metrics. Unmatched boxes stay placeholders, never guesses.</p></div>
-        </button>
-      </div>
+      </footer>
     </div>
   );
 }

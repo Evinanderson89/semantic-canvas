@@ -1,6 +1,6 @@
 import type { ChartKind, DashboardSpec, TileSpec } from "../compiler/spec.ts";
 import { metricOf, timeColumnOf, metricsByTable, prettifyModelName, reviewedModel, isLineage, joinedTableOptions, periodRollupAllowed, isCrossTableRatio, fieldReachable, type Model, type Metric, type Table } from "../semantic/model.ts";
-import { DEFAULT_BRIEF, matchModel, tokens, type Brief } from "./match.ts";
+import { DEFAULT_BRIEF, matchModel, parsePromptIntent, tokens, type Brief } from "./match.ts";
 import { requiredDimensions } from "./prepareTile.ts";
 
 function categoricalDims(t: Table | undefined): string[] {
@@ -23,18 +23,35 @@ function effectiveImportance(m: Metric): number {
   return m.importance ?? 50;
 }
 
+function rankFallbackSubject(byTable: Record<string, Metric[]>): string | undefined {
+  return Object.entries(byTable).sort(
+    (a, b) =>
+      Math.max(0, ...b[1].map((m) => m.importance ?? 0)) -
+        Math.max(0, ...a[1].map((m) => m.importance ?? 0)) ||
+      b[1].length - a[1].length,
+  )[0]?.[0];
+}
+
+const BREAKDOWN_CHART_HINTS = new Set<ChartKind>(["barStacked", "barGrouped", "donut", "waterfall", "bar", "barH"]);
+const TREND_CHART_HINTS = new Set<ChartKind>(["area", "areaStacked", "line"]);
+
 /** A useful first draft has a subject, a focal point and supporting sections. */
 export function suggestDashboard(full: Model, opts: { table?: string | null; grain?: string; width?: number } & Brief = {}): DashboardSpec {
   // Ingested-but-unreviewed tables never make it into a proposal, whoever asks.
   const model = reviewedModel(full);
   const width = opts.width ?? 1440, available = width - 48, gap = 16;
   const byTable = metricsByTable(model);
-  const matched = opts.text?.trim() ? matchModel(model, opts.text) : null;
+  const hasPrompt = Boolean(opts.text?.trim());
+  const intent = hasPrompt ? parsePromptIntent(model, opts.text!) : null;
+  const matched = hasPrompt && !intent?.isGenericPrompt ? matchModel(model, opts.text!) : null;
+  const effectiveGrain = opts.grain ?? intent?.grain ?? "month";
+  const includeTable = Boolean(opts.includeTable || intent?.includeTable);
+
   const subject = opts.table && byTable[opts.table]
     ? opts.table
     : matched?.subject && byTable[matched.subject]
       ? matched.subject
-      : Object.entries(byTable).sort((a,b) => b[1].length - a[1].length)[0]?.[0];
+      : rankFallbackSubject(byTable);
   if (!subject) return { title: prettifyModelName(model.name), tiles: [] };
   const allSubjectMetrics = [...byTable[subject]].sort((a, b) => (b.importance ?? 0) - (a.importance ?? 0));
   const realSubjectMetrics = allSubjectMetrics.filter((m) => effectiveImportance(m) > 20);
@@ -75,7 +92,7 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
   };
   const dimensions = (m: Metric) => {
     const time = m.timeDimension ?? (isCrossTableRatio(model, m) ? metricOf(model, m.numerator!)?.timeDimension : undefined) ?? timeColumnOf(model, m.baseTable);
-    const requested = ["day", "week", "month", "quarter", "year"].includes(opts.grain ?? "") ? opts.grain! : "month";
+    const requested = ["day", "week", "month", "quarter", "year"].includes(effectiveGrain) ? effectiveGrain : "month";
     const required = requiredDimensions(model, [m.name], [], requested);
     if (required.length) return required;
     let grain = m.timeGrains ? m.timeGrains.find(g => g === requested) ?? m.timeGrains[0] : requested;
@@ -93,13 +110,53 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
       layout: { x: 24 + (i % cols) * (w + gap), y: y + Math.floor(i / cols) * 172, w, h: 156 } });
   });
   y += Math.ceil(headline.length / cols) * 172 + 24;
+
+  // Pre-compute breakdown eligibility so chart hints without categorical targets can fall back to the primary trend.
+  const breakdownMetric = [...headline.filter(m => !requiredDimensions(model, [m.name], []).length)]
+    .sort((a, b) => effectiveImportance(b) - effectiveImportance(a))[0];
+  const explicitCats = breakdownMetric
+    ? (intent?.dimensions ?? []).filter((d) => fieldReachable(model, breakdownMetric.baseTable, d))
+    : [];
+  const defaultCats = breakdownMetric
+    ? (() => {
+        const base = breakdownMetric.baseTable;
+        const localCats = categoricalDims(model.tables[base]);
+        const joinedCats = joinedTableOptions(model, base).flatMap(({ table, path }) =>
+          "error" in path ? [] : categoricalDims(table).map(c => `${table.name}.${c}`));
+        return [
+          ...localCats.filter(c => c === "movement_type"),
+          ...joinedCats,
+          ...localCats.filter(c => c !== "movement_type"),
+        ];
+      })()
+    : [];
+  const canonicalDim = (base: string, d: string) => (d.includes(".") ? d : `${base}.${d}`);
+  const mergedCats: string[] = [];
+  if (opts.includeBreakdowns !== false && breakdownMetric) {
+    const seen = new Set<string>();
+    for (const d of [...explicitCats, ...defaultCats]) {
+      const key = canonicalDim(breakdownMetric.baseTable, d);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      mergedCats.push(d);
+    }
+  }
+  const cats = mergedCats.slice(0, Math.min(3, Math.max(2, explicitCats.length)));
+
+  const trendChart: ChartKind =
+    intent?.chart && TREND_CHART_HINTS.has(intent.chart)
+      ? intent.chart
+      : !cats.length && !matched?.companionTables.length && (intent?.chart === "barStacked" || intent?.chart === "barGrouped")
+        ? intent.chart
+        : "line";
+
   const trendableHeadline = headline.filter(m => dimensions(m).length);
   const primary = [...trendableHeadline].sort((a, b) => effectiveImportance(b) - effectiveImportance(a))[0];
   if (primary) {
     begin("How it's changing");
     const fmt = trendFormatForMetric(primary);
     tiles.push({ id: id(), section, title: `${primary.label} over time`, metrics: [primary.name], dimensions: dimensions(primary),
-      chart: "line", ...(fmt ? { format: fmt } : {}), layout: { x: 24, y, w: available, h: 320 } });
+      chart: trendChart, ...(fmt ? { format: fmt } : {}), layout: { x: 24, y, w: available, h: 320 } });
     y += 360;
   }
   const hasMultipleBusinessMetrics =
@@ -114,39 +171,41 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
       const rowCount = Math.min(count, supporting.length - Math.floor(i / count) * count);
       const w = Math.floor((available - gap * (rowCount - 1)) / rowCount);
       const fmt = trendFormatForMetric(m);
+      const supChart: ChartKind = intent?.chart && TREND_CHART_HINTS.has(intent.chart) ? intent.chart : "line";
       tiles.push({ id: id(), section, title: `${m.label} over time`, metrics: [m.name], dimensions: dimensions(m),
-        chart: "line", ...(fmt ? { format: fmt } : {}), layout: { x: 24 + (i % count) * (w + gap), y: y + Math.floor(i / count) * 316, w, h: 300 } });
+        chart: supChart, ...(fmt ? { format: fmt } : {}), layout: { x: 24 + (i % count) * (w + gap), y: y + Math.floor(i / count) * 316, w, h: 300 } });
     });
     y += Math.ceil(supporting.length / count) * 316 + 24;
   }
+
   // Snapshot metrics cannot be summed across all dates into a categorical total.
-  const breakdownMetric = [...headline.filter(m => !requiredDimensions(model, [m.name], []).length)]
-    .sort((a, b) => effectiveImportance(b) - effectiveImportance(a))[0];
-  if (opts.includeBreakdowns !== false && breakdownMetric) {
+  if (opts.includeBreakdowns !== false && breakdownMetric && cats.length) {
     const base = breakdownMetric.baseTable;
-    const localCats = categoricalDims(model.tables[base]);
-    const joinedCats = joinedTableOptions(model, base).flatMap(({ table, path }) =>
-      "error" in path ? [] : categoricalDims(table).map(c => `${table.name}.${c}`));
-    // Preserve signed movement bridges first, then prefer cross-table lookup dimensions (e.g. Store city & region)
-    // when available so multi-table models showcase governed cross-sheet breakdowns.
-    const cats = [
-      ...localCats.filter(c => c === "movement_type"),
-      ...joinedCats,
-      ...localCats.filter(c => c !== "movement_type"),
-    ].slice(0, 2);
-    if (cats.length) begin("A closer look");
+    begin("A closer look");
     for (const dim of cats) {
       const isMovementDim = dim === "movement_type" || dim.endsWith(".movement_type");
       const signedMovementMetric = isMovementDim
         ? (model.metrics.net_new_mrr?.baseTable === base ? model.metrics.net_new_mrr : breakdownMetric)
         : breakdownMetric;
-      const chartKind: ChartKind = isMovementDim ? "waterfall" : "barH";
+      const chartKind: ChartKind = isMovementDim
+        ? "waterfall"
+        : intent?.chart && BREAKDOWN_CHART_HINTS.has(intent.chart)
+          ? intent.chart
+          : "barH";
       const qualifiedDim = isMovementDim && !dim.includes(".") ? `${base}.${dim}` : dim;
       const title = isMovementDim
         ? (base === "fct_mrr_movements" ? "MRR movements · signed contribution" : `${prettyTitle(base)} · signed contribution`)
         : `${signedMovementMetric.label} by ${dim.split(".").at(-1)?.replace(/_/g, " ")}`;
-      tiles.push({ id: id(), section, title, metrics: [signedMovementMetric.name], dimensions: [qualifiedDim],
-        chart: chartKind, layout: { x: 24, y, w: available, h: 280 } });
+      tiles.push({
+        id: id(),
+        section,
+        title,
+        metrics: [signedMovementMetric.name],
+        dimensions: [qualifiedDim],
+        chart: chartKind,
+        ...(intent?.limit !== undefined && !isMovementDim ? { limit: intent.limit } : {}),
+        layout: { x: 24, y, w: available, h: 280 },
+      });
       y += 296;
     }
   }
@@ -167,7 +226,7 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
     const movementTable = wantsMovement
       ? Object.values(model.tables).find(t =>
           t.columns.some(c => c.name === "movement_type") &&
-          (matched.companionTables.includes(t.name) || qTokens.has("movement") || qTokens.has("change") || qTokens.has("net_new_mrr"))
+          (matched.companionTables.includes(t.name) || qTokens.has("movement") || qTokens.has("change") || qTokens.has("net_new_mrr") || intent?.chart === "waterfall")
         )
       : undefined;
     if (movementTable && companions.length < 2) {
@@ -192,18 +251,21 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
     if (companions.length < 2) {
       const wantsPlanOrTier = matched.companionTables.includes("dim_plans") ||
         matched.companionTables.includes("fct_subscriptions") ||
-        qTokens.has("plan") || qTokens.has("tier");
+        qTokens.has("plan") || qTokens.has("tier") ||
+        Boolean(intent?.dimensions.some(d => d.startsWith("dim_plans.")));
       const planTable = model.tables.dim_plans;
       if (wantsPlanOrTier && planTable) {
-        const planCol = qTokens.has("tier") && planTable.columns.some(c => c.name === "plan_tier")
-          ? "dim_plans.plan_tier"
-          : planTable.columns.some(c => c.name === "plan_name")
-            ? "dim_plans.plan_name"
-            : planTable.columns.some(c => c.name === "plan_tier")
-              ? "dim_plans.plan_tier"
-              : categoricalDims(planTable)[0]
-                ? `dim_plans.${categoricalDims(planTable)[0]}`
-                : null;
+        const explicitPlanDim = intent?.dimensions.find(d => d.startsWith("dim_plans."));
+        const planCol = explicitPlanDim
+          ?? (qTokens.has("tier") && planTable.columns.some(c => c.name === "plan_tier")
+            ? "dim_plans.plan_tier"
+            : planTable.columns.some(c => c.name === "plan_name")
+              ? "dim_plans.plan_name"
+              : planTable.columns.some(c => c.name === "plan_tier")
+                ? "dim_plans.plan_tier"
+                : categoricalDims(planTable)[0]
+                  ? `dim_plans.${categoricalDims(planTable)[0]}`
+                  : null);
         const candidates = [
           model.metrics.mrr,
           ...(matched.matchedByTable.fct_subscriptions ?? []),
@@ -218,11 +280,16 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
           const title = planMetric.name === "mrr" && planCol === "dim_plans.plan_name"
             ? "Active base-subscription MRR by plan"
             : `${planMetric.label} by ${planCol.split(".").at(-1)?.replace(/_/g, " ")}`;
+          const compChart: ChartKind =
+            intent?.chart && BREAKDOWN_CHART_HINTS.has(intent.chart) && intent.chart !== "waterfall"
+              ? intent.chart
+              : isTier ? "donut" : "barH";
           companions.push({
             title,
             metrics: [planMetric.name],
             dimensions: [planCol],
-            chart: isTier ? "donut" : "barH",
+            chart: compChart,
+            ...(intent?.limit !== undefined ? { limit: intent.limit } : {}),
           });
         }
       }
@@ -241,11 +308,16 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
         if (channelTable && channelMetric && !requiredDimensions(model, [channelMetric.name], []).length) {
           const channelDim = `${channelTable.name}.channel`;
           if (!alreadyHas(channelMetric.name, channelDim)) {
+            const compChart: ChartKind =
+              intent?.chart && BREAKDOWN_CHART_HINTS.has(intent.chart) && intent.chart !== "waterfall" && intent.chart !== "donut"
+                ? intent.chart
+                : "barH";
             companions.push({
               title: `${channelMetric.label} by channel`,
               metrics: [channelMetric.name],
               dimensions: [channelDim],
-              chart: "barH",
+              chart: compChart,
+              ...(intent?.limit !== undefined ? { limit: intent.limit } : {}),
             });
           }
         }
@@ -265,7 +337,7 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
           title: `${compMetric.label} over time`,
           metrics: [compMetric.name],
           dimensions: compDims,
-          chart: "line",
+          chart: intent?.chart && TREND_CHART_HINTS.has(intent.chart) ? intent.chart : "line",
           ...(fmt ? { format: fmt } : {}),
         });
       }
@@ -289,11 +361,20 @@ export function suggestDashboard(full: Model, opts: { table?: string | null; gra
     }
   }
 
-  if (opts.includeTable) {
+  if (includeTable) {
     begin("Behind the numbers");
     // Separate queries preserve each metric's native grain instead of forcing a mixed table.
     for (const m of headline) {
-      tiles.push({ id: id(), section, title: `${m.label} detail`, metrics: [m.name], dimensions: dimensions(m), chart: "table", layout: { x: 24, y, w: available, h: 300 } });
+      tiles.push({
+        id: id(),
+        section,
+        title: `${m.label} detail`,
+        metrics: [m.name],
+        dimensions: dimensions(m),
+        chart: "table",
+        ...(intent?.limit !== undefined ? { limit: intent.limit } : {}),
+        layout: { x: 24, y, w: available, h: 300 },
+      });
       y += 316;
     }
   }
@@ -358,9 +439,10 @@ export function composeExecutiveBrief(
   promptOrOpts: string | ({ table?: string | null; grain?: string; width?: number } & Brief) = {},
   extraOpts: { table?: string | null; grain?: string; width?: number } & Brief = {},
 ): DashboardSpec {
+  const explicitGrain = typeof promptOrOpts === "string" ? extraOpts.grain : promptOrOpts.grain;
   const opts = typeof promptOrOpts === "string"
-    ? { ...DEFAULT_BRIEF, ...extraOpts, text: promptOrOpts }
-    : { ...DEFAULT_BRIEF, ...promptOrOpts };
+    ? { ...DEFAULT_BRIEF, ...extraOpts, grain: explicitGrain, text: promptOrOpts }
+    : { ...DEFAULT_BRIEF, ...promptOrOpts, grain: explicitGrain };
   return suggestDashboard(full, opts);
 }
 

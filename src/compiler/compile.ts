@@ -250,18 +250,40 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
   const edgeSelect = edge ? [`MIN(${edgeStart}) AS "__edge_min"`, `MAX(${edgeEnd}) AS "__edge_max"`] : [];
 
   // ---- filters --------------------------------------------------------------
+  // Security policies (rls:/gateway:) join directly onto FROM; ordinary
+  // filter-only many_to_one predicates use EXISTS/NOT EXISTS semi-joins so an
+  // unvalidated duplicate key in an external dimension never fans out aggregates.
+  const isSecurityFilter = (f: FilterSpec) => f.id.startsWith("rls:") || f.id.startsWith("gateway:");
+  for (const f of tile.where ?? []) {
+    if (f.source === "metric") continue;
+    const { table } = parseDimension(f.field);
+    if (table && table !== base && isSecurityFilter(f)) needed.add(table);
+  }
+
+  const joinedTables = new Set<string>([base]);
+  for (const target of needed) {
+    if (target === base) continue;
+    const path = joinPath(model, base, target);
+    if ("joins" in path) for (const j of path.joins) joinedTables.add(j.right);
+  }
+
+  const from = compileFrom(model, conn, base, needed);
+
   const where: string[] = [];
   for (const f of tile.where ?? []) {
     // Metric predicates select finished results, after groups have been
     // recombined and derived/ratio/window values computed (finishTile).
     if (f.source === "metric") continue;
     const { table } = parseDimension(f.field);
-    if (table && table !== base) needed.add(table);
-    const p = buildPredicate(model, conn, base, f);
-    if (p) where.push(`(${p.sql})`);
+    const owner = table ?? base;
+    if (joinedTables.has(owner)) {
+      const p = buildPredicate(model, conn, base, f);
+      if (p) where.push(`(${p.sql})`);
+    } else {
+      const semi = buildSemiJoinPredicate(model, conn, base, joinedTables, f);
+      if (semi) where.push(`(${semi})`);
+    }
   }
-
-  const from = compileFrom(model, conn, base, needed);
 
   // ---- always-on metric filters --------------------------------------------
   //
@@ -295,7 +317,7 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
       const name = `g${i}`;
       names.push(name);
       const body =
-        `SELECT ${[...dimSelect, ...sel(ms), ...(i === 0 ? edgeSelect : [])].join(",\n         ")}\n  FROM ${from}` +
+        `SELECT ${[...dimSelect, ...sel(ms), ...edgeSelect].join(",\n         ")}\n  FROM ${from}` +
         clause("  WHERE", filter ? [...where, `(${filter})`] : where) +
         (groupCols.length ? `\n  GROUP BY ${groupExpressions.join(", ")}` : "");
       return `${name} AS (\n  ${body}\n)`;
@@ -310,7 +332,10 @@ function compileCore(model: Model, conn: Connector, tile: TileSpec, physical: { 
       const a = q(aliasOf.get(m.name) ?? m.name);
       return `${names[owner]}.${a} AS ${a}`;
     });
-    const edgeCols = edge ? [`${names[0]}."__edge_min" AS "__edge_min"`, `${names[0]}."__edge_max" AS "__edge_max"`] : [];
+    const foldEdge = (col: string, op: "<=" | ">=") =>
+      names.map((n) => `${n}.${col}`).reduce((acc, cur) =>
+        `CASE WHEN ${acc} IS NULL THEN ${cur} WHEN ${cur} IS NULL OR ${acc} ${op} ${cur} THEN ${acc} ELSE ${cur} END`);
+    const edgeCols = edge ? [`${foldEdge('"__edge_min"', "<=")} AS "__edge_min"`, `${foldEdge('"__edge_max"', ">=")} AS "__edge_max"`] : [];
     sql = `WITH ${ctes.join(",\n")}\n` +
       `SELECT ${[...groupCols.map((c) => `${key(c, names)} AS ${c}`), ...metricCols, ...edgeCols].join(", ")}\nFROM ${names[0]}${join}`;
   }
@@ -570,6 +595,9 @@ export function buildPredicate(
       ? { sql: f.exclude ? "TRUE" : "FALSE", having: f.source === "metric" } : null;
     const nulls = vals.some((v) => v === null);
     const rest = vals.filter((v) => v !== null);
+    if (f.exclude && !nulls && rest.length) {
+      return { sql: `(${ref} IS NULL OR ${ref} NOT IN (${rest.map(lit).join(", ")}))`, having: f.source === "metric" };
+    }
     const parts: string[] = [];
     if (rest.length) parts.push(`${ref} ${f.exclude ? "NOT IN" : "IN"} (${rest.map(lit).join(", ")})`);
     if (nulls) parts.push(`${ref} IS ${f.exclude ? "NOT " : ""}NULL`);
@@ -582,7 +610,74 @@ export function buildPredicate(
   if (f.max != null) bounds.push(`${ref} ${f.maxExclusive ? "<" : "<="} ${lit(f.max)}`);
   if (!bounds.length) return null;
   const sql = bounds.join(" AND ");
-  return { sql: f.exclude ? `NOT (${sql})` : sql, having: f.source === "metric" };
+  return { sql: f.exclude ? `(${ref} IS NULL OR NOT (${sql}))` : sql, having: f.source === "metric" };
+}
+
+/**
+ * Compile a filter-only dimension predicate over a non-joined many_to_one / one_to_one path
+ * using EXISTS / NOT EXISTS so duplicate dimension keys never multiply base-table aggregates,
+ * while preserving exact LEFT JOIN null / orphan semantics.
+ */
+function buildSemiJoinPredicate(
+  model: Model,
+  conn: Connector,
+  base: string,
+  joinedTables: Set<string>,
+  f: FilterSpec,
+): string | null {
+  const direct = buildPredicate(model, conn, base, f);
+  if (!direct) return null;
+  const { table, column } = parseDimension(f.field);
+  const owner = table ?? base;
+  const path = joinPath(model, base, owner);
+  if ("error" in path) throw new Error(path.error);
+  const firstIdx = path.joins.findIndex((j) => !joinedTables.has(j.right));
+  const entry = path.joins[firstIdx];
+  const tail = path.joins.slice(firstIdx + 1);
+  const q = conn.quote.bind(conn);
+
+  assertIdent(entry.right);
+  let subFrom = `${conn.relation(entry.right, model.tables[entry.right].relation)} AS ${entry.right}`;
+  for (const j of tail) {
+    assertIdent(j.right);
+    const on = joinPairs(j).map((p) => `${j.left}.${q(p.left)} = ${j.right}.${q(p.right)}`).join(" AND ");
+    subFrom += `\n  ${j.type === "inner" ? "INNER" : "LEFT"} JOIN ${conn.relation(j.right, model.tables[j.right].relation)} AS ${j.right} ON ${on}`;
+  }
+  const corr = joinPairs(entry).map((p) => `${entry.left}.${q(p.left)} = ${entry.right}.${q(p.right)}`).join(" AND ");
+  const ref = `${owner}.${q(column)}`;
+  const allLeft = [entry, ...tail].every((j) => j.type !== "inner");
+
+  if (f.exclude) {
+    if (f.mode === "discrete") {
+      const vals = (f.values ?? []).filter((v) => v !== undefined);
+      const hasNull = vals.some((v) => v === null);
+      const rest = vals.filter((v) => v !== null);
+      if (hasNull) {
+        const nonNullExists = `EXISTS (SELECT 1 FROM ${subFrom} WHERE ${corr} AND ${ref} IS NOT NULL)`;
+        if (!rest.length) return nonNullExists;
+        const pos = buildPredicate(model, conn, base, { ...f, values: rest, exclude: false })!;
+        return `${nonNullExists} AND NOT EXISTS (SELECT 1 FROM ${subFrom} WHERE ${corr} AND (${pos.sql}))`;
+      }
+    }
+    const pos = buildPredicate(model, conn, base, { ...f, exclude: false })!;
+    const notMatching = `NOT EXISTS (SELECT 1 FROM ${subFrom} WHERE ${corr} AND (${pos.sql}))`;
+    return allLeft ? notMatching : `EXISTS (SELECT 1 FROM ${subFrom} WHERE ${corr}) AND ${notMatching}`;
+  }
+
+  if (f.mode === "discrete") {
+    const vals = (f.values ?? []).filter((v) => v !== undefined);
+    if (vals.some((v) => v === null)) {
+      const rest = vals.filter((v) => v !== null);
+      const nullClause = allLeft
+        ? `NOT EXISTS (SELECT 1 FROM ${subFrom} WHERE ${corr} AND ${ref} IS NOT NULL)`
+        : `EXISTS (SELECT 1 FROM ${subFrom} WHERE ${corr} AND ${ref} IS NULL)`;
+      if (!rest.length) return nullClause;
+      const pos = buildPredicate(model, conn, base, { ...f, values: rest })!;
+      return `EXISTS (SELECT 1 FROM ${subFrom} WHERE ${corr} AND (${pos.sql})) OR ${nullClause}`;
+    }
+  }
+
+  return `EXISTS (SELECT 1 FROM ${subFrom} WHERE ${corr} AND (${direct.sql}))`;
 }
 
 export function assertIdent(name: string) {

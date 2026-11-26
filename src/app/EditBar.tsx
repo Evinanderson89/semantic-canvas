@@ -26,7 +26,7 @@ function CanvasDimension({ label, value, onChange }: { label: string; value: num
     onBlur={event => commit(event.currentTarget.value)} />;
 }
 
-export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify, onSettings, onRedesign }: {
+export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected, tiles, onTiles, onCompose, beautify, onSettings, onRedesign, aiAvailable = false }: {
   onRedesign: () => void;
   model: Model;
   canvas: CanvasSpec; onCanvas: (c: CanvasSpec) => void;
@@ -34,6 +34,7 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
   selected: string[]; tiles: TileSpec[]; onTiles: (t: TileSpec[]) => void;
   onCompose: (t: TileSpec[], c: CanvasSpec) => void;
   onSettings: () => void;
+  aiAvailable?: boolean;
   /** Dashboard-level Beautify's own trigger button + popover (see
    *  DashboardBeautify.tsx) -- rendered as a slot rather than built here so
    *  its state/logic stays in one place, but still lands inside this same
@@ -132,7 +133,7 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
             </select>
           </div>
           <p>{canvas.width} × {canvas.height} px</p>
-          <button className="chart-settings-link" onClick={() => { close(); onSettings(); }}>Chats & notifications <span aria-hidden="true">→</span></button>
+          <button className="chart-settings-link" onClick={() => { close(); onSettings(); }}>Chart tools & notifications <span aria-hidden="true">→</span></button>
         </div>}
       </Popover>
       <div className="zoom-control">
@@ -143,12 +144,14 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
         <button className="tgl" onClick={onFit} title="Zoom so the whole canvas fits">Fit</button>
       </div>
       <span className="sep" />
-      <Popover label="Smart arrange" trigger="Smart arrange" className="arrange-popover">
+      <Popover label="Smart arrange" trigger="Arrange & Layout" className="arrange-popover">
         {(close) => <div className="arrange-preview">
           <div className="arrange-preview-scroll">
           <div className="eyebrow">COMPOSITION PREVIEW</div>
           <h3>What should this layout do?</h3>
-          <button className="ai-arrange-option" onClick={() => { close(); onRedesign(); }}><span className="eyebrow">Powered by AI</span><b>Reimagine with AI</b><span>See a better version with improved charts, comparisons, and storytelling. Preview, then apply.</span><strong>Explore the possibilities →</strong></button>
+          {aiAvailable && (
+            <button className="ai-arrange-option" onClick={() => { close(); onRedesign(); }}><span className="eyebrow">Powered by AI</span><b>Reimagine with AI</b><span>See a better version with improved charts, comparisons, and storytelling. Preview, then apply.</span><strong>Explore the possibilities →</strong></button>
+          )}
           <div className="arrangement-options" role="group" aria-label="Arrangement purpose">{ARRANGEMENTS.map(option => <button key={option.id} aria-label={option.label} aria-pressed={arrangement === option.id} onClick={() => setArrangement(option.id)}><b>{option.label}</b><span>{option.description}</span></button>)}</div>
           <p><b>{intent.label}</b>{addedSections > 0 ? ` · Adds ${addedSections} section headings.` : " · Keeps your existing sections."} Your notes and pinned sections stay intact.</p>
           {!tiles.length && <p>Add charts to the canvas, then choose how they should read together.</p>}
@@ -166,7 +169,7 @@ export function EditBar({ canvas, model, onCanvas, zoom, onZoom, onFit, selected
         </div>}
       </Popover>
 
-      {tiles.length > 0 && <button className="primary" onClick={onRedesign}>Improve with AI</button>}
+      {tiles.length > 0 && <button className="primary" aria-label="Improve with AI" onClick={onRedesign}>Improve</button>}
       {beautify}
       <span className="spacer" />
       <button className="lock" onClick={() => onCanvas({ ...canvas, locked: true })} title="View without editing controls">Preview</button>

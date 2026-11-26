@@ -33,7 +33,8 @@ import { cardComparison, withCardComparison } from "../charts/cardComparison.ts"
 import { chartShapeIssue } from "../charts/capabilities.ts";
 import type { TileSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
-import { calendarOf, metricOf, semanticHints, timeColumnOf } from "../semantic/model.ts";
+import { calendarOf, metricOf, semanticHints, timeColumnOf, todayOf } from "../semantic/model.ts";
+import { bucketEnd, toUtcDay } from "../suggest/dataHonesty.ts";
 import { dataAsOf } from "./connected.tsx";
 import type { FilterSpec } from "../compiler/spec.ts";
 import { drillGrain, drillInto, type DrillEntry, type DrillGrain } from "./drill.ts";
@@ -50,6 +51,43 @@ import { issuesText } from "../compiler/issueText.ts";
 const KPI_HEIGHT = 156;
 const CHART_MIN_HEIGHT = 300;
 
+
+/** True only when the tile's newest displayed period is genuinely partial or inside the base table's reportingLagDays settlement window. */
+export function tileHasLag(
+  model: Model,
+  spec: Pick<TileSpec, "metrics">,
+  dimensions: string[],
+  state: { partial?: any; columns?: string[]; rows?: unknown[][] } | null | undefined,
+): boolean {
+  if (!state) return false;
+  if (typeof state.partial === "boolean") return state.partial;
+  if (state.partial?.end || state.partial?.selected?.end) return true;
+  const timeDim = dimensions.find((d) => d.includes(":"));
+  if (!timeDim) return false;
+  const [grain, rawField] = timeDim.split(":");
+  const fieldParts = (rawField ?? "").split(".");
+  const metric = spec.metrics[0] ? metricOf(model, spec.metrics[0]) : undefined;
+  const owner = fieldParts.length > 1 ? fieldParts[0] : metric?.baseTable;
+  const col = fieldParts.at(-1);
+  if (!owner || !col) return false;
+  const tbl = model.tables[owner];
+  const lag = Math.max(0, Math.floor(tbl?.reportingLagDays ?? 0));
+  if (lag <= 0) return false;
+  const alias = `${col}_${grain}`;
+  const columns = state.columns ?? [];
+  const idx = columns.indexOf(alias);
+  if (idx === -1) return false;
+  let newest: Date | null = null;
+  for (const r of state.rows ?? []) {
+    const d = toUtcDay((r as unknown[])[idx]);
+    if (d && (!newest || d > newest)) newest = d;
+  }
+  if (!newest) return false;
+  const newestEnd = bucketEnd(newest, grain);
+  const today = todayOf(model);
+  const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  return newestEnd.getTime() + lag * 86_400_000 > todayUtc.getTime();
+}
 
 /** The gateway rules a query reported applying (ids `gateway:<field>:<mode>`), said in words from the session's own policy. */
 export function scopedBy(applied: string[] | undefined, policy: { field: string; mode: "only" | "not"; values: string[] }[] | undefined): { short: string; full: string } | null {
@@ -196,6 +234,10 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
     ? queryObservations(model, { ...spec, ...query }, { columns: state.columns ?? [], rows: state.rows ?? [], truncated: state.truncated, partial: state.partial })
     : undefined, [onReadiness, model, state, queryKey, spec.compareShow, spec.spark?.compare]);
   const evidenceDigest = useEvidenceDigest(onReadiness && state.key === queryKey && state.status === "ok" ? chartEvidence(query, state) : undefined);
+  const hasLag = useMemo(
+    () => (state.key === queryKey && state.status === "ok" ? tileHasLag(model, spec, dimensions, state) : false),
+    [state, queryKey, model, spec, dimensions],
+  );
   const renderKey = JSON.stringify([queryKey, spec.chart, spec.format, spec.compareShow, state.columns, state.rows]);
   useEffect(() => {
     if (kindOf !== "metric") return;
@@ -214,11 +256,11 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
         : rendered?.key === renderKey ? rendered.error ? { status: "error", message: rendered.error } : { status: "ready" }
         : { status: "checking" };
     }
-    if (state.key === queryKey && state.status === "ok") { result.dataFindings = dataFindings; result.window = state.window; result.rowRules = state.rlsApplied; result.observations = evidenceSummary?.observations; result.observationNote = evidenceSummary?.note; }
+    if (state.key === queryKey && state.status === "ok") { result.dataFindings = dataFindings; result.window = state.window; result.rowRules = state.rlsApplied; result.observations = evidenceSummary?.observations; result.observationNote = evidenceSummary?.note; result.sql = typeof state.sql === "string" ? state.sql : undefined; result.hasLag = hasLag; }
     result.evidenceFingerprint = evidenceDigest.digest;
     result.evidencePending = evidenceDigest.pending;
     readiness.current?.(spec.id, result);
-  }, [state, queryKey, kindOf, renderKey, rendered, spec.id, dataFindings, evidenceSummary, evidenceDigest.digest, evidenceDigest.pending]);
+  }, [state, queryKey, kindOf, renderKey, rendered, spec.id, dataFindings, evidenceSummary, evidenceDigest.digest, evidenceDigest.pending, hasLag]);
 
   const investigate = onInvestigate && state.status === "ok" && state.key === queryKey ? () => onInvestigate({ columns: state.columns, rows: state.rows }) : undefined;
 
@@ -707,7 +749,7 @@ function TileInner({ model, spec, onRemove, onUpdate, locked, crossFilters, onCr
             ? <Stat value={state.rows?.[0]?.[state.columns.indexOf(spec.metrics[0])]} format={makeFormatter(fmt)} />
             : kind === "table"
               ? <DataTable display={tableDisplay(model, spec)} presentation={presentation} columns={state.columns} rows={state.rows} defaultSortColumn={timeDimIndex === -1 && spec.metrics.length === 1 ? spec.metrics[0] : undefined} />
-              : <Chart kind={kind} separateAxes={units.separateAxes} onStatus={error => setRendered(previous => previous?.key === renderKey && previous.error === error ? previous : { key: renderKey, error })} labels={Object.fromEntries(Object.values(model.metrics).map(m => [m.name, m.label]))} {...plotted!} format={chartFmt} secondaryFormat={showingPercentChange ? chartFmt : secondaryFmt} metricFormats={["heatmap", "scatter"].includes(kind) ? Object.fromEntries(spec.metrics.map(m => [m, showingPercentChange ? chartFmt : resolveFormat(model, { ...spec, metrics: [m] })])) : undefined}
+              : <Chart hasLag={hasLag} kind={kind} separateAxes={units.separateAxes} onStatus={error => setRendered(previous => previous?.key === renderKey && previous.error === error ? previous : { key: renderKey, error })} labels={Object.fromEntries(Object.values(model.metrics).map(m => [m.name, m.label]))} {...plotted!} format={chartFmt} secondaryFormat={showingPercentChange ? chartFmt : secondaryFmt} metricFormats={["heatmap", "scatter"].includes(kind) ? Object.fromEntries(spec.metrics.map(m => [m, showingPercentChange ? chartFmt : resolveFormat(model, { ...spec, metrics: [m] })])) : undefined}
                        explorationFocus={explorationFocus}
                        pickableColumns={dimensions?.filter(d => d.includes(":") ? !!onDrill && !!drillNext : !!onCrossFilter).map(dimAlias)}
                        onPick={(kind === "smallMultiples" ? onCrossFilter : onCrossFilter || onDrill) && dimensions?.length

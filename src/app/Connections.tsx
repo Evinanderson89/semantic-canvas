@@ -9,9 +9,26 @@ import type { ConnectedProvenance } from "../semantic/model.ts";
 import { UnreviewedBadge, dataAsOf } from "./connected.tsx";
 import { PublishDialog } from "./PublishDialog.tsx";
 import { PrivateKeyInput } from "./PrivateKeyInput.tsx";
-import { isRefreshableSpreadsheetSource } from "../security/sandbox.ts";
 import type { SpreadsheetDetectedJoin } from "../modeler/spreadsheetTypes.ts";
 import { formatFanoutImpactSummary, isCurrencyMetricHint } from "./SpreadsheetImport.tsx";
+import { formatSourceDisplayLabel } from "./themeInit.ts";
+
+const BUILTIN_SAMPLE_SOURCE_IDS = new Set([
+  "sample-warehouse",
+  "duckglue-local",
+  "coffee-roastery-pnl",
+  "coffee-roastery-2tab",
+  "us-grid-renewables",
+]);
+
+function isRefreshableSpreadsheetSource(
+  source: string | { id: string; connector?: string | null },
+): boolean {
+  if (typeof source === "string") {
+    return Boolean(source) && !BUILTIN_SAMPLE_SOURCE_IDS.has(source);
+  }
+  return Boolean(source.connector?.toLowerCase().includes("duckdb")) && !BUILTIN_SAMPLE_SOURCE_IDS.has(source.id);
+}
 
 export interface SourceInfo {
   id: string; label: string; adapter: string;
@@ -269,7 +286,7 @@ export function Connections({ sources, activeId, sandboxMode = false, onSelect, 
           <div key={s.id} className="mrow">
             <div className="mrow-top">
               <span className={"dot " + s.status} title={s.status} />
-              <b>{s.label}</b>
+              <b>{formatSourceDisplayLabel(s.label, s.id)}</b>
               <span className="base mono">
                 {s.adapter}{s.connector ? ` / ${s.connector}` : ""}
               </span>

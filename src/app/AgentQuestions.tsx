@@ -11,7 +11,7 @@ interface PendingQ { id: string; question: string; options?: string[] }
  * (itself polling) picks up to continue. Plain polling in both directions --
  * a human answering a question is not a hot path worth a push channel for.
  */
-export function AgentQuestions() {
+export function AgentQuestions({ disabled = false }: { disabled?: boolean }) {
   const [q, setQ] = useState<PendingQ | null>(null);
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
@@ -21,13 +21,25 @@ export function AgentQuestions() {
   const submission = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    if (disabled) {
+      setQ(null);
+      return;
+    }
     let stopped = false, sequence = 0;
     const controller = new AbortController();
+    let intervalId: ReturnType<typeof setInterval> | undefined;
     const poll = () => {
-      if (sending.current) return;
+      if (sending.current || stopped) return;
       const epoch = pollEpoch.current, request = ++sequence;
-      fetch("/api/agent/questions", { signal: controller.signal }).then(readResponse<{ questions: PendingQ[] }>).then((d) => {
-        if (stopped || request !== sequence || epoch !== pollEpoch.current || sending.current) return;
+      fetch("/api/agent/questions", { signal: controller.signal }).then(async (res) => {
+        if (res.status === 403) {
+          stopped = true;
+          if (intervalId) clearInterval(intervalId);
+          return null;
+        }
+        return readResponse<{ questions: PendingQ[] }>(res);
+      }).then((d) => {
+        if (!d || stopped || request !== sequence || epoch !== pollEpoch.current || sending.current) return;
         if (!Array.isArray(d.questions) || d.questions.some(item => !item || typeof item.id !== "string" || typeof item.question !== "string"
           || item.options !== undefined && (!Array.isArray(item.options) || item.options.some(option => typeof option !== "string")))) return;
         const next = d.questions.find(item => !acknowledged.current.has(item.id)) ?? null;
@@ -35,9 +47,9 @@ export function AgentQuestions() {
       }).catch(() => {});
     };
     poll();
-    const id = setInterval(poll, 1500);
-    return () => { stopped = true; controller.abort(); submission.current?.abort(); clearInterval(id); };
-  }, []);
+    intervalId = setInterval(poll, 1500);
+    return () => { stopped = true; controller.abort(); submission.current?.abort(); if (intervalId) clearInterval(intervalId); };
+  }, [disabled]);
 
   useEffect(() => { setAnswer(""); setError(null); }, [q?.id]);
 

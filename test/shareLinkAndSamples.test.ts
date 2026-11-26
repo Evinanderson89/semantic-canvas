@@ -87,6 +87,7 @@ describe("curated messy & multi-tab sample workbooks", () => {
 
     const preview = profileWorkbook(built.fileName, [sheet]);
     expect(preview.suggestedTimeColumn).toBe("period_date");
+    expect(preview.suggestedPeriod).toEqual({ column: "period_date", grain: "month" });
     const proposal = buildWorkbookProposal({
       sourceId: built.meta.preferredSourceId,
       label: built.meta.title,
@@ -97,6 +98,7 @@ describe("curated messy & multi-tab sample workbooks", () => {
       primaryReportingLag: built.meta.defaultLag,
     });
     expect(proposalIssues(proposal)).toEqual([]);
+    expect(proposalToYaml(proposal)).toContain("period:\n      column: period_date\n      grain: month");
   });
 
   it("builds a real 2-tab .xlsx workbook with banner/total stripping and 100% foreign-key auto-join", async () => {
@@ -208,5 +210,10 @@ describe("curated messy & multi-tab sample workbooks", () => {
     expect((gridSheet.cleaningNotes ?? []).join(" | ")).toMatch(/Skipped 2 leading title\/banner rows/);
     expect((gridSheet.cleaningNotes ?? []).join(" | ")).toMatch(/Excluded 1 Total\/Subtotal summary row/);
     expect((gridSheet.cleaningNotes ?? []).join(" | ")).toMatch(/Cleaned 1 formula error cell/);
+    const gridPreview = profileWorkbook(grid.fileName, [gridSheet]);
+    expect(gridPreview.suggestedGrain).toBe("One monthly summary");
+    expect(gridPreview.suggestedPeriod).toEqual({ column: "dispatch_month", grain: "month" });
+    const solarCol = gridPreview.columns.find((c) => c.name === "solar_generation_mwh");
+    expect(solarCol?.formatHint).toBe("number");
   });
 });

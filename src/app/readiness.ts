@@ -2,7 +2,7 @@ import type { DataFinding } from "../suggest/resultQuality.ts";
 import type { QueryObservation } from "../suggest/queryObservations.ts";
 import { numericValue } from "../charts/values.ts";
 
-export type Readiness = { evidenceFingerprint?: string; evidencePending?: boolean; status: "checking" | "ready" | "error"; message?: string; dataFindings?: DataFinding[]; window?: { start: string; end: string }; rowRules?: string[]; observations?: QueryObservation[]; observationNote?: string };
+export type Readiness = { evidenceFingerprint?: string; evidencePending?: boolean; status: "checking" | "ready" | "error"; message?: string; dataFindings?: DataFinding[]; window?: { start: string; end: string }; rowRules?: string[]; observations?: QueryObservation[]; observationNote?: string; sql?: string; hasLag?: boolean };
 
 /** Result shape must match the governed metrics, including all-null columns. */
 export function resultIssue(metrics: string[], columns: string[], rows: unknown[][]): string | undefined {

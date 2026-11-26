@@ -3,8 +3,8 @@ import { reviewContextSchema } from "./suggest/reviewSession.ts";
 import { mountChartActivity } from "./activity/server.ts";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource } from "./security/auth.ts";
-import { createSandboxRateLimiter, isRefreshableSpreadsheetSource, isSandboxMode, isSandboxOriginAllowed, SANDBOX_MAX_SPREADSHEET_SOURCES, sandboxBlockReason, sandboxClientKey } from "./security/sandbox.ts";
+import { CompanyAuth, checkAccessPrincipals, loadAuthConfig, identityOf, canUseSource, validateAiBaseUrl } from "./security/auth.ts";
+import { BUILTIN_SAMPLE_SOURCE_IDS, createSandboxRateLimiter, isRefreshableSpreadsheetSource, isSandboxMode, isSandboxOriginAllowed, isValidSandboxSessionId, redactSandboxError, resolveSandboxSession, SANDBOX_MAX_SPREADSHEET_SOURCES, SANDBOX_SESSION_COOKIE, sandboxBlockReason, sandboxClientKey } from "./security/sandbox.ts";
 import { createScimRouter } from "./security/scim.ts";
 import { loadRateLimits, rateLimitMiddleware } from "./security/rateLimit.ts";
 import { budgetFailure, loadQueryTimeoutMs, requestBudget } from "./connectors/queryBudget.ts";
@@ -53,7 +53,7 @@ import { proposalProblems } from "./modeler/proposals.ts";
 import { buildWorkbookProposal, parseCsv, parseXlsxWorkbook, prepareWorkbookImport, profileWorkbook, sanitizeIdentifier, slugifySourceId, validateSpreadsheetRefreshInDuckDb, writeSpreadsheetParquet, type SpreadsheetValueType } from "./modeler/spreadsheet.ts";
 import { authoredPath, draftPatchSchema, listDrafts, readDraft, removeDraft, summarizeDraft, writeAuthored, writeDraft, type Draft } from "./modeler/drafts.ts";
 import { existsSync, statSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import YAML from "yaml";
 import { describe as describeSource, connectOne, expand, loadSources, type AiConfig, type Source } from "./sources/registry.ts";
 import { listDashboardVersions, loadDashboardVersion, exportLibrary, closeStore, deleteDashboard, listDashboards, loadDashboard, openStore, saveDashboard, migrateLegacySources, recordAuditEvent, listAuditEvents, type DashboardScope } from "./store/store.ts";
@@ -100,14 +100,52 @@ let defaultPrincipal: string | null = null;
 let rls: RlsConfig = { policies: [], principals: {} };
 let ai: AiConfig | null = null;
 let aiCredentialRevision = 0;
+const sandboxUploadedSources: string[] = [];
+/** Maps sandbox spreadsheet sourceId -> visitor sandboxSessionId (null for shared built-in sample worlds, "" for unowned legacy directories). */
+const sandboxSourceOwners = new Map<string, string | null>();
+
+interface SandboxSpreadsheetMeta {
+  id: string;
+  label: string;
+  adapter: string;
+  model: string;
+  lakeRoot: string;
+  sandboxSessionId: string | null;
+  createdAt: string;
+}
+
+function sandboxDataDir(): string {
+  return process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
+}
+
+function canAccessSource(req: any, sourceId: string): boolean {
+  if (!canUseSource(identityOf(req), sourceId)) return false;
+  if (isSandboxMode() && !BUILTIN_SAMPLE_SOURCE_IDS.has(sourceId) && sandboxSourceOwners.has(sourceId)) {
+    const sid = (req as any)?.sandboxSessionId;
+    return typeof sid === "string" && sid.length > 0 && sandboxSourceOwners.get(sourceId) === sid;
+  }
+  return true;
+}
+
+function describeVisibleSource(req: any, s: Source) {
+  const base = describeSource(s);
+  if (auth.config.mode !== "local" && identityOf(req)?.role !== "admin" && s.error) {
+    return { ...base, error: "Connection unavailable. Contact your administrator." };
+  }
+  if (isSandboxMode() && s.error) {
+    return { ...base, error: redactSandboxError(s.error) };
+  }
+  return base;
+}
 
 /** Resolve the source for a request; falls back to the first ready one. */
 function pick(req: any): Source {
   const want = String(req.header?.("x-sc-source") ?? req.query?.source ?? "");
   if (want && !canUseSource(identityOf(req), want)) throw Object.assign(new Error("This source is not available to your account"), { status: 403 });
-  const found = sources.find((s) => s.id === want && s.status === "ready");
+  if (want && !canAccessSource(req, want)) throw Object.assign(new Error(`Source "${want}" is unavailable`), { status: 404 });
+  const found = sources.find((s) => s.id === want && s.status === "ready" && canAccessSource(req, s.id));
   if (want && !found) throw Object.assign(new Error(`Source "${want}" is unavailable`), { status: 404 });
-  const ready = found ?? sources.find((s) => s.status === "ready" && canUseSource(identityOf(req), s.id));
+  const ready = found ?? sources.find((s) => s.status === "ready" && canAccessSource(req, s.id));
   if (!ready) throw Object.assign(new Error("No accessible data source is ready. Connect a source or contact your workspace administrator."), { status: 404 });
   return ready;
 }
@@ -118,11 +156,85 @@ const actorOf = (req: any) => identityOf(req)?.id ?? "local";
 const modelOf = (req: any): Model => visibleModel(pick(req).model!, roleOf(req));
 const connOf = (req: any): Connector => pick(req).conn!;
 
+async function loadPersistedSandboxSpreadsheets(dataDir: string): Promise<Source[]> {
+  const sheetsRoot = resolve(dataDir, "spreadsheets");
+  if (!existsSync(sheetsRoot)) return [];
+  const entries = await readdir(sheetsRoot, { withFileTypes: true }).catch(() => []);
+  const discovered: { meta: SandboxSpreadsheetMeta; source: Source }[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    const id = entry.name;
+    const lakeRoot = resolve(sheetsRoot, id);
+    const metaPath = resolve(lakeRoot, "sandbox-meta.json");
+    if (!existsSync(metaPath)) {
+      if (!BUILTIN_SAMPLE_SOURCE_IDS.has(id)) sandboxSourceOwners.set(id, "");
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(await readFile(metaPath, "utf8")) as Partial<SandboxSpreadsheetMeta>;
+      if (!parsed || typeof parsed.model !== "string" || !existsSync(parsed.model)) continue;
+      const isBuiltin = BUILTIN_SAMPLE_SOURCE_IDS.has(id);
+      const ownerSid = isBuiltin
+        ? null
+        : isValidSandboxSessionId(parsed.sandboxSessionId)
+          ? parsed.sandboxSessionId.trim().toLowerCase()
+          : "";
+      sandboxSourceOwners.set(id, ownerSid);
+      if (!isBuiltin && !ownerSid) continue;
+      const connected = await connectOne({
+        id,
+        label: typeof parsed.label === "string" && parsed.label.trim() ? parsed.label.trim() : id,
+        adapter: typeof parsed.adapter === "string" && parsed.adapter ? parsed.adapter : "duckglue",
+        model: parsed.model,
+        connector: { type: "duckdb", lakeRoot, poolSize: 2 },
+      });
+      discovered.push({
+        meta: {
+          id,
+          label: connected.label,
+          adapter: connected.adapter,
+          model: parsed.model,
+          lakeRoot,
+          sandboxSessionId: ownerSid,
+          createdAt: typeof parsed.createdAt === "string" ? parsed.createdAt : "",
+        },
+        source: connected,
+      });
+    } catch {
+      if (!BUILTIN_SAMPLE_SOURCE_IDS.has(id)) sandboxSourceOwners.set(id, "");
+    }
+  }
+  discovered.sort((a, b) => a.meta.createdAt.localeCompare(b.meta.createdAt));
+  for (const item of discovered) {
+    if (!BUILTIN_SAMPLE_SOURCE_IDS.has(item.meta.id) && !sandboxUploadedSources.includes(item.meta.id)) {
+      sandboxUploadedSources.push(item.meta.id);
+    }
+  }
+  return discovered.map((d) => d.source);
+}
+
 async function boot() {
   const loaded = await loadSources(SOURCES_PATH);
   sources = loaded.sources;
   defaultPrincipal = loaded.defaultPrincipal;
   ai = loaded.ai;
+  if (isSandboxMode()) {
+    for (const s of sources) {
+      if (!BUILTIN_SAMPLE_SOURCE_IDS.has(s.id) && existsSync(resolve(sandboxDataDir(), "spreadsheets", s.id))) {
+        sandboxSourceOwners.set(s.id, "");
+      }
+    }
+    const persisted = await loadPersistedSandboxSpreadsheets(sandboxDataDir());
+    for (const ps of persisted) {
+      const idx = sources.findIndex((existing) => existing.id === ps.id);
+      if (idx !== -1) {
+        await sources[idx].conn?.close?.().catch(() => {});
+        sources[idx] = ps;
+      } else {
+        sources.push(ps);
+      }
+    }
+  }
   rls = await loadRls(process.env.RLS_PATH ?? "./security/policies.yaml");
 
   checkAccessPrincipals(auth.config.access, rls.principals);
@@ -149,11 +261,12 @@ async function writeConfig(path: string, content: string) {
 const app = express();
 // Express matches routes case-insensitively by default; the role guard keys on the path.
 app.set("case sensitive routing", true);
+if (isSandboxMode()) app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(telemetry.middleware);
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff"); res.setHeader("Referrer-Policy", "no-referrer"); res.setHeader("X-Frame-Options", "DENY");
-  if (process.env.SC_SERVE_UI === "true") res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+  if (process.env.SC_SERVE_UI === "true") res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
   if (req.path.startsWith("/api")) res.setHeader("Cache-Control", "no-store");
   if (req.path === "/healthz" || req.path === "/readyz") return next();
   const local = (value: string) => { try { return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(value).hostname); } catch { return false; } };
@@ -161,6 +274,20 @@ app.use((req, res, next) => {
   if (auth.config.mode === "local"
     ? (isSandboxMode() ? !isSandboxOriginAllowed(host, origin) : !local(`http://${host}`) || origin && !local(origin))
     : host !== new URL(auth.config.publicUrl!).host || origin && origin !== auth.config.publicUrl) return res.status(403).json({ error: "Request origin is not allowed" });
+  if (isSandboxMode()) {
+    const resolved = resolveSandboxSession(req.headers);
+    (req as any).sandboxSessionId = resolved.sessionId;
+    if (resolved.shouldSetCookie) {
+      const proto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0]?.trim().toLowerCase();
+      res.cookie(SANDBOX_SESSION_COOKIE, resolved.sessionId, {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 24 * 60 * 60 * 1000,
+        ...(req.secure || proto === "https" ? { secure: true } : {}),
+      });
+    }
+  }
   next();
 });
 app.get("/healthz", (_req, res) => res.json({ status: "ok" }));
@@ -172,14 +299,14 @@ app.use((error: any, _req: any, res: any, next: any) => {
 });
 
 auth.mount(app);
-app.use("/api/scim/v2", createScimRouter({ auth, onAudit: (event, data) => telemetry.log(event, data ?? {}) }));
+app.use("/api/scim/v2", createScimRouter({ auth, storagePath: resolve(sandboxDataDir(), "scim.json"), onAudit: (event, data) => telemetry.log(event, data ?? {}) }));
 app.use("/api", auth.guard);
 if (isSandboxMode()) {
   const checkSandboxRate = createSandboxRateLimiter();
   app.use("/api", (req, res, next) => {
     const blocked = sandboxBlockReason(req.method, req.path);
     if (blocked) return res.status(403).json({ error: blocked, sandbox: true });
-    const clientKey = sandboxClientKey(req.headers, req.socket?.remoteAddress);
+    const clientKey = sandboxClientKey(req.headers, req.socket?.remoteAddress, req.ip);
     const rate = checkSandboxRate(clientKey, req.method, req.path);
     if (!rate.allowed) {
       telemetry.log("audit.sandbox_rate_limited", { bucket: rate.bucket, path: req.path }, "warn");
@@ -224,15 +351,18 @@ const safe = (fn: (req: any, res: any) => any) => async (req: any, res: any) => 
     catch (e: any) { telemetry.log("request.failed", { requestId: res.locals.requestId, errorType: e?.name ?? "Error", ...providerFailureDiagnostic(e) }, "error"); const failure = requestFailure(e); res.status(failure.status).json({ error: failure.error }); }
   };
   // Covers /api/sources/:id/connected* too: overlay writes share the queue with sources.yaml edits.
-  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && /^\/api\/(sources|agent\/key|setup\/model|modeler)(\/|$)/.test(req.path.toLowerCase())) {
+  // Read-only spreadsheet previews run off the serial operator queue so concurrent visitors never block each other.
+  const lowerPath = req.path.toLowerCase().replace(/\/+$/, "");
+  const isReadOnlyPreview = lowerPath === "/api/modeler/spreadsheet/preview";
+  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !isReadOnlyPreview && /^\/api\/(sources|agent\/key|setup\/model|modeler)(\/|$)/.test(lowerPath)) {
     const pending = configQueue.then(run); configQueue = pending.catch(() => {}); await pending;
   } else await run();
 };
 
 app.get("/api/sources", safe((req, res) => res.json({
   sandbox: isSandboxMode(),
-  sources: sources.filter(s => canUseSource(identityOf(req), s.id)).map(s => ({ ...describeSource(s), ...(auth.config.mode !== "local" && identityOf(req)?.role !== "admin" && s.error ? { error: "Connection unavailable. Contact your administrator." } : {}) })),
-  active: sources.find((x) => x.status === "ready" && canUseSource(identityOf(req), x.id))?.id ?? null,
+  sources: sources.filter(s => canAccessSource(req, s.id)).map(s => describeVisibleSource(req, s)),
+  active: sources.find((x) => x.status === "ready" && canAccessSource(req, x.id))?.id ?? null,
   defaultPrincipal: auth.config.mode === "local" ? defaultPrincipal : undefined,
 })));
 
@@ -275,13 +405,19 @@ app.post("/api/setup/claude/check", safe(async (req, res) => {
   try { res.json(await checkClaudeConnection(PORT, source)); }
   finally { checkingClaude = false; }
 }));
-app.get("/api/setup", safe((_req, res) => res.json({ mode: auth.config.mode,
-  checks: { signIn: auth.config.mode !== "local", sources: sources.some(s => s.status === "ready"), catalogue: sources.some(s => Object.keys(s.model?.metrics ?? {}).length > 0), ai: aiConfigurationIssue(ai) === null, monitoring: telemetry.enabled },
-  sources: sources.map(describeSource), sessionSeconds: auth.config.sessionSeconds,
-})));
-app.get("/api/operations/status", safe((_req, res) => res.json({ ready, uptimeSeconds: Math.floor(process.uptime()), monitoring: telemetry.enabled, counters: telemetry.counters,
-  sources: sources.map(s => ({ id: s.id, status: s.status })), storage: "Persistent dashboard database", mode: auth.config.mode,
-})));
+app.get("/api/setup", safe((req, res) => {
+  const visible = sources.filter(s => canAccessSource(req, s.id));
+  res.json({ mode: auth.config.mode,
+    checks: { signIn: auth.config.mode !== "local", sources: visible.some(s => s.status === "ready"), catalogue: visible.some(s => Object.keys(s.model?.metrics ?? {}).length > 0), ai: aiConfigurationIssue(ai) === null && validateAiBaseUrl(ai?.baseUrl, auth.config.mode) === null, monitoring: telemetry.enabled },
+    sources: visible.map(s => describeVisibleSource(req, s)), sessionSeconds: auth.config.sessionSeconds,
+  });
+}));
+app.get("/api/operations/status", safe((req, res) => {
+  const visible = sources.filter(s => canAccessSource(req, s.id));
+  res.json({ ready, uptimeSeconds: Math.floor(process.uptime()), monitoring: telemetry.enabled, counters: telemetry.counters,
+    sources: visible.map(s => ({ id: s.id, status: s.status })), storage: "Persistent dashboard database", mode: auth.config.mode,
+  });
+}));
 
 app.get("/api/operations/backup", safe(async (_req, res) => {
   res.setHeader("Content-Disposition", 'attachment; filename="semantic-canvas-library.json"');
@@ -292,12 +428,13 @@ app.get("/api/operations/audit", safe(async (req, res) => {
   const limit = req.query.limit !== undefined ? Number(req.query.limit) : 100;
   res.json({ events: await listAuditEvents(limit) });
 }));
-app.get("/api/operations/metrics", safe(async (_req, res) => {
+app.get("/api/operations/metrics", safe(async (req, res) => {
   const auditEvents = await listAuditEvents(500);
+  const visible = sources.filter(s => canAccessSource(req, s.id));
   const base = computeGovernanceMetrics({
     auditEvents,
     counters: telemetry.counters,
-    sources: sources.map(describeSource),
+    sources: visible.map(s => describeVisibleSource(req, s)),
     uptimeSeconds: Math.floor(process.uptime()),
   });
   res.json({
@@ -538,8 +675,11 @@ const reloadSources = sourceReloader(async () => {
   const credentialRevision = aiCredentialRevision;
   return { ...await loadSources(SOURCES_PATH), credentialRevision };
 }, initializeLibraries, loaded => {
-  const retired = sources;
-  sources = loaded.sources;
+  const preservedSandbox = isSandboxMode()
+    ? sources.filter(s => sandboxSourceOwners.has(s.id) && !loaded.sources.some(next => next.id === s.id))
+    : [];
+  const retired = sources.filter(s => !preservedSandbox.includes(s));
+  sources = [...loaded.sources, ...preservedSandbox];
   defaultPrincipal = loaded.defaultPrincipal;
   // A source reload can prepare slowly. It must not replace a credential that
   // Connections saved or removed while that older configuration was loading.
@@ -652,6 +792,7 @@ async function dashboardsUsing(source: Source, drift: DriftFinding[]) {
 /** Drift: what the model declares that the warehouse no longer has, and what that breaks. Reads the catalogue only; runs any time. */
 app.get("/api/modeler/drift", safe(async (req, res) => {
   const id = String(req.query.source ?? "");
+  if (!canAccessSource(req, id)) return res.status(404).json({ error: `no ready source "${id}"` });
   const s = sources.find((x) => x.id === id);
   if (!s || s.status !== "ready" || !s.conn || !s.model) return res.status(404).json({ error: `no ready source "${id}"` });
   if (!s.conn.catalog) return res.status(400).json({ error: "This connector cannot list its tables, so drift cannot be checked." });
@@ -835,20 +976,66 @@ app.post("/api/modeler/spreadsheet/preview", safe(async (req, res) => {
   const preview = profileWorkbook(input.fileName, sheets);
   let candidateId = preview.sourceId;
   let suffix = 2;
-  while (sources.some((s) => s.id === candidateId)) {
+  while (sources.some((s) => s.id === candidateId && canAccessSource(req, s.id))) {
     candidateId = `${preview.sourceId.slice(0, 32)}-${suffix++}`;
   }
   res.json({ ...preview, sourceId: candidateId });
 }));
 
-const sandboxUploadedSources: string[] = [];
+const builtinImportLocks = new Map<string, Promise<{
+  sourceId: string;
+  tableName: string;
+  sheets: string[];
+  joins: number;
+  cleaningNotes: string[];
+  metrics: string[];
+}>>();
+
+async function upsertSandboxSource(entry: {
+  id: string;
+  label: string;
+  yamlPath: string;
+  lakeRoot: string;
+  sandboxSessionId: string | null;
+}): Promise<{ ok: true; source: Source } | { ok: false; status: number; error: string }> {
+  const connected = await connectOne({
+    id: entry.id,
+    label: entry.label,
+    adapter: "duckglue",
+    model: entry.yamlPath,
+    connector: { type: "duckdb", lakeRoot: entry.lakeRoot, poolSize: 2 },
+  });
+  if (connected.status === "error") return { ok: false, status: 422, error: connected.error! };
+  const meta: SandboxSpreadsheetMeta = {
+    id: entry.id,
+    label: entry.label,
+    adapter: "duckglue",
+    model: entry.yamlPath,
+    lakeRoot: entry.lakeRoot,
+    sandboxSessionId: entry.sandboxSessionId,
+    createdAt: new Date().toISOString(),
+  };
+  await mkdir(entry.lakeRoot, { recursive: true });
+  await writeConfig(resolve(entry.lakeRoot, "sandbox-meta.json"), JSON.stringify(meta, null, 2));
+  sandboxSourceOwners.set(entry.id, entry.sandboxSessionId);
+  await initializeLibraries([connected]);
+  const existingIdx = sources.findIndex((s) => s.id === entry.id);
+  if (existingIdx !== -1) {
+    const retired = sources[existingIdx];
+    sources[existingIdx] = connected;
+    await retired.conn?.close?.().catch(() => {});
+  } else {
+    sources.push(connected);
+  }
+  return { ok: true, source: connected };
+}
 
 async function evictOldestSandboxSpreadsheets(dataDir: string) {
   const sheetsRoot = resolve(dataDir, "spreadsheets");
   const activeSheetIds = () => {
     const onDisk = sources
       .map((s) => s.id)
-      .filter((id) => existsSync(resolve(sheetsRoot, id)));
+      .filter((id) => !BUILTIN_SAMPLE_SOURCE_IDS.has(id) && existsSync(resolve(sheetsRoot, id)));
     const ordered = [
       ...sandboxUploadedSources.filter((id) => onDisk.includes(id)),
       ...onDisk.filter((id) => !sandboxUploadedSources.includes(id)),
@@ -858,8 +1045,15 @@ async function evictOldestSandboxSpreadsheets(dataDir: string) {
   let current = activeSheetIds();
   while (current.length >= SANDBOX_MAX_SPREADSHEET_SOURCES) {
     const victim = current.shift()!;
+    if (BUILTIN_SAMPLE_SOURCE_IDS.has(victim)) continue;
     const idx = sandboxUploadedSources.indexOf(victim);
     if (idx !== -1) sandboxUploadedSources.splice(idx, 1);
+    sandboxSourceOwners.delete(victim);
+    const sourceIdx = sources.findIndex((s) => s.id === victim);
+    if (sourceIdx !== -1) {
+      const [retired] = sources.splice(sourceIdx, 1);
+      await retired.conn?.close?.().catch(() => {});
+    }
     const existing = await readExistingBlock(victim);
     if (!("error" in existing)) {
       const { block } = existing;
@@ -870,88 +1064,214 @@ async function evictOldestSandboxSpreadsheets(dataDir: string) {
     await rm(resolve(sheetsRoot, victim), { recursive: true, force: true }).catch(() => {});
     await rm(resolve(dataDir, "models", `${victim}.yaml`), { force: true }).catch(() => {});
     await rm(resolve(dataDir, "models", "authored", `${victim}.yaml`), { force: true }).catch(() => {});
+    await rm(resolve(dataDir, "models", "extensions", `${victim}.yaml`), { force: true }).catch(() => {});
+    await rm(resolve(dataDir, "models", "connected", `${victim}.yaml`), { force: true }).catch(() => {});
     current = activeSheetIds();
   }
 }
 
 app.post("/api/modeler/spreadsheet/import", safe(async (req, res) => {
   const input = spreadsheetImportSchema.parse(req.body ?? {});
-  const dataDir = process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
-  const parsedSheets = parseUploadedWorkbook(input);
-  const preview = profileWorkbook(input.fileName, parsedSheets);
+  const dataDir = sandboxDataDir();
+  const hasCustomJoinOverride = Boolean(
+    input.joins?.some((j) => j.include === false || j.resolution === "exclude" || j.resolution === "one_to_many"),
+  );
+  const requestedBuiltinId = input.sourceId && BUILTIN_SAMPLE_SOURCE_IDS.has(input.sourceId) ? input.sourceId : null;
+  const isSharedBuiltinImport = Boolean(requestedBuiltinId && !hasCustomJoinOverride);
 
-  const prepared = prepareWorkbookImport({
-    parsedSheets,
-    preview,
-    joins: input.joins,
-  });
-  if (!prepared.ok) {
-    return res.status(400).json({
-      error: "duplicate_join_key",
-      message: prepared.message,
-      duplicateJoins: prepared.duplicateJoins,
+  if (isSharedBuiltinImport && requestedBuiltinId) {
+    const readyBuiltin = sources.find((s) => s.id === requestedBuiltinId && s.status === "ready" && s.model);
+    if (readyBuiltin && readyBuiltin.model) {
+      const tables = Object.keys(readyBuiltin.model.tables);
+      return res.json({
+        sourceId: readyBuiltin.id,
+        tableName: tables[0] ?? readyBuiltin.id,
+        sheets: tables,
+        joins: readyBuiltin.model.joins.length,
+        ...(readyBuiltin.model.hygieneNotes?.length ? { cleaningNotes: readyBuiltin.model.hygieneNotes } : {}),
+        source: describeVisibleSource(req, readyBuiltin),
+        sources: sources.filter((s) => canAccessSource(req, s.id)).map((s) => describeVisibleSource(req, s)),
+        metrics: Object.keys(readyBuiltin.model.metrics),
+      });
+    }
+    const inflight = builtinImportLocks.get(requestedBuiltinId);
+    if (inflight) {
+      const result = await inflight;
+      const source = sources.find((s) => s.id === result.sourceId);
+      return res.json({
+        ...result,
+        ...(result.cleaningNotes.length ? { cleaningNotes: result.cleaningNotes } : {}),
+        source: source ? describeVisibleSource(req, source) : null,
+        sources: sources.filter((s) => canAccessSource(req, s.id)).map((s) => describeVisibleSource(req, s)),
+      });
+    }
+  }
+
+  const runImport = async () => {
+    const parsedSheets = parseUploadedWorkbook(input);
+    const preview = profileWorkbook(input.fileName, parsedSheets);
+
+    const prepared = prepareWorkbookImport({
+      parsedSheets,
+      preview,
+      joins: input.joins,
     });
+    if (!prepared.ok) {
+      return {
+        ok: false as const,
+        status: 400,
+        body: {
+          error: "duplicate_join_key",
+          message: prepared.message,
+          duplicateJoins: prepared.duplicateJoins,
+        },
+      };
+    }
+
+    if (isSandboxMode() && !isSharedBuiltinImport) {
+      await evictOldestSandboxSpreadsheets(dataDir);
+    }
+
+    let sourceId = requestedBuiltinId && hasCustomJoinOverride && isSandboxMode()
+      ? `${requestedBuiltinId.slice(0, 28)}-custom`
+      : (input.sourceId ?? slugifySourceId(input.label || input.fileName));
+    if (!isSharedBuiltinImport) {
+      let suffix = 2;
+      while (sources.some((s) => s.id === sourceId) || (isSandboxMode() && BUILTIN_SAMPLE_SOURCE_IDS.has(sourceId))) {
+        sourceId = `${sourceId.slice(0, 32)}-${suffix++}`;
+      }
+    }
+
+    const lakeRoot = resolve(dataDir, "spreadsheets", sourceId);
+    const sheetPreviews = prepared.sheets;
+    for (let i = 0; i < sheetPreviews.length; i++) {
+      await writeSpreadsheetParquet(lakeRoot, sheetPreviews[i].tableName, sheetPreviews[i].columns, prepared.sheetRows[i]);
+    }
+
+    const proposal = buildWorkbookProposal({
+      sourceId,
+      label: input.label.trim(),
+      sheets: sheetPreviews,
+      joins: prepared.joins,
+      primaryGrain: input.grain.trim(),
+      primaryTimeColumn: input.timeColumn ?? null,
+      primaryReportingLag: input.reportingLag,
+      primaryChoices: input.choices,
+      hygieneNotes: prepared.hygieneNotes,
+    });
+    const issues = proposalIssues(proposal);
+    if (issues.length) return { ok: false as const, status: 400, body: { error: issues[0], issues } };
+
+    const yamlPath = await writeAuthored(sourceId, proposalToYaml(proposal));
+    if (isSandboxMode()) {
+      const ownerSid = BUILTIN_SAMPLE_SOURCE_IDS.has(sourceId)
+        ? null
+        : String((req as any).sandboxSessionId ?? resolveSandboxSession(req.headers).sessionId);
+      const upserted = await upsertSandboxSource({
+        id: sourceId,
+        label: input.label.trim(),
+        yamlPath,
+        lakeRoot,
+        sandboxSessionId: ownerSid,
+      });
+      if (!upserted.ok) return { ok: false as const, status: upserted.status, body: { error: upserted.error } };
+      if (!BUILTIN_SAMPLE_SOURCE_IDS.has(sourceId) && !sandboxUploadedSources.includes(sourceId)) {
+        sandboxUploadedSources.push(sourceId);
+      }
+    } else {
+      const added = await addSource({
+        id: sourceId,
+        label: input.label.trim(),
+        adapter: "duckglue",
+        model: yamlPath,
+        connectorType: "duckdb",
+        connector: { type: "duckdb", lakeRoot, poolSize: 2 },
+      });
+      if ("error" in added) return { ok: false as const, status: added.status, body: { error: added.error } };
+    }
+
+    telemetry.log("audit.spreadsheet_imported", {
+      actor: actorOf(req),
+      id: sourceId,
+      sheets: sheetPreviews.length,
+      rows: preview.rowCount,
+      columns: preview.columns.length,
+      metrics: proposal.metrics.length,
+    });
+    return {
+      ok: true as const,
+      payload: {
+        sourceId,
+        tableName: preview.tableName,
+        sheets: sheetPreviews.map((s) => s.tableName),
+        joins: prepared.joins.filter((j) => j.include).length,
+        cleaningNotes: prepared.hygieneNotes,
+        metrics: proposal.metrics.filter((m) => m.include).map((m) => m.name),
+      },
+    };
+  };
+
+  if (isSharedBuiltinImport && requestedBuiltinId) {
+    let resolveLock!: (val: {
+      sourceId: string;
+      tableName: string;
+      sheets: string[];
+      joins: number;
+      cleaningNotes: string[];
+      metrics: string[];
+    }) => void;
+    let rejectLock!: (err: unknown) => void;
+    const lockPromise = new Promise<{
+      sourceId: string;
+      tableName: string;
+      sheets: string[];
+      joins: number;
+      cleaningNotes: string[];
+      metrics: string[];
+    }>((r, j) => {
+      resolveLock = r;
+      rejectLock = j;
+    });
+    lockPromise.catch(() => {});
+    builtinImportLocks.set(requestedBuiltinId, lockPromise);
+    try {
+      const outcome = await runImport();
+      if (!outcome.ok) {
+        rejectLock(Object.assign(new Error(String(outcome.body.error ?? "Import failed")), { status: outcome.status }));
+        return res.status(outcome.status).json(outcome.body);
+      }
+      resolveLock(outcome.payload);
+      const source = sources.find((s) => s.id === outcome.payload.sourceId);
+      return res.json({
+        sourceId: outcome.payload.sourceId,
+        tableName: outcome.payload.tableName,
+        sheets: outcome.payload.sheets,
+        joins: outcome.payload.joins,
+        ...(outcome.payload.cleaningNotes.length ? { cleaningNotes: outcome.payload.cleaningNotes } : {}),
+        source: source ? describeVisibleSource(req, source) : null,
+        sources: sources.filter((s) => canAccessSource(req, s.id)).map((s) => describeVisibleSource(req, s)),
+        metrics: outcome.payload.metrics,
+      });
+    } catch (err) {
+      rejectLock(err);
+      throw err;
+    } finally {
+      builtinImportLocks.delete(requestedBuiltinId);
+    }
   }
 
-  if (isSandboxMode()) {
-    await evictOldestSandboxSpreadsheets(dataDir);
-  }
-  let sourceId = input.sourceId ?? slugifySourceId(input.label || input.fileName);
-  let suffix = 2;
-  while (sources.some((s) => s.id === sourceId)) {
-    sourceId = `${sourceId.slice(0, 32)}-${suffix++}`;
-  }
-
-  const lakeRoot = resolve(dataDir, "spreadsheets", sourceId);
-  const sheetPreviews = prepared.sheets;
-  for (let i = 0; i < sheetPreviews.length; i++) {
-    await writeSpreadsheetParquet(lakeRoot, sheetPreviews[i].tableName, sheetPreviews[i].columns, prepared.sheetRows[i]);
-  }
-
-  const proposal = buildWorkbookProposal({
-    sourceId,
-    label: input.label.trim(),
-    sheets: sheetPreviews,
-    joins: prepared.joins,
-    primaryGrain: input.grain.trim(),
-    primaryTimeColumn: input.timeColumn ?? null,
-    primaryReportingLag: input.reportingLag,
-    primaryChoices: input.choices,
-    hygieneNotes: prepared.hygieneNotes,
-  });
-  const issues = proposalIssues(proposal);
-  if (issues.length) return res.status(400).json({ error: issues[0], issues });
-
-  const yamlPath = await writeAuthored(sourceId, proposalToYaml(proposal));
-  const added = await addSource({
-    id: sourceId,
-    label: input.label.trim(),
-    adapter: "duckglue",
-    model: yamlPath,
-    connectorType: "duckdb",
-    connector: { type: "duckdb", lakeRoot, poolSize: 2 },
-  });
-  if ("error" in added) return res.status(added.status).json({ error: added.error });
-  if (isSandboxMode()) sandboxUploadedSources.push(sourceId);
-
-  const source = sources.find((s) => s.id === sourceId);
-  telemetry.log("audit.spreadsheet_imported", {
-    actor: actorOf(req),
-    id: sourceId,
-    sheets: sheetPreviews.length,
-    rows: preview.rowCount,
-    columns: preview.columns.length,
-    metrics: proposal.metrics.length,
-  });
+  const outcome = await runImport();
+  if (!outcome.ok) return res.status(outcome.status).json(outcome.body);
+  const source = sources.find((s) => s.id === outcome.payload.sourceId);
   res.json({
-    sourceId,
-    tableName: preview.tableName,
-    sheets: sheetPreviews.map((s) => s.tableName),
-    joins: prepared.joins.filter((j) => j.include).length,
-    ...(prepared.hygieneNotes.length ? { cleaningNotes: prepared.hygieneNotes } : {}),
-    source: source ? describeSource(source) : null,
-    sources: added.reload.sources,
-    metrics: proposal.metrics.filter((m) => m.include).map((m) => m.name),
+    sourceId: outcome.payload.sourceId,
+    tableName: outcome.payload.tableName,
+    sheets: outcome.payload.sheets,
+    joins: outcome.payload.joins,
+    ...(outcome.payload.cleaningNotes.length ? { cleaningNotes: outcome.payload.cleaningNotes } : {}),
+    source: source ? describeVisibleSource(req, source) : null,
+    sources: sources.filter((s) => canAccessSource(req, s.id)).map((s) => describeVisibleSource(req, s)),
+    metrics: outcome.payload.metrics,
   });
 }));
 
@@ -964,10 +1284,11 @@ app.post("/api/modeler/spreadsheet/refresh/:sourceId", safe(async (req, res) => 
       sandbox: true,
     });
   }
+  if (!canAccessSource(req, sourceId)) return res.status(404).json({ error: `Source "${sourceId}" not found` });
   const existing = sources.find((s) => s.id === sourceId);
   if (!existing || !existing.model) return res.status(404).json({ error: `Source "${sourceId}" not found` });
 
-  const dataDir = process.env.SC_DATA_DIR ?? resolve(homedir(), ".semantic-canvas");
+  const dataDir = sandboxDataDir();
   const lakeRoot = resolve(dataDir, "spreadsheets", sourceId);
   if (!existsSync(lakeRoot)) {
     return res.status(400).json({ error: `Source "${sourceId}" is not a spreadsheet-uploaded source and cannot be refreshed by file upload.` });
@@ -1082,7 +1403,19 @@ app.post("/api/modeler/spreadsheet/refresh/:sourceId", safe(async (req, res) => 
     }
 
     const rowsUpdated = tablesUpdated.reduce((sum, t) => sum + (validation.rowCountsByTable.get(t) ?? 0), 0);
-    const reload = await hotReload();
+    if (isSandboxMode() && sandboxSourceOwners.has(sourceId)) {
+      const ownerSid = sandboxSourceOwners.get(sourceId) ?? null;
+      const reconnected = await upsertSandboxSource({
+        id: sourceId,
+        label: existing.label,
+        yamlPath: modelYamlFile,
+        lakeRoot,
+        sandboxSessionId: ownerSid,
+      });
+      if (!reconnected.ok) return res.status(reconnected.status).json({ error: reconnected.error });
+    } else {
+      await hotReload();
+    }
     telemetry.log("audit.spreadsheet_refreshed", { actor: actorOf(req), id: sourceId, tables: tablesUpdated, rows: rowsUpdated });
     res.json({
       ok: true,
@@ -1090,7 +1423,7 @@ app.post("/api/modeler/spreadsheet/refresh/:sourceId", safe(async (req, res) => 
       tablesUpdated,
       rowsUpdated,
       ...(cleaningNotes.length ? { cleaningNotes } : {}),
-      sources: reload.sources,
+      sources: sources.filter((s) => canAccessSource(req, s.id)).map((s) => describeVisibleSource(req, s)),
     });
   } finally {
     await rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
@@ -1226,6 +1559,7 @@ app.post("/api/sources/:sourceId/metrics", safe(async (req, res) => {
 }));
 
 app.post("/api/sources/:sourceId/metrics/:name/publish", safe(async (req, res) => {
+  if (roleOf(req) !== "admin") return res.status(403).json({ error: "Your workspace role does not allow this action" });
   const source = connectedSource(req), name = String(req.params.name);
   const m = source.model?.metrics[name];
   if (!m?.origin || m.origin.kind !== "proposal") return res.status(404).json({ error: `no proposed metric "${name}" on ${source.id}` });
@@ -1256,6 +1590,7 @@ app.delete("/api/sources/:sourceId/metrics/:name", safe(async (req, res) => {
 function connectedSource(req: any): Source {
   const id = String(req.params.sourceId ?? req.params.id);
   if (!canUseSource(identityOf(req), id)) throw Object.assign(new Error("This source is not available to your account"), { status: 403 });
+  if (!canAccessSource(req, id)) throw Object.assign(new Error(`no source named "${id}"`), { status: 404 });
   const source = sources.find((s) => s.id === id);
   if (!source) throw Object.assign(new Error(`no source named "${id}"`), { status: 404 });
   return source;
@@ -1298,6 +1633,7 @@ app.get("/api/sources/:sourceId/connected/:dataset", safe(async (req, res) => {
 }));
 
 app.post("/api/sources/:sourceId/connected/:dataset/publish", safe(async (req, res) => {
+  if (roleOf(req) !== "admin") return res.status(403).json({ error: "Your workspace role does not allow this action" });
   const source = connectedSource(req), body = publishSchema.parse(req.body);
   const overlay = await readOverlay(source.id), existing = overlay.tables[String(req.params.dataset)];
   if (!existing) return res.status(404).json({ error: `no connected table "${req.params.dataset}" on ${source.id}` });
@@ -1458,6 +1794,15 @@ app.get("/api/dashboards/:id/yaml", safe(async (req, res) => {
   if (!d) return res.status(404).json({ error: "Dashboard not found in this source" });
   res.type("text/yaml").send(dashboardToYaml(d));
 }));
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 app.post("/api/dashboards/:id/digest", safe(async (req, res) => {
   const d = await loadDashboard(req.params.id, dashboardScope(req));
   if (!d) return res.status(404).json({ error: "Dashboard not found in this source" });
@@ -1475,7 +1820,7 @@ app.post("/api/dashboards/:id/digest", safe(async (req, res) => {
     period: k.period,
   }));
   const headline = digest.headlineBullets[0] ?? `${digest.title} — Executive Digest`;
-  const html = `<article class="executive-digest"><h1>${digest.title} — Executive Digest</h1><p>${headline}</p><ul>${digest.headlineBullets.map((b) => `<li>${b}</li>`).join("")}</ul><footer>Verified SHA-256: <code>${bundle.signatureHash}</code></footer></article>`;
+  const html = `<article class="executive-digest"><h1>${escapeHtml(digest.title)} — Executive Digest</h1><p>${escapeHtml(headline)}</p><ul>${digest.headlineBullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul><footer>Verified SHA-256: <code>${escapeHtml(bundle.signatureHash)}</code></footer></article>`;
   res.json({
     digest: {
       ...digest,
@@ -1597,20 +1942,29 @@ app.get("/api/agent/questions/:id", safe(async (req, res) => {
  */
 const agentConversations = new Map<string, ChatMessage[]>();
 
+function requireSafeAi(cfg: AiConfig | null): asserts cfg is AiConfig {
+  requireAiConfiguration(cfg);
+  const urlIssue = validateAiBaseUrl(cfg.baseUrl, auth.config.mode);
+  if (urlIssue) throw Object.assign(new Error(urlIssue), { status: 503 });
+}
+
 app.post("/api/reference/analyze", safe(async (req, res) => {
   try { await validateReferenceUpload(req.body); } catch (e: any) { return res.status(400).json({ error: e.message }); }
-  requireAiConfiguration(ai);
+  requireSafeAi(ai);
   const controller = new AbortController();
   const stop = () => controller.abort(); res.on("close", stop);
   try { const blueprint = await analyzeReference(req.body, modelOf(req), ai, controller.signal); if (!res.destroyed) res.json({ blueprint }); }
   finally { res.off("close", stop); }
 }));
 
-app.get("/api/agent/status", safe((_req, res) => res.json({
-  configured: aiConfigurationIssue(ai) === null, provider: ai?.provider ?? "anthropic", model: ai?.model ?? defaultModelForProvider(ai?.provider ?? "anthropic"),
-  ...(ai?.baseUrl ? { baseUrl: ai.baseUrl } : {}),
-  issue: aiConfigurationIssue(ai), canSetKey: aiProviderIssue(ai) === null,
-})));
+app.get("/api/agent/status", safe((_req, res) => {
+  const issue = aiConfigurationIssue(ai) ?? validateAiBaseUrl(ai?.baseUrl, auth.config.mode);
+  res.json({
+    configured: issue === null, provider: ai?.provider ?? "anthropic", model: ai?.model ?? defaultModelForProvider(ai?.provider ?? "anthropic"),
+    ...(ai?.baseUrl ? { baseUrl: ai.baseUrl } : {}),
+    issue, canSetKey: aiProviderIssue(ai) === null,
+  });
+}));
 
 /**
  * Same idea as the Connections screen's "test before you save" sources form:
@@ -1621,6 +1975,7 @@ app.get("/api/agent/status", safe((_req, res) => res.json({
  * upsertEnv() a Snowflake credential does, never into sources.yaml.
  */
 app.post("/api/agent/key", safe(async (req, res) => {
+  if (roleOf(req) !== "admin") return res.status(403).json({ error: "Your workspace role does not allow this action" });
   const apiKey = String(req.body?.apiKey ?? "").trim();
   if (!apiKey) return res.status(400).json({ error: "apiKey is required" });
   const provider = req.body?.provider !== undefined ? String(req.body.provider).trim() : (ai?.provider ?? "anthropic");
@@ -1631,7 +1986,7 @@ app.post("/api/agent/key", safe(async (req, res) => {
       : (ai?.model ?? defaultModelForProvider(provider)));
   const baseUrl = req.body?.baseUrl !== undefined ? (String(req.body.baseUrl).trim() || undefined) : ai?.baseUrl;
   const candidate: AiConfig = baseUrl ? { provider, model, apiKey, baseUrl } : { provider, model, apiKey };
-  const providerIssue = aiProviderIssue(candidate);
+  const providerIssue = aiProviderIssue(candidate) ?? validateAiBaseUrl(baseUrl, auth.config.mode);
   if (providerIssue) return res.status(422).json({ error: providerIssue });
   try {
     await verifyAiProvider(candidate);
@@ -1647,7 +2002,8 @@ app.post("/api/agent/key", safe(async (req, res) => {
   res.json({ configured: true, provider, model, ...(baseUrl ? { baseUrl } : {}) });
 }));
 
-app.delete("/api/agent/key", safe(async (_req, res) => {
+app.delete("/api/agent/key", safe(async (req, res) => {
+  if (roleOf(req) !== "admin") return res.status(403).json({ error: "Your workspace role does not allow this action" });
   await upsertEnv(managedAiKey("", ai ? { provider: ai.provider, model: ai.model, baseUrl: ai.baseUrl } : undefined), "AI agent");
   aiCredentialRevision++;
   if (ai) ai = { ...ai, apiKey: "" };
@@ -1655,7 +2011,7 @@ app.delete("/api/agent/key", safe(async (_req, res) => {
 }));
 
 app.post("/api/agent/chat", safe(async (req, res) => {
-  requireAiConfiguration(ai);
+  requireSafeAi(ai);
   const conversationId = String(req.body?.conversationId ?? "").trim();
   const message = String(req.body?.message ?? "").trim();
   if (!conversationId) return res.status(400).json({ error: "conversationId is required" });
@@ -1683,7 +2039,7 @@ app.post("/api/agent/chat", safe(async (req, res) => {
  * not a conversation, so there's no conversationId or history here.
  */
 app.post("/api/agent/explain", safe(async (req, res) => {
-  requireAiConfiguration(ai);
+  requireSafeAi(ai);
   const body = req.body ?? {};
   const metrics = Array.isArray(body.metrics) ? body.metrics : [];
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
@@ -1710,7 +2066,7 @@ app.post("/api/agent/explain", safe(async (req, res) => {
  * same one-shot, read-only shape (see suggestImprovements).
  */
 app.post("/api/agent/beautify", safe(async (req, res) => {
-  requireAiConfiguration(ai);
+  requireSafeAi(ai);
   const body = req.body ?? {};
   const metrics = Array.isArray(body.metrics) ? body.metrics : [];
   if (!metrics.length) return res.status(400).json({ error: "metrics is required" });
@@ -1739,7 +2095,7 @@ app.post("/api/agent/beautify", safe(async (req, res) => {
  * displaying it.
  */
 app.post("/api/agent/dashboard-story", safe(async (req, res) => {
-  requireAiConfiguration(ai);
+  requireSafeAi(ai);
   const body = req.body ?? {};
   const tiles: DashboardTileSummary[] = Array.isArray(body.tiles) ? body.tiles.map((t: any) => ({
     id: String(t.id ?? ""), title: String(t.title ?? ""), kind: String(t.kind ?? ""),
@@ -1989,6 +2345,6 @@ const host = process.env.SC_HOST ?? (auth.config.mode !== "local" ? "0.0.0.0" : 
 boot().then(() => {
   const server = app.listen(PORT, host);
   chartActivity.start();
-  const stop = () => { ready = false; telemetry.log("server.stopping"); server.close(async () => { await chartActivity.stop(); await Promise.allSettled(sources.map(s => s.conn?.close())); await closeStore(); await telemetry.close(); process.exit(0); }); setTimeout(() => process.exit(1), 15000).unref(); };
+  const stop = () => { ready = false; telemetry.log("server.stopping"); server.close(async () => { await chartActivity.stop(); await auth.flush(); await Promise.allSettled(sources.map(s => s.conn?.close())); await closeStore(); await telemetry.close(); process.exit(0); }); setTimeout(() => process.exit(1), 15000).unref(); };
   process.once("SIGTERM", stop); process.once("SIGINT", stop);
 }).catch(async e => { telemetry.log("server.start_failed", { errorType: e?.name ?? "Error" }, "error"); process.stderr.write(`Semantic Canvas could not start: ${String(e?.message ?? "Invalid configuration")}\n`); await telemetry.close(); process.exit(1); });

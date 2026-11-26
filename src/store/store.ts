@@ -373,8 +373,10 @@ export const saveLibraryView = (input: unknown, scope: DashboardScope) => serial
 export const updateLibraryItem = (kindInput: unknown, id: string, input: unknown, scope: DashboardScope) => serialized(async () => {
   const kind = itemKindSchema.parse(kindInput), patch = itemUpdateSchema.parse(input);
   const table = kind === "dashboard" ? "dashboards" : "library_views";
-  const row = (await conn().runAndReadAll(`SELECT name, spec, folder_id, revision FROM ${table} WHERE id = ? AND source_id = ?`, [id, scope.source])).getRows()[0];
+  const row = (await conn().runAndReadAll(`SELECT name, spec, folder_id, revision, ${kind === "dashboard" ? "coalesce(is_template, false)" : "false"} FROM ${table} WHERE id = ? AND source_id = ?`, [id, scope.source])).getRows()[0];
   if (!row) throw missing();
+  if (Boolean(row[4]) && (patch.name !== undefined && patch.name !== String(row[0]) || /^(true|1|yes)$/i.test(String(process.env.SC_SANDBOX_MODE ?? "").trim())))
+    throw new StoreConflict("Built-in starter templates cannot be renamed or modified. Open this starter as a new dashboard and save your own copy.");
   if (Number(row[3]) !== patch.revision) throw new StoreConflict("This item changed. Refresh the library and try again.");
   const folderId = patch.folderId === undefined ? row[2] == null ? null : String(row[2]) : patch.folderId;
   await requireFolder(folderId, scope.source);

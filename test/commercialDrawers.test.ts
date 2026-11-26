@@ -293,9 +293,9 @@ describe("Commercial Drawers & Inspector Lineage/Drivers UI Helpers + API Integr
       await manifestRes.json(),
       await auditRes.json(),
     );
-    expect(opsView.manifest.version).toBe("0.1.0");
+    expect(opsView.manifest.version).toBe("0.3.6");
     expect(opsView.manifest.capabilities).toEqual(
-      expect.arrayContaining(["dbt", "cube", "snowflake", "openai", "gemini"]),
+      expect.arrayContaining(["dbt", "cube", "postgres", "bigquery", "snowflake", "openai", "gemini"]),
     );
     expect(opsView.telemetry.readySources).toBe(1);
     expect(opsView.auditEvents.length).toBeGreaterThan(0);

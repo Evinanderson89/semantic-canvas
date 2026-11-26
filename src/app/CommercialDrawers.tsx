@@ -28,6 +28,15 @@ export interface NormalizedExecutiveDigest {
   bundle: unknown;
 }
 
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export function buildLocalDigestPreview(spec: DashboardSpec, model: Model): NormalizedExecutiveDigest {
   const metricTiles = spec.tiles.filter(
     (t) => (!t.kind || t.kind === "metric") && Array.isArray(t.metrics) && t.metrics.length > 0,
@@ -63,7 +72,7 @@ export function buildLocalDigestPreview(spec: DashboardSpec, model: Model): Norm
     "---",
     "_The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship._",
   ].join("\n");
-  const html = `<article class="executive-digest"><h1>${spec.title} — Executive Digest · Snapshot with integrity checksum</h1><p>${headline}</p><p class="digest-integrity-note">The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship.</p></article>`;
+  const html = `<article class="executive-digest"><h1>${escapeHtml(spec.title)} — Executive Digest · Snapshot with integrity checksum</h1><p>${escapeHtml(headline)}</p><p class="digest-integrity-note">The SHA-256 checksum verifies snapshot content integrity (detecting whether underlying query results or text changed since the snapshot was captured), not analytical correctness or authorship.</p></article>`;
   return {
     headline,
     briefFingerprint: null,
@@ -133,7 +142,7 @@ export function normalizeDigestPayload(
   const rawHtml = String(
     d.html ??
       raw?.html ??
-      `<article class="executive-digest"><h1>${spec.title} — Executive Digest · Snapshot with integrity checksum</h1><p>${headline}</p></article>`,
+      `<article class="executive-digest"><h1>${escapeHtml(spec.title)} — Executive Digest · Snapshot with integrity checksum</h1><p>${escapeHtml(headline)}</p></article>`,
   );
   const html = rawHtml.includes("verifies snapshot content integrity")
     ? rawHtml
@@ -575,40 +584,59 @@ export function normalizeOperationsSnapshot(
   };
 }
 
-export function OperationsAuditDialog({ onClose }: { onClose: () => void }) {
+export function OperationsAuditDialog({ sandboxMode = false, onClose }: { sandboxMode?: boolean; onClose: () => void }) {
   const [snapshot, setSnapshot] = useState<OperationsSnapshotView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [sandboxRestricted, setSandboxRestricted] = useState(sandboxMode);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError("");
-    Promise.all([
+    setSandboxRestricted(sandboxMode);
+    Promise.allSettled([
       fetch("/api/operations/metrics").then(readResponse),
       fetch("/api/operations/manifest").then(readResponse),
       fetch("/api/operations/audit?limit=25").then(readResponse),
-    ])
-      .then(([metrics, manifest, audit]) => {
-        if (!active) return;
-        setSnapshot(normalizeOperationsSnapshot(metrics, manifest, audit));
+    ]).then((results) => {
+      if (!active) return;
+      const [metricsRes, manifestRes, auditRes] = results;
+      const anyForbidden = results.some(
+        (r) => r.status === "rejected" && ((r.reason as { status?: number })?.status === 403 || /403|sandbox|admin/i.test(String(r.reason?.message ?? ""))),
+      );
+      const allRejected = results.every((r) => r.status === "rejected");
+      if (allRejected && !sandboxMode && !anyForbidden) {
+        const firstErr = (results[0] as PromiseRejectedResult).reason;
+        setError(firstErr?.message ?? "Could not load operations telemetry");
         setLoading(false);
-      })
-      .catch((e: any) => {
-        if (!active) return;
-        setError(e?.message ?? "Could not load operations telemetry");
-        setLoading(false);
-      });
+        return;
+      }
+      const metrics = metricsRes.status === "fulfilled" ? metricsRes.value : null;
+      const manifest = manifestRes.status === "fulfilled" ? manifestRes.value : null;
+      const audit = auditRes.status === "fulfilled" ? auditRes.value : null;
+      setSandboxRestricted(sandboxMode || anyForbidden);
+      setSnapshot(normalizeOperationsSnapshot(metrics, manifest, audit));
+      setLoading(false);
+    });
     return () => {
       active = false;
     };
-  }, []);
+  }, [sandboxMode]);
 
   return (
     <StudioDialog title="Operations, ROI & Audit Log" wide onClose={onClose}>
       <div className="commercial-drawer ops-audit-drawer">
         {loading && <p className="muted sm" role="status">Loading operations metrics, manifest, and audit trail…</p>}
         {error && <p className="sm" role="alert">{error}</p>}
+        {!loading && sandboxRestricted && (
+          <div className="sandbox-readonly-note" role="status">
+            <strong>Self-host for live workspace telemetry &amp; audit logs</strong>
+            <p>
+              Workspace-wide query counters and durable audit trails are restricted to administrators on self-hosted deployments (<code className="mono">docker compose up -d</code>). Suite release manifest shown below.
+            </p>
+          </div>
+        )}
 
         {snapshot && (
           <>

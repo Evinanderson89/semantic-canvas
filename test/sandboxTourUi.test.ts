@@ -181,6 +181,8 @@ describe("Guided 4-Step Sandbox Tour & Clean Preview Mode UI", () => {
       React.createElement(SandboxTourBar, {
         step: 4,
         hasDashboard: true,
+        theme: "light",
+        onToggleTheme: () => {},
         onSelectStep: () => {},
         onBack: () => {},
         onNext: () => {},
@@ -188,6 +190,8 @@ describe("Guided 4-Step Sandbox Tour & Clean Preview Mode UI", () => {
       }),
     );
     expect(step4Html).toContain("Unlock Full Sandbox →");
+    expect(step4Html).toContain('aria-label="Switch to dark appearance"');
+    expect(step4Html).toContain("◐");
   });
 
   it("renders Step 1 side-by-side raw Excel traps vs live DuckDB hygiene & duplicate join callout", async () => {
@@ -211,6 +215,7 @@ describe("Guided 4-Step Sandbox Tour & Clean Preview Mode UI", () => {
     expect(html).toContain("DATA ERROR CAUGHT · EXACT DUPLICATE LOOKUP ROW");
     expect(html).toContain("Caught 1 duplicate ID (STR-101) in Store Directory.Store ID");
     expect(html).toContain("33 clean orders · 5 unique stores · N:1 verified");
+    expect(html).toContain("$528.2k cumulative Mar–Aug Net Sales · $145.4k in latest month Aug 2026");
     expect(html).toContain("Clean Workbook &amp; Build Dashboard →");
   });
 
@@ -238,12 +243,14 @@ describe("Guided 4-Step Sandbox Tour & Clean Preview Mode UI", () => {
         filtersByTile: {},
         scopeWarnings: {},
         drills: {},
+        digestOverride: "9f8e7d6c5b4a3210fedcba98",
       }),
     );
     expect(posterHtml).toContain("Semantic Canvas · Broadside Infographic");
     expect(posterHtml).toContain("✓ 3 data fixes verified");
     expect(posterHtml).toContain("✓ Data hygiene &amp; join safety verified");
     expect(posterHtml).toContain("prevented $528,200 → $688,200 Net Sales double-count");
+    expect(posterHtml).toContain("sha256: 9f8e7d6c5b4a…");
   });
 
   it("renders clean Preview mode bar without noisy Unsaved/Not-saved labels, while preserving saved-dashboard & edit-mode contracts", () => {

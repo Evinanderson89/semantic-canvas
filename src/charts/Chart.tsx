@@ -28,7 +28,7 @@ const isPickValue = (value: unknown): value is PickValue => value === null || ty
  * covers the long tail immediately; any individual kind can later be replaced
  * with hand-built D3 primitives without the spec, compiler or canvas noticing.
  */
-export function Chart({ kind, columns, rows, measureColumns, temporalColumns, timeGrains, pickableColumns, explorationFocus, separateAxes = false, format, secondaryFormat, metricFormats, labels = {}, onPick, onStatus }: {
+export function Chart({ kind, columns, rows, measureColumns, temporalColumns, timeGrains, pickableColumns, explorationFocus, separateAxes = false, hasLag = false, format, secondaryFormat, metricFormats, labels = {}, onPick, onStatus }: {
   onStatus?: (error: string | null) => void;
   kind: ChartKind; columns: string[]; rows: unknown[][]; labels?: Record<string, string>;
   measureColumns?: string[];
@@ -40,6 +40,8 @@ export function Chart({ kind, columns, rows, measureColumns, temporalColumns, ti
   /** Kept by the tile while a query temporarily unmounts its chart. */
   explorationFocus?: { current: boolean };
   separateAxes?: boolean;
+  /** Whether the chart's newest displayed period is inside a reporting/settlement lag or partial window. */
+  hasLag?: boolean;
   format?: import("../format/format.ts").FormatSpec;
   /** A combo chart's bar and line are two different metrics by fixed
    *  position, each potentially needing its own number style (spend as
@@ -90,7 +92,7 @@ export function Chart({ kind, columns, rows, measureColumns, temporalColumns, ti
         (figure as HTMLElement).style.margin = "0";
         el.replaceChildren(figure);
       };
-      mount(render(kind, columns, data, box, format, secondaryFormat, labels, measureColumns, separateAxes, temporalColumns, metricFormats, timeGrains, metricOrder));
+      mount(renderChartFigure(kind, columns, data, box, format, secondaryFormat, labels, measureColumns, separateAxes, temporalColumns, metricFormats, timeGrains, metricOrder, hasLag));
       // Plot stacks a legend ABOVE the svg. Exploration also needs its own
       // row, so neither its trigger nor the legend covers chart content.
       // Measure both after mounting and reserve that space on the redraw.
@@ -111,8 +113,8 @@ export function Chart({ kind, columns, rows, measureColumns, temporalColumns, ti
         const spill = Math.round(fig.offsetHeight + controlsHeight - box.h);
         if (spill > 1) {
           if (box.h - spill < 60) throw new Error("Enlarge this chart to make room for its legend and exploration controls.");
-          mount(render(kind, columns, data,
-            { w: box.w, h: box.h - spill }, format, secondaryFormat, labels, measureColumns, separateAxes, temporalColumns, metricFormats, timeGrains, metricOrder));
+          mount(renderChartFigure(kind, columns, data,
+            { w: box.w, h: box.h - spill }, format, secondaryFormat, labels, measureColumns, separateAxes, temporalColumns, metricFormats, timeGrains, metricOrder, hasLag));
           attachPicker(el, pickColumn, data, kind, pick);
         }
       }
@@ -128,7 +130,7 @@ export function Chart({ kind, columns, rows, measureColumns, temporalColumns, ti
       msg.textContent = `Could not draw this as a ${kind}: ${e?.message ?? e}`;
       host.current.replaceChildren(msg);
     }
-  }, [kind, dataKey, separateAxes, box.w, box.h, JSON.stringify(measureColumns), JSON.stringify(temporalColumns), JSON.stringify(timeGrains), JSON.stringify(pickableColumns), JSON.stringify(format), JSON.stringify(secondaryFormat), JSON.stringify(metricFormats), JSON.stringify(labels), JSON.stringify(metricOrder), !!onPick]);
+  }, [kind, dataKey, separateAxes, hasLag, box.w, box.h, JSON.stringify(measureColumns), JSON.stringify(temporalColumns), JSON.stringify(timeGrains), JSON.stringify(pickableColumns), JSON.stringify(format), JSON.stringify(secondaryFormat), JSON.stringify(metricFormats), JSON.stringify(labels), JSON.stringify(metricOrder), !!onPick]);
 
   return <div ref={host} className="chart-host" tabIndex={-1} aria-label="Chart" style={{ width: "100%", height: "100%", position: "relative" }} />;
 }
@@ -247,10 +249,15 @@ export function preciseTickFormat(ticks: number[], base: NumberFormatter): (v: n
   // literal "%" after the raw value would print 0.1 as "0.1%" instead of
   // "10.0%", a fake hundred-fold error, not just a cosmetic miss.
   if (/%$/.test(sample)) return d3format(`,.${decimals}%`);
-  const prefix = sample.match(/^[^\d.−-]*/)?.[0] ?? "";
-  const suffix = sample.match(/[^\d.−-]*$/)?.[0] ?? "";
+  const cleanSample = sample.replace(/^[−-]/, "");
+  const prefix = cleanSample.match(/^[^\d.−-]*/)?.[0] ?? "";
+  const suffix = cleanSample.match(/[^\d.−-]*$/)?.[0] ?? "";
   const fmt = d3format(`,.${decimals}f`);
-  return (v: number) => `${prefix}${fmt(v)}${suffix}`;
+  return (v: number) => {
+    const formatted = fmt(Math.abs(v));
+    const sign = v < 0 && /[1-9]/.test(formatted) ? "-" : "";
+    return `${sign}${prefix}${formatted}${suffix}`;
+  };
 }
 
 /** Draws a real right-hand axis, in the secondary series' own units, onto
@@ -294,9 +301,9 @@ function addSecondaryAxis(fig: any, plan: DualAxisPlan, tick: (v: number) => str
  * Draws Broadside editorial annotations onto a rendered Plot figure:
  * - Horizontal dashed target benchmark line + amber pill (`f.targetValue`, `f.targetLabel`)
  * - Vertical dashed policy/event cutover rule + dark pill badge (`f.annotations`)
- * - Partial-period diagonal amber settlement-lag hatch over the final temporal interval on area charts
+ * - Optional settlement-lag hatch (`hasLag === true`) over the final temporal interval on `line`, `area`, `bar`, and `combo` charts
  */
-function addBroadsideMarks(
+export function addBroadsideMarks(
   fig: any,
   f: import("../format/format.ts").FormatSpec,
   data: any[],
@@ -307,9 +314,10 @@ function addBroadsideMarks(
   box: { w: number; h: number },
   marginLeft: number,
   marginRight: number,
+  hasLag = false,
 ) {
   if (typeof fig?.scale !== "function") return fig;
-  const xs = fig.scale("x");
+  const xs = (kind === "bar" ? fig.scale("fx") : null) ?? fig.scale("x");
   const ys = fig.scale("y");
   if (!xs || !ys || typeof xs.apply !== "function" || typeof ys.apply !== "function") return fig;
   const svg: SVGSVGElement | null = fig.tagName === "FIGURE" ? fig.querySelector(":scope > svg") : fig;
@@ -327,64 +335,125 @@ function addBroadsideMarks(
   layer.setAttribute("class", "broadside-annotations");
   layer.setAttribute("pointer-events", "none");
 
-  // 1. Partial-period diagonal settlement-lag hatch on temporal area charts
-  if (kind === "area" && temporalX) {
-    const valid = data
-      .filter((d) => d[x] instanceof Date && Number.isFinite(+d[x]) && typeof d[y] === "number" && Number.isFinite(d[y]))
-      .sort((a, b) => +a[x] - +b[x]);
-    if (valid.length >= 4) {
-      const prev = valid[valid.length - 2];
-      const last = valid[valid.length - 1];
-      const hx1 = xs.apply(prev[x]);
-      const hx2 = xs.apply(last[x]);
-      const hy1 = ys.apply(prev[y]);
-      const hy2 = ys.apply(last[y]);
-      const rawY0 = ys.apply(0);
-      const hy0 = Number.isFinite(rawY0) ? Math.min(yBottom, Math.max(yTop, rawY0)) : yBottom;
-      if (Number.isFinite(hx1) && Number.isFinite(hx2) && hx2 > hx1 + 6 && Number.isFinite(hy1) && Number.isFinite(hy2)) {
-        const patternId = `broadside-lag-hatch-${Math.round(box.w)}-${Math.round(box.h)}`;
-        let defs = svg.querySelector("defs");
-        if (!defs) {
-          defs = document.createElementNS(ns, "defs");
-          svg.insertBefore(defs, svg.firstChild);
-        }
-        if (!defs.querySelector(`#${patternId}`)) {
-          const pat = document.createElementNS(ns, "pattern");
-          pat.setAttribute("id", patternId);
-          pat.setAttribute("width", "8");
-          pat.setAttribute("height", "8");
-          pat.setAttribute("patternUnits", "userSpaceOnUse");
-          pat.setAttribute("patternTransform", "rotate(45)");
-          const bg = document.createElementNS(ns, "rect");
-          bg.setAttribute("width", "8");
-          bg.setAttribute("height", "8");
-          bg.setAttribute("fill", "#fef3c7");
-          bg.setAttribute("fill-opacity", "0.24");
-          const stripe = document.createElementNS(ns, "line");
-          stripe.setAttribute("x1", "0");
-          stripe.setAttribute("y1", "0");
-          stripe.setAttribute("x2", "0");
-          stripe.setAttribute("y2", "8");
-          stripe.setAttribute("stroke", "#d97706");
-          stripe.setAttribute("stroke-width", "1.6");
-          stripe.setAttribute("stroke-opacity", "0.48");
-          pat.append(bg, stripe);
-          defs.appendChild(pat);
-        }
+  const ensureHatchPattern = () => {
+    const patternId = `broadside-lag-hatch-${Math.round(box.w)}-${Math.round(box.h)}`;
+    let defs = svg.querySelector("defs");
+    if (!defs) {
+      defs = document.createElementNS(ns, "defs");
+      svg.insertBefore(defs, svg.firstChild);
+    }
+    if (!defs.querySelector(`#${patternId}`)) {
+      const pat = document.createElementNS(ns, "pattern");
+      pat.setAttribute("id", patternId);
+      pat.setAttribute("width", "8");
+      pat.setAttribute("height", "8");
+      pat.setAttribute("patternUnits", "userSpaceOnUse");
+      pat.setAttribute("patternTransform", "rotate(45)");
+      const bg = document.createElementNS(ns, "rect");
+      bg.setAttribute("width", "8");
+      bg.setAttribute("height", "8");
+      bg.setAttribute("fill", "#fef3c7");
+      bg.setAttribute("fill-opacity", "0.24");
+      const stripe = document.createElementNS(ns, "line");
+      stripe.setAttribute("x1", "0");
+      stripe.setAttribute("y1", "0");
+      stripe.setAttribute("x2", "0");
+      stripe.setAttribute("y2", "8");
+      stripe.setAttribute("stroke", "#d97706");
+      stripe.setAttribute("stroke-width", "1.6");
+      stripe.setAttribute("stroke-opacity", "0.48");
+      pat.append(bg, stripe);
+      defs.appendChild(pat);
+    }
+    return patternId;
+  };
 
-        const poly = document.createElementNS(ns, "polygon");
-        poly.setAttribute("class", "broadside-hatch-zone");
-        poly.setAttribute("points", `${hx1},${hy1} ${hx2},${hy2} ${hx2},${hy0} ${hx1},${hy0}`);
-        poly.setAttribute("fill", `url(#${patternId})`);
+  // 1. Settlement-lag hatch on temporal line, area, bar, and combo charts ONLY when hasLag is true
+  if (hasLag && temporalX && ["line", "area", "bar", "combo"].includes(kind)) {
+    const rawY0 = ys.apply(0);
+    const hy0 = Number.isFinite(rawY0) ? Math.min(yBottom, Math.max(yTop, rawY0)) : yBottom;
+
+    if (kind === "line" || kind === "area") {
+      const byTime = new Map<number, { dt: Date; val: number }>();
+      for (const d of data) {
+        if (d[x] instanceof Date && Number.isFinite(+d[x]) && typeof d[y] === "number" && Number.isFinite(d[y])) {
+          const prev = byTime.get(+d[x]);
+          if (!prev || d[y] > prev.val) byTime.set(+d[x], { dt: d[x], val: d[y] });
+        }
+      }
+      const valid = [...byTime.values()].sort((a, b) => +a.dt - +b.dt);
+      if (valid.length >= 2) {
+        const prev = valid[valid.length - 2];
+        const last = valid[valid.length - 1];
+        const hx1 = xs.apply(prev.dt);
+        const hx2 = xs.apply(last.dt);
+        const hy1 = ys.apply(prev.val);
+        const hy2 = ys.apply(last.val);
+        if (Number.isFinite(hx1) && Number.isFinite(hx2) && hx2 > hx1 + 4 && Number.isFinite(hy1) && Number.isFinite(hy2)) {
+          const patternId = ensureHatchPattern();
+          const poly = document.createElementNS(ns, "polygon");
+          poly.setAttribute("class", "broadside-hatch-zone");
+          poly.setAttribute("points", `${hx1},${hy1} ${hx2},${hy2} ${hx2},${hy0} ${hx1},${hy0}`);
+          poly.setAttribute("fill", `url(#${patternId})`);
+          const title = document.createElementNS(ns, "title");
+          title.textContent = "Late settlement hatched";
+          poly.appendChild(title);
+          layer.appendChild(poly);
+
+          const sep = document.createElementNS(ns, "line");
+          sep.setAttribute("x1", String(hx1));
+          sep.setAttribute("y1", String(yTop));
+          sep.setAttribute("x2", String(hx1));
+          sep.setAttribute("y2", String(hy0));
+          sep.setAttribute("stroke", "#d97706");
+          sep.setAttribute("stroke-width", "1.1");
+          sep.setAttribute("stroke-dasharray", "3,3");
+          sep.setAttribute("stroke-opacity", "0.75");
+          layer.appendChild(sep);
+
+          const tag = document.createElementNS(ns, "text");
+          tag.setAttribute("x", String(Math.min(xRight - 4, (hx1 + hx2) / 2)));
+          tag.setAttribute("y", String(Math.max(10, yTop + 9)));
+          tag.setAttribute("text-anchor", "middle");
+          tag.setAttribute("fill", "#b45309");
+          tag.setAttribute("font-family", "JetBrains Mono, ui-monospace, monospace");
+          tag.setAttribute("font-size", "8.5");
+          tag.setAttribute("font-weight", "700");
+          tag.setAttribute("letter-spacing", "0.05em");
+          tag.textContent = "LAG HATCHED";
+          layer.appendChild(tag);
+        }
+      }
+    } else if (Array.isArray(xs.domain) && xs.domain.length >= 1) {
+      const lastKey = xs.domain[xs.domain.length - 1];
+      const bx = xs.apply(lastKey);
+      const bw = typeof xs.bandwidth === "number" && xs.bandwidth > 0 ? xs.bandwidth : Math.max(12, (xRight - xLeft) / Math.max(2, xs.domain.length));
+      const matchingVals = data
+        .filter((d) => {
+          const k = d[x] instanceof Date ? d[x].toISOString() : d[x];
+          return k === lastKey && typeof d[y] === "number" && Number.isFinite(d[y]);
+        })
+        .map((d) => d[y] as number);
+      const rawLastVal = matchingVals.length ? Math.max(...matchingVals) : null;
+      const hyLast = rawLastVal !== null && Number.isFinite(ys.apply(rawLastVal)) ? ys.apply(rawLastVal) : yTop + (hy0 - yTop) * 0.35;
+      if (Number.isFinite(bx) && bw > 2) {
+        const patternId = ensureHatchPattern();
+        const rect = document.createElementNS(ns, "rect");
+        rect.setAttribute("class", "broadside-hatch-zone");
+        rect.setAttribute("x", String(bx));
+        rect.setAttribute("y", String(Math.min(hyLast, hy0)));
+        rect.setAttribute("width", String(bw));
+        rect.setAttribute("height", String(Math.max(4, Math.abs(hy0 - hyLast))));
+        rect.setAttribute("fill", `url(#${patternId})`);
         const title = document.createElementNS(ns, "title");
         title.textContent = "Late settlement hatched";
-        poly.appendChild(title);
-        layer.appendChild(poly);
+        rect.appendChild(title);
+        layer.appendChild(rect);
 
         const sep = document.createElementNS(ns, "line");
-        sep.setAttribute("x1", String(hx1));
+        sep.setAttribute("x1", String(bx));
         sep.setAttribute("y1", String(yTop));
-        sep.setAttribute("x2", String(hx1));
+        sep.setAttribute("x2", String(bx));
         sep.setAttribute("y2", String(hy0));
         sep.setAttribute("stroke", "#d97706");
         sep.setAttribute("stroke-width", "1.1");
@@ -393,7 +462,7 @@ function addBroadsideMarks(
         layer.appendChild(sep);
 
         const tag = document.createElementNS(ns, "text");
-        tag.setAttribute("x", String(Math.min(xRight - 4, (hx1 + hx2) / 2)));
+        tag.setAttribute("x", String(Math.min(xRight - 4, bx + bw / 2)));
         tag.setAttribute("y", String(Math.max(10, yTop + 9)));
         tag.setAttribute("text-anchor", "middle");
         tag.setAttribute("fill", "#b45309");
@@ -535,9 +604,9 @@ function chartAxis(kind: ChartKind, dims: string[], data: Record<string, unknown
     ? dims.find(d => temporalColumns ? temporalColumns.includes(d) : temporalColumn(data, d)) : undefined) ?? dims[0] ?? null;
 }
 
-function render(kind: ChartKind, columns: string[], data: any[], box: { w: number; h: number },
+export function renderChartFigure(kind: ChartKind, columns: string[], data: any[], box: { w: number; h: number },
                 fmt?: import("../format/format.ts").FormatSpec,
-                secondaryFmt?: import("../format/format.ts").FormatSpec, labels: Record<string, string> = {}, measureColumns?: string[], separateAxes = false, temporalColumns?: string[], metricFormats?: Record<string, import("../format/format.ts").FormatSpec>, timeGrains?: Record<string, TimeGrain>, metricOrder: string[] = []) {
+                secondaryFmt?: import("../format/format.ts").FormatSpec, labels: Record<string, string> = {}, measureColumns?: string[], separateAxes = false, temporalColumns?: string[], metricFormats?: Record<string, import("../format/format.ts").FormatSpec>, timeGrains?: Record<string, TimeGrain>, metricOrder: string[] = [], hasLag = false) {
   const f = fmt ?? DEFAULT_FORMAT;
   const palette = PALETTES[f.palette] ?? PALETTES.default;
   // Convention from the compiler: dimensions are selected first, metrics last.
@@ -637,7 +706,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
           marks: [...(fitted ? [] : [Plot.ruleY([0])]),
             Plot.line(tidy, { x: "x", y: "value", stroke: "series", curve: "monotone-x", strokeWidth: 2 }),
             Plot.dot(tidy, { x: "x", y: "value", stroke: "series", fill: "series", r: 2.5, title: pointTitle })] }), fittedTick);
-        return addBroadsideMarks(plot, f, data, x, y, temporalX, kind, box, marginLeft, marginRight);
+        return addBroadsideMarks(plot, f, data, x, y, temporalX, kind, box, marginLeft, marginRight, hasLag);
       }
       // Secondary-axis series are remapped into the primary axis's numeric
       // range so one Plot y-scale can position both, then a real axis in
@@ -657,7 +726,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
           Plot.dot(tidyDual, { x: "x", y: "value", stroke: "series", r: 1.6 })] });
       const withCaption = scaleCaption(fig, primaryTick, dualCaption(dual));
       const withAxis = f.showY ? addSecondaryAxis(withCaption, dual, dualTick(dual.secondary), dualMarginRight, box.w) : withCaption;
-      return addBroadsideMarks(withAxis, f, data, x, y, temporalX, kind, box, marginLeft, dualMarginRight);
+      return addBroadsideMarks(withAxis, f, data, x, y, temporalX, kind, box, marginLeft, dualMarginRight, hasLag);
     }
     case "combo": {
       // Fixed roles, not magnitude-sorted like the plain multi-series line
@@ -712,7 +781,8 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
           Plot.line(lineRows, { x: "x", y: "value", stroke: () => lineMeasure, strokeWidth: 2, curve: "monotone-x" }),
           Plot.dot(lineRows, { x: "x", y: "value", fill: () => lineMeasure, r: 2 }),
         ] });
-      return dual && f.showY ? addSecondaryAxis(fig, dual, dualTick(dual.secondary), marginRight, box.w) : fig;
+      const comboWithAxis = dual && f.showY ? addSecondaryAxis(fig, dual, dualTick(dual.secondary), marginRight, box.w) : fig;
+      return addBroadsideMarks(comboWithAxis, f, barRows.map((r) => ({ [x]: r.x, [barMeasure]: r.value })), x, barMeasure, temporalX, kind, box, marginLeft, marginRight, hasLag);
     }
     case "area": {
       const plot = Plot.plot({ ...common,
@@ -725,7 +795,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
           Plot.dot(definedRows(data, y), { x, y, fill: metricColor(y), stroke: "var(--surface)", r: 2.8 }),
           Plot.ruleY([0]),
         ] });
-      return addBroadsideMarks(plot, f, data, x, y, temporalX, kind, box, marginLeft, marginRight);
+      return addBroadsideMarks(plot, f, data, x, y, temporalX, kind, box, marginLeft, marginRight, hasLag);
     }
     case "areaStacked": {
       // A missing component is an unknown total, not an empty/zero layer.
@@ -745,26 +815,31 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       const rows = data.map(d => ({ ...d, [x]: key(d[x]) }));
       if (measures.length > 1 && dims.length <= 1) {
         const grouped = rows.flatMap(d => measures.map(m => ({ bucket: d[x], series: m, value: d[m] })));
-        return Plot.plot({ ...common,
+        const plot = Plot.plot({ ...common,
           x: { type: "band", axis: null },
           fx: { label: f.xTitle, domain: [...new Set(rows.map(d => d[x]))], ...bandDates([...new Set(rows.map(d => d[x]))]), axis: f.showX ? "bottom" : null },
           marginBottom: f.showX ? 58 : 12,
           color: { ...metricColors, legend },
           marks: [Plot.barY(grouped, { x: "series", y: "value", fx: "bucket", fill: "series" }), Plot.ruleY([0])] });
+        return addBroadsideMarks(plot, f, rows, x, y, temporalX, kind, box, marginLeft, marginRight, hasLag);
       }
       const series = dims[1];
-      if (series) return Plot.plot({ ...common,
-        x: { type: "band", axis: null },
-        fx: { type: "band", domain: [...new Set(rows.map(d => d[x]))], label: f.xTitle, axis: f.showX ? "bottom" : null,
-          ...bandDates([...new Set(rows.map(d => d[x]))]) },
-        color: { ...common.color, legend },
-        marks: [Plot.barY(rows, { x: series, fx: x, y, fill: series }), Plot.ruleY([0])] });
-      return Plot.plot({ ...common,
+      if (series) {
+        const plot = Plot.plot({ ...common,
+          x: { type: "band", axis: null },
+          fx: { type: "band", domain: [...new Set(rows.map(d => d[x]))], label: f.xTitle, axis: f.showX ? "bottom" : null,
+            ...bandDates([...new Set(rows.map(d => d[x]))]) },
+          color: { ...common.color, legend },
+          marks: [Plot.barY(rows, { x: series, fx: x, y, fill: series }), Plot.ruleY([0])] });
+        return addBroadsideMarks(plot, f, rows, x, y, temporalX, kind, box, marginLeft, marginRight, hasLag);
+      }
+      const plot = Plot.plot({ ...common,
         x: { type: "band", label: f.xTitle, axis: f.showX ? "bottom" : null,
           domain: [...new Set(rows.map(d => d[x]))], ...bandDates([...new Set(rows.map(d => d[x]))]) },
         marginBottom: f.showX && temporalX ? 58 : common.marginBottom,
         color: { ...common.color, legend: legend && !!series },
         marks: [Plot.barY(rows, { x, y, fill: series ?? metricColor(y), fillOpacity: 0.75 }), Plot.ruleY([0])] });
+      return addBroadsideMarks(plot, f, rows, x, y, temporalX, kind, box, marginLeft, marginRight, hasLag);
     }
     case "waterfall": {
       // Bridges from 0 through a sequence of named, signed deltas to a
@@ -790,9 +865,11 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       // format any Date labels instead of falling through to their raw
       // String() form.
       const label = dateLabeler(data.map((d: any) => d[x]));
+      const categoryLabel = (raw: unknown) =>
+        raw == null || (typeof raw === "string" && raw.trim() === "") ? "Unassigned" : label(raw);
       const named: { label: string; value: number }[] = dims.length === 0 && measures.length > 1
         ? measures.map((m) => ({ label: m, value: componentValue(data[0]?.[m]) }))
-        : data.map((d: any) => ({ label: label(d[x]), value: componentValue(d[y]) }));
+        : data.map((d: any) => ({ label: categoryLabel(d[x]), value: componentValue(d[y]) }));
       let running = 0;
       const bars = named.map((r, index) => {
         const before = running;
@@ -806,6 +883,7 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       const barColor = (k: string) => k === "pos" ? "var(--pos)" : k === "neg" ? "var(--neg)" : "var(--ink-2)";
       const bridges = bars.slice(0, -1).map((b, i) => ({ y: b.after, x1: b.key, x2: bars[i + 1].key }));
       const plot = Plot.plot({ ...common,
+        y: { ...common.y, ...(bars.some((b) => b.value < 0) ? { insetBottom: 18 } : {}) },
         x: { label: f.xTitle, axis: f.showX ? "bottom" : null, domain: bars.map((b) => b.key), tickFormat: (key: string) => bars.find(b => b.key === key)?.label ?? key,
              tickRotate: labelsAreLong(bars, "label") ? -35 : 0 },
         marks: [
@@ -813,12 +891,12 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
           Plot.ruleY(bridges, { x1: "x1", x2: "x2", y: "y", stroke: "var(--line-2)", strokeDasharray: "2,2" }),
           Plot.barY(bars, { x: "key", y1: "lo", y2: "hi", fill: (b: any) => barColor(b.kind), fillOpacity: 0.85 }),
           // dy is a constant pixel offset in Plot's types, not a per-datum
-          // channel -- two marks (label above the bar, label below it)
-          // instead of one text mark trying to flip sides by value.
-          Plot.text(bars.filter((b) => b.kind !== "neg"), { x: "key", y: "hi",
+          // channel -- two marks (label above the bar, label below its bottom
+          // lo edge) so y = 0 never strikes through negative waterfall labels.
+          Plot.text(bars.filter((b) => b.value >= 0), { x: "key", y: "hi",
                     text: (b: any) => tick(b.value), dy: -6, fontSize: 10, fill: "var(--ink-2)" }),
-          Plot.text(bars.filter((b) => b.kind === "neg"), { x: "key", y: "hi",
-                    text: (b: any) => tick(b.value), dy: 14, fontSize: 10, fill: "var(--ink-2)" }),
+          Plot.text(bars.filter((b) => b.value < 0), { x: "key", y: "lo",
+                    text: (b: any) => tick(b.value), dy: 12, fontSize: 10, fill: "var(--ink-2)" }),
         ] });
       (plot as any).__sourceValues = new Map(data.map((d, i) => [`component:${i}`, d[x]]));
       return plot;
@@ -906,7 +984,11 @@ function render(kind: ChartKind, columns: string[], data: any[], box: { w: numbe
       });
     }
     case "donut": {
-      const arcs = donutSegments(data.map(d => d[y])).map((segment, i) => ({ ...segment, label: data[i][x] }));
+      const catLabel = dateLabeler(data.map((d: any) => d[x]));
+      const arcs = donutSegments(data.map(d => d[y])).map((segment, i) => ({
+        ...segment,
+        label: data[i][x] == null || (typeof data[i][x] === "string" && data[i][x].trim() === "") ? "Unassigned" : catLabel(data[i][x]),
+      }));
       const size = Math.min(box.w, box.h) - 16;
       const R = size / 2, r = R * 0.58;
       const ns = "http://www.w3.org/2000/svg";

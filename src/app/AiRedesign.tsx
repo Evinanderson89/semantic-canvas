@@ -228,6 +228,7 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, sandb
   const [goal, setGoal] = useState("Make this an executive dashboard: show what matters, explain the trend, and make the next question obvious.");
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null), [explanation, setExplanation] = useState("");
+  const [proposalSource, setProposalSource] = useState<"ai" | "deterministic" | null>(null);
   const [view, setView] = useState<"before" | "after">("after"), [fullSize, setFullSize] = useState(false);
   const [checkAttempt, setCheckAttempt] = useState(0);
   const [checks, setChecks] = useState<Record<string, Readiness>>({});
@@ -263,6 +264,7 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, sandb
       const next = validateRedesign(spec, canvas, result.proposal, model, activeTabId);
       const research = Array.isArray(result.research) ? (result.research as ResearchLedgerQuery[]) : undefined;
       const trace = Array.isArray(result.trace) ? (result.trace as ResearchTraceStep[]) : undefined;
+      setProposalSource("ai");
       setPreview({ ...next, proposal: result.proposal, before: spec, expected: fingerprint(spec, canvas), context: snapshot, explanation: result.text || "",
         research, trace,
         // Recalculated here from the documents and the review's query ledger, so the warning does not depend on the server reporting it.
@@ -286,6 +288,7 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, sandb
       if (controller.signal.aborted || latest.current !== snapshot) return;
       const built = buildDeterministicProposal(spec, canvas, suggested, model, activeTabId);
       const next = validateRedesign(spec, canvas, built.proposal, model, activeTabId);
+      setProposalSource("deterministic");
       setPreview({
         ...next,
         proposal: built.proposal,
@@ -321,7 +324,7 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, sandb
   return <StudioDialog title="Reimagine this dashboard" onClose={onClose} className="ai-redesign-dialog">
     <div className="ai-redesign-content">
       <section className="ai-redesign-brief">
-        <div className="eyebrow">Powered by AI</div>
+        <div className="eyebrow">{available ? "Powered by AI" : "Deterministic Composer"}</div>
         <h2>See what this could become.</h2>
         <p>A clearer story, better chart choices, and useful supporting evidence—proposed together as one redesign.</p>
         <label htmlFor="redesign-goal">What should the reader understand or decide?</label>
@@ -344,14 +347,14 @@ export function AiRedesign({ spec, canvas, model, available, canConfigure, sandb
           Generate deterministic draft from prompt
         </button>
         {busy && <div role="status" className="ai-redesign-busy"><p>Reviewing the canvas and governed metrics, then preparing changes you can inspect.</p><AgenticResearchStepper /><button className="link" onClick={() => { request.current?.abort(); setBusy(false); }}>Cancel generation</button></div>}
-        {error && <div><p className="err" role="alert">{error}</p>{canConfigure && <button className="review-action" onClick={onConfigure}>Check AI connection</button>}</div>}
+        {error && <div><p className="err" role="alert">{error}</p>{canConfigure && !sandboxMode && <button className="review-action" onClick={onConfigure}>Check AI connection</button>}</div>}
         {explanation && <div className="ai-redesign-explanation">{renderMarkdown(explanation)}</div>}
         {preview && <div className="ai-redesign-explanation"><h3>{preview.proposal.title}</h3>{!stale && impact && <RedesignImpact impact={impact} />}{!!preview.rationaleWarnings.length && <div className="rationale-warnings" role="note" aria-label="Rationale checks">
           <strong>Check this rationale before relying on it</strong>
           <ul>{preview.rationaleWarnings.map(issue => <li key={issue.id}>{issue.message}</li>)}</ul>
-          <small>Calculated from your dashboard and this review’s queries. The rationale below is shown as the AI wrote it; the proposed charts are checked separately.</small>
-        </div>}<details open={!!preview.rationaleWarnings.length || undefined}><summary>AI design rationale</summary><p>{preview.proposal.reason}</p>{renderMarkdown(preview.explanation)}</details><VerifiedResearchLedger research={preview.research} trace={preview.trace} rationaleWarnings={preview.rationaleWarnings} /></div>}
-        {!preview && !explanation && <div className="ai-redesign-imagine"><h3>More than moving boxes</h3><p>Turn an unhelpful breakdown into a trend. Put related evidence together. Bring the key numbers into focus.</p><small>The AI will propose changes based on your actual canvas and available metrics.</small></div>}
+          <small>Calculated from your dashboard and this review’s queries. The rationale below is shown as written; the proposed charts are checked separately.</small>
+        </div>}<details open={!!preview.rationaleWarnings.length || undefined}><summary>{available && proposalSource !== "deterministic" ? "AI design rationale" : "Composition rationale"}</summary><p>{preview.proposal.reason}</p>{renderMarkdown(preview.explanation)}</details><VerifiedResearchLedger research={preview.research} trace={preview.trace} rationaleWarnings={preview.rationaleWarnings} /></div>}
+        {!preview && !explanation && <div className="ai-redesign-imagine"><h3>More than moving boxes</h3><p>Turn an unhelpful breakdown into a trend. Put related evidence together. Bring the key numbers into focus.</p><small>{available ? "The AI will propose changes based on your actual canvas and available metrics." : "Composes headline KPIs, trends, and breakdowns directly from your governed semantic model — no API key required."}</small></div>}
       </section>
       <section className="ai-redesign-preview" aria-label="Dashboard redesign preview">
         <div className="ai-redesign-preview-bar"><div role="group" aria-label="Compare dashboard versions"><button aria-pressed={view === "before" || !preview} onClick={() => setView("before")}>Before</button><button disabled={!preview || stale} aria-pressed={view === "after" && !!preview && !stale} onClick={() => { if (view !== "after") { setChecks({}); setAcceptExistingIssues(false); setView("after"); } }}>Proposed dashboard</button></div><button onClick={() => setFullSize(v => !v)}>{fullSize ? "Fit preview" : "Actual size"}</button></div>

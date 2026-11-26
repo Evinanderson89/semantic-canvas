@@ -99,6 +99,12 @@ export function SpreadsheetJoinsSection({
           const itemKey = `${j.leftTable}.${j.leftColumn}->${j.rightTable}.${j.rightColumn}`;
           const matchLabel = `${formatSpreadsheetMatchRate(j.matchRate)} matched`;
 
+          const orphanTotal = (j as SpreadsheetDetectedJoin & { orphanLeftDollarTotal?: number; orphanMetricLabel?: string }).orphanLeftDollarTotal;
+          const orphanMetricLabel = (j as SpreadsheetDetectedJoin & { orphanLeftDollarTotal?: number; orphanMetricLabel?: string }).orphanMetricLabel;
+          const orphanIsCurrency = orphanMetricLabel
+            ? isCurrencyMetricHint(orphanMetricLabel, orphanMetricLabel, sheets, j.leftTable)
+            : true;
+
           if (j.rightKeyUnique !== false) {
             return (
               <div key={itemKey} className="sheet-join-entry clean">
@@ -120,6 +126,13 @@ export function SpreadsheetJoinsSection({
                     {matchLabel} · ✓ Unique key (N:1 verified)
                   </span>
                 </label>
+                {j.include && j.unmatchedLeftRows && j.unmatchedLeftRows > 0 && typeof orphanTotal === "number" && orphanTotal > 0 ? (
+                  <p className="sheet-join-orphan-warn" role="status">
+                    ⚠️ {formatFanoutNumber(orphanTotal, orphanIsCurrency)} of {orphanMetricLabel || "total"} across{" "}
+                    {j.unmatchedLeftRows.toLocaleString("en-US")} unmatched {j.leftTable} row{j.unmatchedLeftRows === 1 ? "" : "s"} has no matching{" "}
+                    {j.rightTable}.{j.rightColumn} and will group as <strong>Unassigned</strong>.
+                  </p>
+                ) : null}
               </div>
             );
           }
@@ -258,7 +271,10 @@ export function SpreadsheetJoinsSection({
   );
 }
 
-export async function quickImportSampleWorkbook(id: SampleWorkbookId): Promise<{
+export async function quickImportSampleWorkbook(
+  id: SampleWorkbookId,
+  opts?: { joinsOverride?: SpreadsheetDetectedJoin[]; customSourceId?: string },
+): Promise<{
   sourceId: string;
   label: string;
   tableName: string;
@@ -270,6 +286,21 @@ export async function quickImportSampleWorkbook(id: SampleWorkbookId): Promise<{
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ fileName: built.fileName, format: built.format, content: built.content }),
   }).then(readResponse)) as SpreadsheetPreview;
+  const rawJoins = opts?.joinsOverride && opts.joinsOverride.length > 0
+    ? opts.joinsOverride
+    : (preview.detectedJoins ?? []);
+  const preparedJoins = rawJoins.map((j) => {
+    if (j.rightKeyUnique === false) {
+      const resMode = effectiveJoinResolution(j);
+      return {
+        ...j,
+        include: resMode !== "exclude",
+        resolution: resMode,
+        cardinality: resMode === "one_to_many" ? ("one_to_many" as const) : ("many_to_one" as const),
+      };
+    }
+    return j;
+  });
   const res = await fetch("/api/modeler/spreadsheet/import", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -277,13 +308,13 @@ export async function quickImportSampleWorkbook(id: SampleWorkbookId): Promise<{
       fileName: built.fileName,
       format: built.format,
       content: built.content,
-      sourceId: built.meta.preferredSourceId,
+      sourceId: opts?.customSourceId ?? built.meta.preferredSourceId,
       label: built.meta.title,
       grain: preview.suggestedGrain,
       timeColumn: preview.suggestedTimeColumn ?? null,
       reportingLag: built.meta.defaultLag,
       choices: preview.columns.map((c) => ({ name: c.name, role: c.role, label: c.label })),
-      joins: preview.detectedJoins ?? [],
+      joins: preparedJoins,
     }),
   }).then(readResponse);
   return {
@@ -334,15 +365,20 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 
 export function SpreadsheetImport({
   initialSample = null,
+  initialFile = null,
+  sandboxMode = false,
   onClose,
   onImported,
 }: {
   initialSample?: SampleWorkbookId | null;
+  initialFile?: File | null;
+  sandboxMode?: boolean;
   onClose: () => void;
   onImported: (result: { sourceId: string; label: string; tableName: string; metrics: string[] }) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const autoLoadedSample = useRef<SampleWorkbookId | null>(null);
+  const autoLoadedFile = useRef<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState<"preview" | "import" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -370,10 +406,13 @@ export function SpreadsheetImport({
         headers: { "content-type": "application/json" },
         body: JSON.stringify(next),
       }).then(readResponse)) as SpreadsheetPreview;
+      const primaryIdx = data.sheets && data.sheets.length > 0
+        ? Math.max(0, data.sheets.findIndex((s) => s.tableName === data.tableName))
+        : 0;
       setPayload(next);
       setPreview(data);
       setActiveSample(sampleMeta);
-      setActiveSheetIdx(0);
+      setActiveSheetIdx(primaryIdx);
       setJoins(data.detectedJoins ?? []);
       setLabel(sampleMeta?.title ?? data.label);
       setGrain(data.suggestedGrain);
@@ -459,6 +498,12 @@ export function SpreadsheetImport({
     void loadSampleWorkbook(initialSample);
   }, [initialSample]);
 
+  useEffect(() => {
+    if (!initialFile || autoLoadedFile.current === initialFile) return;
+    autoLoadedFile.current = initialFile;
+    void handleFile(initialFile);
+  }, [initialFile]);
+
   const handleImport = async () => {
     if (!payload || !preview || busy) return;
     setBusy("import");
@@ -522,7 +567,7 @@ export function SpreadsheetImport({
   const shownSheet = sheets ? sheets[Math.min(activeSheetIdx, sheets.length - 1)] : null;
   const shownColumns = shownSheet ? shownSheet.columns : (preview?.columns ?? []);
   const shownRows = shownSheet ? shownSheet.previewRows : (preview?.previewRows ?? []);
-  const isPrimarySheet = !sheets || activeSheetIdx === 0;
+  const isPrimarySheet = !sheets || (shownSheet ? shownSheet.tableName === preview?.tableName : activeSheetIdx === 0);
   const includedJoinCount = joins.filter((j) => j.include).length;
   const dateCols = preview?.columns.filter((c) => c.sqlType === "DATE") ?? [];
   const metricCount = preview
@@ -562,7 +607,9 @@ export function SpreadsheetImport({
             >
               <h3>Drop your Excel (.xlsx) or CSV sheet here</h3>
               <p>
-                No SQL, YAML, or database setup required. Title rows, Total double-counts, formula errors, wide month columns, and multi-tab joins are cleaned locally in DuckDB.
+                {sandboxMode
+                  ? "No SQL, YAML, or database setup required. Processed in an isolated, ephemeral server DuckDB session scoped to your browser—invisible to other sandbox visitors and automatically cleaned up."
+                  : "No SQL, YAML, or database setup required. Title rows, Total double-counts, formula errors, wide month columns, and multi-tab joins are cleaned in your workspace DuckDB."}
               </p>
               <div className="sheet-dropzone-actions" onClick={(e) => e.stopPropagation()}>
                 <button type="button" className="primary small" disabled={busy !== null} onClick={() => inputRef.current?.click()}>
@@ -691,7 +738,9 @@ export function SpreadsheetImport({
                   >
                     <span>{sh.sheetName}</span>
                     <span className="muted sm">({sh.rowCount.toLocaleString()})</span>
-                    {idx === 0 && <span className="sheet-tab-badge">Primary</span>}
+                    {(preview?.tableName ? sh.tableName === preview.tableName : idx === 0) && (
+                      <span className="sheet-tab-badge">Primary</span>
+                    )}
                   </button>
                 ))}
               </div>
@@ -817,7 +866,7 @@ export function SpreadsheetImport({
                 Ready to govern <b>{metricCount + 1} metrics</b>
                 {sheets && sheets.length > 1 ? ` across ${sheets.length} sheets` : ""}
                 {includedJoinCount > 0 ? ` (${includedJoinCount} auto-join${includedJoinCount === 1 ? "" : "s"})` : ""}
-                {" "}· Stored locally in DuckDB
+                {" "}· {sandboxMode ? "Isolated to your temporary sandbox session" : "Stored in your workspace DuckDB"}
               </span>
               <div className="story-actions">
                 <button type="button" className="link" disabled={busy !== null} onClick={onClose}>

@@ -1,13 +1,13 @@
 export const RELEASE_MANIFEST = {
   product: "semantic-canvas",
-  version: "0.1.0",
+  version: "0.3.6",
   libraryFormatVersion: 2,
   connectedOverlayVersion: 1,
   gatewayPolicyVersion: 1,
   mcpProtocolVersion: "2025-03-26",
   scimSchemaVersion: "2.0",
   supportedAdapters: ["duckglue", "dbt", "snowflake-semantic", "cube"] as const,
-  supportedConnectors: ["duckdb", "duckdb-db", "snowflake"] as const,
+  supportedConnectors: ["duckdb", "duckdb-db", "postgres", "bigquery", "snowflake"] as const,
   supportedAiProviders: ["anthropic", "openai", "gemini", "openai-compatible"] as const,
   compatibility: {
     gatewayMinVersion: "0.1.0",

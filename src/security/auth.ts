@@ -1,10 +1,12 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { Express, Request, Response, NextFunction } from "express";
 import * as oidc from "openid-client";
 import YAML from "yaml";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
+import { createPersistentSessionStore, type PersistentSessionStore } from "../store/sessionStore.ts";
 
 const bindingSchema = z.object({ subject: z.string().min(1).optional(), group: z.string().min(1).optional(),
   role: z.enum(["viewer", "editor", "admin"]), principal: z.string().min(1), sources: z.array(z.string().min(1)).min(1),
@@ -25,9 +27,16 @@ export interface ForwardedAuth {
   cookie?: string; authorization?: string; csrf: string; host: string; origin: string; expires: number;
   gatewayPolicy?: { body: string; signature: string };
 }
+export interface ScimAccountView {
+  id: string;
+  userName: string;
+  externalId?: string;
+  active: boolean;
+  groups: string[];
+}
 interface Session { identity: Identity; csrf: string; expires: number; forwarded?: ForwardedAuth;
   /** Team mode only, held server-side: lets Canvas ask the provider whether this account still has access. */
-  refreshToken?: string; nextCheck?: number; checking?: Promise<boolean>; claims?: Record<string, unknown> }
+  refreshToken?: string; encryptedRefreshToken?: string; nextCheck?: number; checking?: Promise<boolean>; claims?: Record<string, unknown> }
 const identityClaims = new WeakMap<Identity, Record<string, unknown>>();
 interface LoginAttempt { verifier: string; state: string; nonce: string; expires: number }
 export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: string; portalUrl?: string; publicUrl?: string; issuer?: string; clientId?: string; clientSecret?: string;
@@ -35,12 +44,90 @@ export interface AuthConfig { mode: "local" | "team" | "gateway"; jwksUri?: stri
   clientAuth?: "client_secret_post" | "client_secret_basic"; scopes: string; sessionSeconds: number;
   /** Seconds between provider re-checks of an open team session; 0 disables. */
   recheckSeconds?: number; access?: AccessConfig;
+  /** Optional secret for AES-256-GCM persistent team sessions (SC_SESSION_SECRET). */
+  sessionSecret?: string;
+  /** Optional file path for persistent team sessions (e.g. SC_DATA_DIR/sessions.json). */
+  storagePath?: string;
   /** Shared with the gateway's control API; verifies the data policy it signs onto each request (gateway-platform/docs/policy.md). Absent: policies are not read. */
   policySecret?: string;
   /** This app's slug at the gateway (the first label of its public host, `semantic-canvas` at semantic-canvas.apps.example.com); a data policy signed for another app is not ours. */
   appSlug?: string }
 /** A row-level rule the gateway delivered for this request. */
 export interface GatewayPolicyRule { field: string; mode: "only" | "not"; values: string[] }
+
+function isPrivateIpv4Octets(a: number, b: number): boolean {
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function isPrivateOrInternalHost(rawHostname: string): boolean {
+  const host = rawHostname.replace(/^\[|\]$/g, "").trim().toLowerCase();
+  if (!host) return true;
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "ip6-localhost" ||
+    host === "metadata.google.internal" ||
+    host.endsWith(".internal") ||
+    host === "::" ||
+    host === "::1"
+  ) {
+    return true;
+  }
+  if (host.startsWith("::ffff:")) {
+    const suffix = host.slice(7);
+    const dotted = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(suffix);
+    if (dotted) return isPrivateIpv4Octets(Number(dotted[1]), Number(dotted[2]));
+    const hexPair = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(suffix);
+    if (hexPair) {
+      const hi = parseInt(hexPair[1], 16);
+      return isPrivateIpv4Octets((hi >> 8) & 0xff, hi & 0xff);
+    }
+    return true;
+  }
+  if (/^(?:fc|fd)[0-9a-f]{0,2}:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host)) {
+    return true;
+  }
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) return isPrivateIpv4Octets(Number(v4[1]), Number(v4[2]));
+  return false;
+}
+
+/**
+ * Validates `ai.baseUrl` against SSRF to loopback, RFC1918, CGNAT, and cloud
+ * metadata/link-local addresses in company (`team` / `gateway`) modes unless
+ * `SC_ALLOW_PRIVATE_AI_URL=true` is explicitly configured by the operator.
+ */
+export function validateAiBaseUrl(
+  baseUrl: string | undefined,
+  mode: AuthConfig["mode"],
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (!baseUrl || !baseUrl.trim()) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl.trim());
+  } catch {
+    return "Invalid ai.baseUrl: provide a valid HTTP or HTTPS origin.";
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+    return "Invalid ai.baseUrl: only HTTP or HTTPS URLs without embedded credentials are permitted.";
+  }
+  if (mode !== "local") {
+    const allowPrivate = /^(true|1|yes)$/i.test(String(env.SC_ALLOW_PRIVATE_AI_URL ?? "").trim());
+    if (!allowPrivate && isPrivateOrInternalHost(parsed.hostname)) {
+      return "Loopback, RFC1918 private, and link-local ai.baseUrl endpoints are blocked in company mode unless SC_ALLOW_PRIVATE_AI_URL=true.";
+    }
+  }
+  return null;
+}
 
 /**
  * The gateway's x-gateway-policy header (base64url JSON) and its HMAC-SHA256
@@ -116,7 +203,12 @@ export async function loadAuthConfig(env = process.env): Promise<AuthConfig> {
   if (!Number.isInteger(recheckSeconds) || recheckSeconds !== 0 && (recheckSeconds < 10 || recheckSeconds > 3600)) throw new Error("SC_SESSION_RECHECK_SECONDS must be 0 or between 10 and 3600");
   const clientAuth = env.SC_OIDC_CLIENT_AUTH?.trim() || undefined;
   if (clientAuth !== undefined && clientAuth !== "client_secret_post" && clientAuth !== "client_secret_basic") throw new Error("SC_OIDC_CLIENT_AUTH must be client_secret_post or client_secret_basic");
-  return { ...config, publicUrl: url.origin, issuer: issuer.href, clientId: env.SC_OIDC_CLIENT_ID, clientSecret: env.SC_OIDC_CLIENT_SECRET, recheckSeconds, ...(clientAuth ? { clientAuth } : {}),
+  const sessionSecret = env.SC_SESSION_SECRET?.trim() || undefined;
+  const storagePath = sessionSecret && env.SC_DATA_DIR?.trim() ? resolve(env.SC_DATA_DIR.trim(), "sessions.json") : undefined;
+  return { ...config, publicUrl: url.origin, issuer: issuer.href, clientId: env.SC_OIDC_CLIENT_ID, clientSecret: env.SC_OIDC_CLIENT_SECRET, recheckSeconds,
+    ...(clientAuth ? { clientAuth } : {}),
+    ...(sessionSecret ? { sessionSecret } : {}),
+    ...(storagePath ? { storagePath } : {}),
     access: accessSchema.parse(YAML.parse(await readFile(env.SC_ACCESS_PATH!, "utf8"))) };
 }
 
@@ -129,8 +221,76 @@ export class CompanyAuth {
   private provider?: oidc.Configuration;
   private gatewayKeys?: ReturnType<typeof createRemoteJWKSet>;
   private gatewayCsrfSecret = token();
-  constructor(readonly config: AuthConfig, private audit: (event: string, data?: Record<string, string | number | boolean>) => void = () => {}) {}
+  private sessionStore?: PersistentSessionStore;
+  private persistChain: Promise<void> = Promise.resolve();
+  private scimUsers?: ReadonlyMap<string, ScimAccountView>;
+
+  constructor(readonly config: AuthConfig, private audit: (event: string, data?: Record<string, string | number | boolean>) => void = () => {}) {
+    if (config.mode === "team" && config.storagePath) {
+      this.sessionStore = createPersistentSessionStore({
+        filePath: config.storagePath,
+        encryptionSecret: config.sessionSecret ?? config.clientSecret,
+      });
+    }
+  }
+
+  attachScim(directory: { users: ReadonlyMap<string, ScimAccountView> }) {
+    this.scimUsers = directory.users;
+  }
+
+  private enqueuePersist(work: () => Promise<unknown>) {
+    if (!this.sessionStore) return;
+    this.persistChain = this.persistChain.then(() => work()).then(() => {}, () => {});
+  }
+
+  /** Waits for any queued persistent session writes/removals to flush to disk. */
+  async flush(): Promise<void> {
+    await this.persistChain;
+  }
+
+  private findScimUser(claims: Record<string, unknown>): ScimAccountView | undefined {
+    if (!this.scimUsers || this.scimUsers.size === 0) return undefined;
+    const sub = typeof claims.sub === "string" ? claims.sub.trim() : "";
+    const email = typeof claims.email === "string" ? claims.email.trim().toLowerCase() : "";
+    const preferred = typeof claims.preferred_username === "string" ? claims.preferred_username.trim().toLowerCase() : "";
+    for (const user of this.scimUsers.values()) {
+      if (sub && (user.externalId === sub || user.id === sub || user.userName.toLowerCase() === sub.toLowerCase())) {
+        return user;
+      }
+      if (email && user.userName.toLowerCase() === email) return user;
+      if (preferred && user.userName.toLowerCase() === preferred) return user;
+    }
+    return undefined;
+  }
+
+  private resolveClaimsIdentity(claims: Record<string, unknown>, access = this.config.access!): { identity: Identity | null; scimInactive: boolean } {
+    const scimUser = this.findScimUser(claims);
+    if (scimUser && !scimUser.active) {
+      return { identity: null, scimInactive: true };
+    }
+    let effectiveClaims = claims;
+    if (scimUser && scimUser.groups.length > 0) {
+      const claimKey = access.groupsClaim;
+      const existing = Array.isArray(claims[claimKey]) ? (claims[claimKey] as unknown[]) : [];
+      const merged = [...existing];
+      for (const g of scimUser.groups) {
+        if (!merged.includes(g)) merged.push(g);
+      }
+      effectiveClaims = { ...claims, [claimKey]: merged };
+    }
+    const identity = mapIdentity(effectiveClaims, this.config.issuer ?? "", access);
+    if (identity && effectiveClaims !== claims) identityClaims.set(identity, effectiveClaims);
+    return { identity, scimInactive: false };
+  }
+
   async start() {
+    if (this.sessionStore) {
+      const persisted = await this.sessionStore.load();
+      for (const [hash, s] of persisted) {
+        this.sessions.set(hash, s);
+        if (s.claims) identityClaims.set(s.identity, s.claims);
+      }
+    }
     if (this.config.mode === "gateway") this.gatewayKeys = createRemoteJWKSet(new URL(this.config.jwksUri!), { timeoutDuration: 5000 });
     if (this.config.mode === "team") this.provider = await this.connectProvider();
   }
@@ -156,7 +316,14 @@ export class CompanyAuth {
     this.lastKeyRefresh = Date.now();
     void this.connectProvider().then(provider => { this.provider = provider; this.audit("auth.provider_keys_refreshed"); }, () => this.audit("auth.provider_refresh_failed"));
   }
-  private prune() { const now = Date.now(); for (const [k, v] of this.sessions) if (v.expires < now) this.sessions.delete(k); for (const [k, v] of this.attempts) if (v.expires < now) this.attempts.delete(k); for (const [k, v] of this.lastVerified) if (v.exp < now) this.lastVerified.delete(k); }
+  private prune() {
+    const now = Date.now();
+    let expiredSessions = false;
+    for (const [k, v] of this.sessions) if (v.expires < now) { this.sessions.delete(k); expiredSessions = true; }
+    if (expiredSessions) this.enqueuePersist(() => this.sessionStore!.prune(now));
+    for (const [k, v] of this.attempts) if (v.expires < now) this.attempts.delete(k);
+    for (const [k, v] of this.lastVerified) if (v.exp < now) this.lastVerified.delete(k);
+  }
   /** The owner's identity while they still hold access: an unexpired team session, or in gateway mode a token verified since the server started that has not expired. */
   currentIdentity(ownerId: string): Identity | null {
     const now = Date.now();
@@ -168,9 +335,10 @@ export class CompanyAuth {
   issue(identity: Identity, res: Response, refreshToken?: string, claims = identityClaims.get(identity)) {
     this.prune(); if (this.sessions.size >= 5000) throw new Error("Session capacity reached");
     const recheck = (this.config.recheckSeconds ?? 0) * 1000;
-    const key = token(), session: Session = { identity, csrf: token(), expires: Date.now() + this.config.sessionSeconds * 1000,
+    const key = token(), hashedKey = digest(key), session: Session = { identity, csrf: token(), expires: Date.now() + this.config.sessionSeconds * 1000,
       ...(refreshToken && recheck ? { refreshToken, nextCheck: Date.now() + recheck } : {}), ...(claims ? { claims } : {}) };
-    this.sessions.set(digest(key), session);
+    this.sessions.set(hashedKey, session);
+    this.enqueuePersist(() => this.sessionStore!.save(hashedKey, session));
     res.cookie("__Host-sc_session", key, { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: this.config.sessionSeconds * 1000 });
     return session;
   }
@@ -178,7 +346,11 @@ export class CompanyAuth {
     const hashed = digest(`${this.config.issuer ?? ""}\0${subjectOrId}`);
     const match = (id: string, sub?: unknown) => id === subjectOrId || id === hashed || sub === subjectOrId;
     let count = 0;
-    for (const [k, s] of this.sessions) if (match(s.identity.id, s.claims?.sub)) { this.sessions.delete(k); count++; }
+    for (const [k, s] of this.sessions) if (match(s.identity.id, s.claims?.sub)) {
+      this.sessions.delete(k);
+      this.enqueuePersist(() => this.sessionStore!.remove(k));
+      count++;
+    }
     for (const [k, v] of this.lastVerified) if (match(k) || match(v.identity.id, identityClaims.get(v.identity)?.sub)) { this.lastVerified.delete(k); count++; }
     this.audit("auth.session_revoked", { actor: hashed, count });
     return count;
@@ -193,9 +365,15 @@ export class CompanyAuth {
       JSON.stringify([a.role, a.principal, a.sources]) === JSON.stringify([b.role, b.principal, b.sources]);
     for (const [k, s] of this.sessions) {
       const claims = s.claims ?? identityClaims.get(s.identity);
-      const mapped = claims ? mapIdentity(claims, this.config.issuer ?? "", nextAccess)
+      const resolved = claims ? this.resolveClaimsIdentity(claims, nextAccess) : null;
+      const mapped = claims
+        ? resolved?.identity ?? null
         : nextAccess.bindings.find(b => b.subject ? (b.subject === s.identity.id || digest(`${this.config.issuer ?? ""}\0${b.subject}`) === s.identity.id) : same(b, s.identity)) ?? nextAccess.default;
-      if (!mapped || ("id" in mapped && mapped.id !== s.identity.id) || !same(mapped, s.identity)) { this.sessions.delete(k); this.audit("auth.session_access_changed", { actor: s.identity.id }); }
+      if (!mapped || ("id" in mapped && mapped.id !== s.identity.id) || !same(mapped, s.identity)) {
+        this.sessions.delete(k);
+        this.enqueuePersist(() => this.sessionStore!.remove(k));
+        this.audit("auth.session_access_changed", { actor: s.identity.id });
+      }
     }
     this.audit("auth.access_reloaded", { bindings: nextAccess.bindings.length, hasDefault: Boolean(nextAccess.default) });
     return { bindings: nextAccess.bindings.length, hasDefault: Boolean(nextAccess.default) };
@@ -204,17 +382,24 @@ export class CompanyAuth {
    * account or changed access ends the session, so the person signs in again under current rules.
    * A provider outage does not: the session keeps its own expiry and the check is retried. */
   private async recheck(key: string, session: Session): Promise<boolean> {
-    const end = (event: string) => { this.sessions.delete(key); this.audit(event, { actor: session.identity.id }); return false; };
+    const end = (event: string) => {
+      this.sessions.delete(key);
+      this.enqueuePersist(() => this.sessionStore!.remove(key));
+      this.audit(event, { actor: session.identity.id });
+      return false;
+    };
     try {
       const tokens = await oidc.refreshTokenGrant(this.provider!, session.refreshToken!);
       const claims = tokens.claims();
       if (claims) {
-        const identity = mapIdentity(claims, this.config.issuer!, this.config.access!);
+        const { identity, scimInactive } = this.resolveClaimsIdentity(claims);
+        if (scimInactive) return end("auth.session_revoked");
         const access = (i: Identity) => JSON.stringify([i.id, i.role, i.principal, i.sources]);
         if (!identity || access(identity) !== access(session.identity)) return end("auth.session_access_changed");
       }
       if (tokens.refresh_token) session.refreshToken = tokens.refresh_token;
       session.nextCheck = Date.now() + this.config.recheckSeconds! * 1000;
+      this.enqueuePersist(() => this.sessionStore!.save(key, session));
       return true;
     } catch (error) {
       // An OAuth error response is the provider's answer (revoked, disabled, signed out). Anything else is an outage.
@@ -249,7 +434,8 @@ export class CompanyAuth {
       void (async () => {
         try {
           const { payload } = await jwtVerify(decodeURIComponent(raw), this.gatewayKeys!, { issuer: this.config.issuer, audience: this.config.clientId, algorithms: ["RS256", "ES256"], requiredClaims: ["sub", "exp"] });
-          let identity = mapIdentity(payload, this.config.issuer!, this.config.access!);
+          const resolved = this.resolveClaimsIdentity(payload);
+          let identity = resolved.scimInactive ? null : resolved.identity;
           let expires = Number(payload.exp) * 1000;
           let gatewayPolicy: ForwardedAuth["gatewayPolicy"];
           if (identity && policySupplied) {
@@ -311,9 +497,19 @@ export class CompanyAuth {
           pkceCodeVerifier: pending.verifier, expectedState: pending.state, expectedNonce: pending.nonce, idTokenExpected: true,
         });
         const claims = tokens.claims();
-        const identity = claims && mapIdentity(claims, this.config.issuer!, this.config.access!);
+        const resolved = claims ? this.resolveClaimsIdentity(claims) : { identity: null, scimInactive: false };
+        if (resolved.scimInactive) {
+          this.audit("auth.access_denied", { reason: "scim_inactive" });
+          return res.status(403).send("Your account has been deactivated. Contact your administrator.");
+        }
+        const identity = resolved.identity;
         if (!identity) { this.audit("auth.access_denied"); return res.status(403).send("Your account has no Semantic Canvas access. Ask your administrator to assign a group."); }
-        const old = cookie(req, "__Host-sc_session"); if (old) this.sessions.delete(digest(old));
+        const old = cookie(req, "__Host-sc_session");
+        if (old) {
+          const oldHash = digest(old);
+          this.sessions.delete(oldHash);
+          this.enqueuePersist(() => this.sessionStore!.remove(oldHash));
+        }
         this.issue(identity, res, tokens.refresh_token); this.audit("auth.signed_in", { actor: identity.id, role: identity.role }); res.redirect("/");
       } catch (error) {
         const code = failureCode(error);
@@ -327,7 +523,12 @@ export class CompanyAuth {
       if (session && !this.validCsrf(req, session)) return res.status(403).json({ error: "Reload the page before signing out" });
       // Behind Gateway the portal owns the session: clearing the access cookie here would leave the portal's refresh cookie, and the next click on "Continue with company sign-in" would silently issue a new token to whoever is at the keyboard. The browser is sent to the portal's sign-out, which revokes the refresh token at the identity provider and clears both cookies.
       if (this.config.mode === "gateway") { res.clearCookie("gw_session", { domain: new URL(this.config.portalUrl!).hostname, path: "/", httpOnly: true, secure: this.config.publicUrl!.startsWith("https:"), sameSite: "lax" }); return res.json({ ok: true, redirect: `${this.config.portalUrl}/auth/logout` }); }
-      const key = cookie(req, "__Host-sc_session"); if (key) this.sessions.delete(digest(key));
+      const key = cookie(req, "__Host-sc_session");
+      if (key) {
+        const keyHash = digest(key);
+        this.sessions.delete(keyHash);
+        this.enqueuePersist(() => this.sessionStore!.remove(keyHash));
+      }
       res.clearCookie("__Host-sc_session", { path: "/", secure: true, httpOnly: true, sameSite: "lax" });
       this.audit("auth.signed_out", session ? { actor: session.identity.id } : {}); res.json({ ok: true });
     });
@@ -339,7 +540,7 @@ export class CompanyAuth {
     (req as any).identity = session.identity;
     res.setHeader("x-sc-user-id", session.identity.id);
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !this.validCsrf(req, session)) return res.status(403).json({ error: "Your session needs a fresh page. Reload and try again." });
-    const route = req.path.toLowerCase().replace(/^\/api(?=\/)/, "");
+    const route = req.path.toLowerCase().replace(/^\/api(?=\/|$)/, "").replace(/\/+$/, "") || "/";
     // Tables Ingest registers (/sources/:id/connected) are an editor surface; publishing them into the governed catalogue stays admin-only, as does everything else under /sources/.
     // Proposed metrics (/sources/:id/metrics) are an editor surface too; publishing one is admin-only.
     const connected = /^\/sources\/[^/]+\/(connected|metrics)(\/|$)/.test(route), publish = /^\/sources\/[^/]+\/(connected|metrics)\/[^/]+\/publish$/.test(route);

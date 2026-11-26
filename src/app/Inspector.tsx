@@ -68,7 +68,7 @@ export function Inspector({ model, tile, queryContext = "", onChange, onClose, o
             ) : (
               <>
                 <textarea className="txt area" rows={tile.kind === "heading" ? 2 : 5}
-                          value={tile.text ?? ""} placeholder="Type here…"
+                          value={tile.text ?? tile.title ?? ""} placeholder="Type here…"
                           onChange={(e) => onChange({ ...tile, text: e.target.value })} />
                 <p className="muted sm">You can also click into it on the canvas.</p>
               </>

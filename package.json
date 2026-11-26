@@ -1,6 +1,6 @@
 {
   "name": "semantic-canvas",
-  "version": "0.1.0",
+  "version": "0.3.6",
   "description": "An open-source BI tool that reads the semantic layer you already have, suggests a dashboard from it, and lets you rearrange the result on a canvas.",
   "license": "MIT",
   "private": true,

@@ -204,8 +204,14 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
               <h1>{spec.title}</h1>
               {spec.description && question.trim() && <p className="report-description">{spec.description}</p>}
               <div className="report-masthead-pills">
-                <span className="masthead-pill">Partial periods hatched</span>
-                <span className="masthead-pill" title="SHA-256 checks content integrity, not analytical correctness or authorship.">Snapshot with integrity checksum (SHA-256)</span>
+                {(shownCharts.some(t => checks[t.id]?.hasLag) || Object.values(model.tables).some(t => (t.reportingLagDays ?? 0) > 0)) && (
+                  <span className="masthead-pill">Partial periods hatched</span>
+                )}
+                {currentEvidence.digest && (
+                  <span className="masthead-pill mono" title={`Full SHA-256 snapshot digest: ${currentEvidence.digest} (checks content integrity, not analytical correctness or authorship)`}>
+                    sha256: {currentEvidence.digest.slice(0, 12)}…
+                  </span>
+                )}
                 {model.hygieneNotes && model.hygieneNotes.length > 0 && (
                   <span className="hygiene-provenance-pill static" title={model.hygieneNotes.join("\n")}>
                     ✓ {model.hygieneNotes.length} {model.hygieneNotes.length === 1 ? "data fix" : "data fixes"} verified
@@ -218,7 +224,7 @@ export function ReviewHandoff({ spec, canvas, model, queryContext, evidenceScope
               {mode === "infographic" && evidence.omitted.length > 0 && <p className="report-selection">Selected evidence · {shownCharts.length} of {charts.length} charts from this tab. Full coverage is available in Dashboard and Story.</p>}
             </header>
             <MetricColorProvider tiles={spec.tiles}>{mode === "dashboard" ? <DashboardRender key={mode} spec={spec} canvas={canvas} model={model} queryContext={queryContext} filtersByTile={filtersByTile} scopeWarnings={scopeWarnings} drills={drills} fullSize={false} onReadiness={record} />
-              : <ReportPresentation key={`${mode}:${JSON.stringify(brief.evidenceIds)}`} mode={mode} spec={reportSpec} model={model} queryContext={queryContext} filtersByTile={filtersByTile} scopeWarnings={scopeWarnings} drills={drills} checks={checks} onReadiness={record} />}</MetricColorProvider>
+              : <ReportPresentation key={`${mode}:${JSON.stringify(brief.evidenceIds)}`} mode={mode} spec={reportSpec} model={model} queryContext={queryContext} filtersByTile={filtersByTile} scopeWarnings={scopeWarnings} drills={drills} checks={checks} onReadiness={record} digestOverride={currentEvidence.digest} />}</MetricColorProvider>
             {nextStep.trim() && <section className="report-next-step"><span>Next action or question</span><h2>{nextStep}</h2><p>Proposed by the author. No task or notification has been sent.</p></section>}
             {mode === "infographic" && evidence.omitted.length > 0 && <section className="report-omitted"><h2>Outside this brief</h2><p>Not shown: {evidence.omitted.map(t => t.title ?? t.metrics.join(", ")).join("; ")}. Their results are not assessed in this presentation.</p></section>}
             <footer className="report-evidence"><h2>Reading this report</h2><p>Prepared {preparedAt}. This is a snapshot of the current viewing scope. Query and rendering checks do not certify source completeness or business conclusions.</p>

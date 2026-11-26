@@ -1,5 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import express, { type Request, type Response, type Router } from "express";
 import type { CompanyAuth } from "./auth.ts";
 
@@ -123,9 +125,50 @@ export function createScimRouter(deps: ScimRouterDeps): Router & { users: Map<st
   const users = new Map<string, ScimUser>();
   const groups = new Map<string, ScimGroup>();
 
+  if (deps.storagePath && existsSync(deps.storagePath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(deps.storagePath, "utf8")) as { users?: unknown[]; groups?: unknown[] };
+      if (Array.isArray(parsed?.users)) {
+        for (const raw of parsed.users) {
+          if (raw && typeof raw === "object" && typeof (raw as any).id === "string" && typeof (raw as any).userName === "string") {
+            const u = raw as Record<string, unknown>;
+            users.set(String(u.id), {
+              id: String(u.id),
+              userName: String(u.userName),
+              ...(typeof u.externalId === "string" && u.externalId ? { externalId: u.externalId } : {}),
+              displayName: typeof u.displayName === "string" ? u.displayName : String(u.userName),
+              active: parseActive(u.active, true),
+              groups: normalizeStringList(u.groups),
+              roles: normalizeStringList(u.roles),
+            });
+          }
+        }
+      }
+      if (Array.isArray(parsed?.groups)) {
+        for (const raw of parsed.groups) {
+          if (raw && typeof raw === "object" && typeof (raw as any).id === "string" && typeof (raw as any).displayName === "string") {
+            const g = raw as Record<string, unknown>;
+            groups.set(String(g.id), {
+              id: String(g.id),
+              displayName: String(g.displayName),
+              members: normalizeMembers(g.members),
+            });
+          }
+        }
+      }
+    } catch {
+      /* ignore corrupt or empty initial scim file */
+    }
+  }
+
+  deps.auth.attachScim?.({ users });
+
   const persist = async () => {
     const state = { users: [...users.values()], groups: [...groups.values()] };
-    if (deps.storagePath) await writeFile(deps.storagePath, JSON.stringify(state, null, 2), "utf8");
+    if (deps.storagePath) {
+      await mkdir(dirname(deps.storagePath), { recursive: true });
+      await writeFile(deps.storagePath, JSON.stringify(state, null, 2), { encoding: "utf8", mode: 0o600 });
+    }
     await deps.onChange?.(state);
   };
 

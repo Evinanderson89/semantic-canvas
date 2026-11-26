@@ -25,10 +25,12 @@ const GOAL_TABS: { id: AnalysisGoal; label: string }[] = [
 export function SemanticCoachPanel({
   model,
   sourceId,
+  sandboxMode = false,
   onChanged,
 }: {
   model: Model;
   sourceId?: string;
+  sandboxMode?: boolean;
   onChanged?: () => void;
 }) {
   const [goal, setGoal] = useState<AnalysisGoal>("all");
@@ -578,18 +580,22 @@ export function SemanticCoachPanel({
                     {copiedId === finding.id ? "Copied!" : `Copy ${activeFormatSpec.label}`}
                   </button>
                   {finding.proposedMetric && sourceId && (
-                    <button
-                      type="button"
-                      className="primary small"
-                      disabled={proposingId === finding.id || Boolean(proposedSuccess[finding.id])}
-                      onClick={() => void proposeInRegistry(finding)}
-                    >
-                      {proposedSuccess[finding.id]
-                        ? `Proposed “${proposedSuccess[finding.id]}”`
-                        : proposingId === finding.id
-                          ? "Proposing…"
-                          : "Propose metric in Registry"}
-                    </button>
+                    sandboxMode ? (
+                      <span className="muted sm">Self-host to customize model</span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="primary small"
+                        disabled={proposingId === finding.id || Boolean(proposedSuccess[finding.id])}
+                        onClick={() => void proposeInRegistry(finding)}
+                      >
+                        {proposedSuccess[finding.id]
+                          ? `Proposed “${proposedSuccess[finding.id]}”`
+                          : proposingId === finding.id
+                            ? "Proposing…"
+                            : "Propose metric in Registry"}
+                      </button>
+                    )
                   )}
                 </div>
                 {proposeError[finding.id] && (
@@ -614,17 +620,19 @@ export function SemanticCoachPanel({
 export function SemanticCoachDialog({
   model,
   sourceId,
+  sandboxMode = false,
   onChanged,
   onClose,
 }: {
   model: Model;
   sourceId?: string;
+  sandboxMode?: boolean;
   onChanged?: () => void;
   onClose: () => void;
 }) {
   return (
     <StudioDialog title="Semantic Layer Coach" wide onClose={onClose}>
-      <SemanticCoachPanel model={model} sourceId={sourceId} onChanged={onChanged} />
+      <SemanticCoachPanel model={model} sourceId={sourceId} sandboxMode={sandboxMode} onChanged={onChanged} />
     </StudioDialog>
   );
 }

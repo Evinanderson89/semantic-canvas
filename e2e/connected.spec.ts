@@ -146,6 +146,6 @@ test("an Open in Semantic Canvas link selects the source, opens the registry on 
   await expect.poll(() => page.evaluate(() => location.search)).toBe("?keep=1");
   expect(await page.evaluate(() => localStorage.getItem("sc:source"))).toBe("duckglue-local");
   await page.goto("/?source=nope&table=nope");
-  await expect(page.getByText("Suggest a dashboard")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Ask or drop start composer" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => location.search)).toBe("");
 });

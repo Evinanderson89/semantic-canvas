@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { TileSpec } from "../compiler/spec.ts";
+import { makeFormatter, resolveFormat } from "../format/format.ts";
 import { metricOf, type Model } from "../semantic/model.ts";
 import { readResponse } from "./http.ts";
 
@@ -113,8 +114,11 @@ export function normalizeLineagePayload(raw: any): NormalizedLineageView {
 }
 
 export function buildDriversPayload(tile: TileSpec) {
+  const timeDimension = (tile.dimensions ?? []).find((d) => d.includes(":"));
   return {
     metric: tile.metrics[0] ?? "",
+    ...(timeDimension ? { timeDimension } : {}),
+    ...(tile.where && tile.where.length > 0 ? { where: tile.where } : {}),
   };
 }
 
@@ -124,6 +128,7 @@ export interface NormalizedDriversView {
   priorPeriod: string;
   latestPeriod: string;
   delta: number;
+  additive?: boolean;
   dimensions: {
     dimension: string;
     label: string;
@@ -131,18 +136,22 @@ export interface NormalizedDriversView {
       value: string;
       contribution: number;
       share: number;
+      hasValidShare?: boolean;
     }[];
   }[];
 }
 
 export function normalizeDriversPayload(raw: any): NormalizedDriversView {
   const rawDims: any[] = Array.isArray(raw?.dimensions) ? raw.dimensions : [];
+  const additive = raw?.additive !== false;
+  const netDelta = Number(raw?.delta ?? 0);
   return {
     metric: String(raw?.metric ?? ""),
     label: String(raw?.label ?? raw?.metric ?? ""),
     priorPeriod: String(raw?.priorPeriod ?? ""),
     latestPeriod: String(raw?.latestPeriod ?? ""),
-    delta: Number(raw?.delta ?? 0),
+    delta: netDelta,
+    additive,
     dimensions: rawDims.map((d) => {
       const driversList: any[] = Array.isArray(d.topDrivers)
         ? d.topDrivers
@@ -154,11 +163,26 @@ export function normalizeDriversPayload(raw: any): NormalizedDriversView {
       return {
         dimension: String(d.dimension ?? ""),
         label: String(d.label ?? d.dimension ?? ""),
-        topDrivers: driversList.map((s) => ({
-          value: String(s.value ?? s.segment ?? ""),
-          contribution: Number(s.contribution ?? s.delta ?? 0),
-          share: Number(s.share ?? s.shareOfChange ?? 0),
-        })),
+        topDrivers: driversList.map((s) => {
+          const contribution = Number(s.contribution ?? s.delta ?? 0);
+          const rawShareValue = s.share ?? s.shareOfChange;
+          const share = typeof rawShareValue === "number" && Number.isFinite(rawShareValue) ? rawShareValue : 0;
+          const hasValidShare = Boolean(
+            additive &&
+              typeof rawShareValue === "number" &&
+              Number.isFinite(rawShareValue) &&
+              Math.abs(rawShareValue) > 0 &&
+              Math.abs(rawShareValue) <= 1 &&
+              netDelta !== 0 &&
+              Math.sign(contribution) === Math.sign(netDelta),
+          );
+          return {
+            value: String(s.value ?? s.segment ?? ""),
+            contribution,
+            share,
+            hasValidShare,
+          };
+        }),
       };
     }),
   };
@@ -189,6 +213,17 @@ export function TileLineageAndDriversSection({
   const primaryMetricLabel = tile.metrics[0]
     ? metricOf(model, tile.metrics[0])?.label ?? tile.metrics[0]
     : "";
+  const fmtSpec = resolveFormat(model, tile);
+  const fmtValue = makeFormatter(fmtSpec);
+  const formatSignedMetricDelta = (val: number): string => {
+    if (!Number.isFinite(val)) return String(val);
+    if (val === 0) return fmtSpec.number === "percent" ? "0.0 pp" : fmtValue(0);
+    const sign = val > 0 ? "+" : "−";
+    if (fmtSpec.number === "percent") {
+      return `${sign}${(Math.abs(val) * 100).toFixed(1)} pp`;
+    }
+    return `${sign}${fmtValue(Math.abs(val))}`;
+  };
 
   const handleAddReferenceLine = () => {
     const num = Number(targetValueInput);
@@ -333,7 +368,7 @@ export function TileLineageAndDriversSection({
             <div className="drivers-panel">
               <p className="sm">
                 <b>{drivers.label}</b> ({drivers.priorPeriod} → {drivers.latestPeriod}): Δ{" "}
-                {drivers.delta > 0 ? `+${drivers.delta}` : drivers.delta}
+                {formatSignedMetricDelta(drivers.delta)}
               </p>
               {drivers.dimensions.map((d) => (
                 <div key={d.dimension} className="driver-dim-group">
@@ -342,8 +377,10 @@ export function TileLineageAndDriversSection({
                     {d.topDrivers.map((drv) => (
                       <li key={drv.value} className="sm">
                         <span>{drv.value}</span>:{" "}
-                        <b>{drv.contribution > 0 ? `+${drv.contribution}` : drv.contribution}</b>{" "}
-                        <em>({Math.round(drv.share * 100)}% share)</em>
+                        <b>{formatSignedMetricDelta(drv.contribution)}</b>
+                        {drv.hasValidShare && (
+                          <> <em>({Math.round(Math.abs(drv.share) * 100)}% share)</em></>
+                        )}
                       </li>
                     ))}
                   </ul>

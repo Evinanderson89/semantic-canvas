@@ -93,9 +93,9 @@ function MetricActions({ m, sourceId, onChanged }: { m: Metric; sourceId: string
  * carries everything they show. They existed as dead sidebar links, which is
  * worse than not existing: a promise the tool doesn't keep.
  */
-export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "", onChanged = () => {} }: {
+export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "", sandboxMode = false, onChanged = () => {} }: {
   model: Model; onUse: (metric: string) => void; initialTable?: string | null;
-  sourceId?: string; onChanged?: () => void;
+  sourceId?: string; sandboxMode?: boolean; onChanged?: () => void;
 }) {
   const session = useSession();
   const [q, setQ] = useState("");
@@ -122,8 +122,14 @@ export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "
           Semantic Layer Coach
         </button>
       </div>
-      {coachOpen && <SemanticCoachPanel model={model} sourceId={sourceId} onChanged={onChanged} />}
-      {session.canEdit && sourceId && <ProposeMetric model={model} sourceId={sourceId} onChanged={onChanged} />}
+      {coachOpen && <SemanticCoachPanel model={model} sourceId={sourceId} sandboxMode={sandboxMode} onChanged={onChanged} />}
+      {sandboxMode ? (
+        <p className="sandbox-customize-note muted sm" role="status">
+          Self-host to customize model and propose new governed SQL metrics.
+        </p>
+      ) : (
+        session.canEdit && sourceId && <ProposeMetric model={model} sourceId={sourceId} onChanged={onChanged} />
+      )}
 
       <div className="ex-tools">
         <input autoFocus className="txt" aria-label="Filter metrics" placeholder="Find a metric…"
@@ -166,21 +172,22 @@ export function MetricRegistry({ model, onUse, initialTable = null, sourceId = "
   );
 }
 
-export function DataModel({ model, sourceId = "", onChanged = () => {} }: { model: Model; sourceId?: string; onChanged?: () => void }) {
+export function DataModel({ model, sourceId = "", sandboxMode = false, onChanged = () => {} }: { model: Model; sourceId?: string; sandboxMode?: boolean; onChanged?: () => void }) {
   const byTable = metricsByTable(model);
   const [coachOpen, setCoachOpen] = useState(false);
+  const friendlyAdapter = model.source === "duckglue" ? "governed DuckDB" : model.source;
   return (
     <div className="explore">
       <h1>Data Model</h1>
       <p className="lede">{Object.keys(model.tables).length} tables and {model.joins.length} joins,
-        read from the {model.source} semantic layer. Joins are what let a metric on one table be
+        read from the {friendlyAdapter} semantic layer. Joins are what let a metric on one table be
         cut by a dimension on another.</p>
       <div className="story-actions">
         <button type="button" className={`tgl${coachOpen ? " on" : ""}`} onClick={() => setCoachOpen((v) => !v)}>
           Semantic Layer Coach
         </button>
       </div>
-      {coachOpen && <SemanticCoachPanel model={model} sourceId={sourceId} onChanged={onChanged} />}
+      {coachOpen && <SemanticCoachPanel model={model} sourceId={sourceId} sandboxMode={sandboxMode} onChanged={onChanged} />}
 
       <h4 className="ex-h">Joins</h4>
       <div className="joins">

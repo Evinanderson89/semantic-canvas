@@ -24,7 +24,7 @@ test("chart tools are opt-in, independent, and remembered across dashboards and 
   await expect(page.getByRole("tab", { name: /Alerts/ })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Canvas settings", exact: true }).click();
-  await page.getByRole("button", { name: "Chats & notifications" }).click();
+  await page.getByRole("button", { name: "Chart tools & notifications" }).click();
   await chats.uncheck(); await notifications.check();
   await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(commentButtons).toHaveCount(0);

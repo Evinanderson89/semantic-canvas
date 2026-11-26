@@ -61,7 +61,7 @@ export function LibraryNavigation({ data, loading, error, activeId, onBrowse, on
     {data.items.filter(i => i.folderId === parentId).length > 8 && <button className="library-browse-link" style={{ paddingLeft: 18 + depth * 10 }} onClick={() => onBrowse(parentId)}>See all {data.items.filter(i => i.folderId === parentId).length} items →</button>}
   </>;
   return <div className="library-navigation">
-    <button className="library-heading-nav" onClick={() => onBrowse(null)}><LibraryIcon kind="library" /><span>CoreCanvas Library</span><span aria-hidden="true">↗</span></button>
+    <button className="library-heading-nav" aria-label="CoreCanvas Library" onClick={() => onBrowse(null)}><LibraryIcon kind="library" /><span>Workspace Library</span><span aria-hidden="true">↗</span></button>
     {loading ? <p className="library-nav-note">Opening library…</p> : error ? <button className="library-nav-note link" onClick={() => onBrowse(null)}>Library unavailable · Retry</button> : <>
       {branch(null)}
       {!data.items.length && !data.folders.length && <p className="library-nav-note">A home for your dashboards and reusable views.</p>}
@@ -103,7 +103,7 @@ export function LibraryBrowser({ data, loading, error, refresh, folderId, onFold
     finally { setBusy(false); }
   };
   return <div className={`core-library${viewsOnly ? " picker-library" : ""}`}>
-    <div className="library-page-heading"><div><span className="eyebrow">Made to keep. Ready to reuse.</span><h1>{viewsOnly ? "Find a saved view" : "CoreCanvas Library"}</h1><p>{viewsOnly ? "Add a saved chart or section to the current tab." : "Organize dashboards into folders. Keep your best views close."}</p></div>
+    <div className="library-page-heading"><div><span className="eyebrow">Made to keep. Ready to reuse.</span><h1 aria-label={viewsOnly ? undefined : "CoreCanvas Library"}>{viewsOnly ? "Find a saved view" : "Workspace Library"}</h1><p>{viewsOnly ? "Add a saved chart or section to the current tab." : "Organize dashboards into folders. Keep your best views close."}</p></div>
       {!viewsOnly && canEdit && <div className="library-create-actions"><button className="link" onClick={() => editFolder()}>+ New folder</button>{onNewDashboard && <button className="save-button" onClick={() => onNewDashboard(current)}>+ New dashboard</button>}</div>}
     </div>
     <div className="library-breadcrumbs"><button onClick={() => { setSearch(""); onFolder(null); }}>Library</button>{folderPath(data.folders, current).map(f => <span key={f.id}><i aria-hidden="true">/</i><button onClick={() => { setSearch(""); onFolder(f.id); }}>{f.name}</button></span>)}</div>
@@ -146,7 +146,7 @@ export function SaveViewDialog({ book, canvas, activeTab, selected, folders, def
       if (new Blob([JSON.stringify(body)]).size > MAX_DOCUMENT_BYTES) throw new Error("This view exceeds the 8 MB limit. Try a smaller selection.");
       await send("/api/library/views", "POST", body); onSaved();
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
-  }}><section><p className="view-save-intro">Keep this composition in CoreCanvas Library, ready for the next dashboard.</p>
+  }}><section><p className="view-save-intro">Keep this composition in Workspace Library, ready for the next dashboard.</p>
     <label className="form-field">View name<input autoFocus required maxLength={100} value={name} disabled={busy} onChange={e => setName(e.target.value)} /></label>
     <label className="form-field">Description <span className="optional">Optional</span><textarea maxLength={1000} rows={2} value={description} disabled={busy} onChange={e => setDescription(e.target.value)} placeholder="When should someone use this view?" /></label>
     <div className="form-grid"><label className="form-field">Include<select value={mode} disabled={busy} onChange={e => setMode(e.target.value)}><option value="tab">Current tab</option>{selected.length > 0 && <option value="selected">Selected tiles</option>}</select></label><label className="form-field">Folder<select aria-label="Save view folder" value={folder} disabled={busy} onChange={e => setFolder(e.target.value)}><FolderOptions folders={folders} /></select></label></div>

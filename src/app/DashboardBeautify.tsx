@@ -340,7 +340,7 @@ export function DashboardBeautify({ dash, canvas, model, aiAvailable, canConfigu
               <li className="on" title="Partial periods, lagging comparisons and freshness, from the current results.">Data honesty</li>
               <li className="on" title="A reading order from your headings and sections.">Story structure</li>
               <li className={aiAvailable ? "on" : "off"} title={aiAvailable ? "An AI read of the dashboard as a story." : "Did not run: the editorial review needs an AI provider."}>
-                Editorial{!aiAvailable && <> · {canConfigureAi ? <button className="link" onClick={onConnections}>add a key</button> : "needs a key"}</>}
+                Editorial{!aiAvailable && <> · {canConfigureAi ? <button className="link" onClick={onConnections}>add a key</button> : "optional (AI not connected)"}</>}
               </li>
             </ul>
             {hits === "checking" && <p className="explain-body loading">Checking the current charts…</p>}

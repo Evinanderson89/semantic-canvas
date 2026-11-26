@@ -35,7 +35,7 @@ it('expresses a rate change in percentage points, including a zero baseline', ()
 it('uses one currency scale throughout an axis', () => {
  const fmt=makeAxisFormatter({...DEFAULT_FORMAT,number:'currency'},[0,5000,10000,20000]);
  expect([0,5000,10000,20000].map(fmt)).toEqual(['$0k','$5k','$10k','$20k']);
- expect(makeAxisFormatter({...DEFAULT_FORMAT,number:'currency'},[-20000,5000])(-5000)).toBe('$−5k');
+ expect(makeAxisFormatter({...DEFAULT_FORMAT,number:'currency'},[-20000,5000])(-5000)).toBe('-$5k');
 });
 it('remembers accepted grain across layout edits but rechecks changed query or data', () => {
  const tile=demoDashboard().tiles.find(t=>t.id==='d2')!;

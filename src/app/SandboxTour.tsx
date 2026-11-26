@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { MetricColorProvider } from "../charts/MetricColors.tsx";
 import type { DashboardSpec, FilterSpec } from "../compiler/spec.ts";
 import type { Model } from "../semantic/model.ts";
@@ -16,6 +16,8 @@ import type { Readiness } from "./readiness.ts";
 import { ReportPresentation, type PresentationMode } from "./ReportPresentation.tsx";
 import { parseShareLink } from "./shareLink.ts";
 import { SpreadsheetJoinsSection } from "./SpreadsheetImport.tsx";
+import type { AppTheme } from "./themeInit.ts";
+import { useEvidenceDigest } from "./useEvidenceDigest.ts";
 
 export const SANDBOX_TOUR_STORAGE_KEY = "sc:sandbox-tour-v1";
 
@@ -42,7 +44,7 @@ export const SANDBOX_TOUR_STEPS: readonly SandboxTourStepMeta[] = [
     step: 2,
     shortTitle: "2. Governed Dashboard",
     description:
-      "Explore the live governed dashboard in clean Preview mode—click any bar to cross-filter or inspect exact DuckDB SQL lineage with $0 join double-counting.",
+      "Explore the live governed dashboard in clean Preview mode ($145.4k in latest month Aug 2026 · $528.2k cumulative Mar–Aug total, $0 join double-counting)—click any bar to cross-filter or inspect DuckDB SQL.",
     ctaLabel: "Shape into Executive Story →",
   },
   {
@@ -164,6 +166,7 @@ export function DashboardModeBar({
   hasTiles,
   dashId,
   revision,
+  isStarterCopy = false,
   handoff,
   handoffMode,
   aiRedesign,
@@ -171,6 +174,7 @@ export function DashboardModeBar({
   onSelectDashboardView,
   onOpenStory,
   onOpenInfographic,
+  onOpenShareExport,
   onOpenRedesign,
   onOpenHistory,
   onSetLocked,
@@ -180,6 +184,7 @@ export function DashboardModeBar({
   hasTiles: boolean;
   dashId: string | null;
   revision: number;
+  isStarterCopy?: boolean;
   handoff: boolean;
   handoffMode: PresentationMode;
   aiRedesign: boolean;
@@ -187,6 +192,7 @@ export function DashboardModeBar({
   onSelectDashboardView: () => void;
   onOpenStory: () => void;
   onOpenInfographic: () => void;
+  onOpenShareExport?: () => void;
   onOpenRedesign: () => void;
   onOpenHistory: () => void;
   onSetLocked: (locked: boolean) => void;
@@ -241,6 +247,15 @@ export function DashboardModeBar({
           </button>
         )}
         <span className="spacer" />
+        {onOpenShareExport && hasTiles && (
+          <button
+            type="button"
+            className="review-action"
+            onClick={onOpenShareExport}
+          >
+            Share / Export
+          </button>
+        )}
         {dashId && (
           <button
             type="button"
@@ -306,7 +321,9 @@ export function DashboardModeBar({
         </button>
       </div>
       <span className="state-version">
-        <strong>{dashId ? `Saved version ${revision}` : "Not saved yet"}</strong>
+        <strong>
+          {dashId ? `Saved version ${revision}` : isStarterCopy ? "Starter copy — unsaved" : "Not saved yet"}
+        </strong>
       </span>
       {hygieneCount > 0 && (
         <button
@@ -352,6 +369,8 @@ export function SandboxTourBar({
   step,
   hasDashboard,
   busy = false,
+  theme = "light",
+  onToggleTheme,
   onSelectStep,
   onBack,
   onNext,
@@ -360,6 +379,8 @@ export function SandboxTourBar({
   step: SandboxTourStep;
   hasDashboard: boolean;
   busy?: boolean;
+  theme?: AppTheme;
+  onToggleTheme?: () => void;
   onSelectStep: (target: SandboxTourStep) => void;
   onBack: () => void;
   onNext: () => void;
@@ -391,14 +412,27 @@ export function SandboxTourBar({
             );
           })}
         </nav>
-        <button
-          type="button"
-          className="link sandbox-tour-skip"
-          disabled={busy}
-          onClick={onSkip}
-        >
-          Skip to open sandbox →
-        </button>
+        <div className="sandbox-tour-top-right">
+          {onToggleTheme && (
+            <button
+              type="button"
+              className="theme-toggle tour-theme-toggle"
+              aria-label={`Switch to ${theme === "light" ? "dark" : "light"} appearance`}
+              title={`Switch to ${theme === "light" ? "dark" : "light"} appearance`}
+              onClick={onToggleTheme}
+            >
+              {theme === "light" ? "◐" : "◑"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="link sandbox-tour-skip"
+            disabled={busy}
+            onClick={onSkip}
+          >
+            Skip to open sandbox →
+          </button>
+        </div>
       </div>
       <div className="sandbox-tour-bottom">
         <p className="sandbox-tour-desc">{current.description}</p>
@@ -430,11 +464,13 @@ export function SandboxTourBar({
 export function SandboxTourStepOne({
   initialPreview = null,
   busy = false,
+  onJoinsChange,
   onBuildDashboard,
 }: {
   initialPreview?: SpreadsheetPreview | null;
   busy?: boolean;
-  onBuildDashboard: () => void;
+  onJoinsChange?: (joins: SpreadsheetDetectedJoin[]) => void;
+  onBuildDashboard: (joins?: SpreadsheetDetectedJoin[]) => void;
 }) {
   const roasteryMeta = SAMPLE_WORKBOOKS.find((w) => w.id === "roastery-2tab-xlsx") ?? SAMPLE_WORKBOOKS[1];
   const [preview, setPreview] = useState<SpreadsheetPreview | null>(initialPreview);
@@ -442,8 +478,22 @@ export function SandboxTourStepOne({
   const [loadingPreview, setLoadingPreview] = useState(initialPreview === null);
   const [error, setError] = useState<string | null>(null);
 
+  const updateJoins = useCallback(
+    (updater: (prev: SpreadsheetDetectedJoin[]) => SpreadsheetDetectedJoin[]) => {
+      setJoins((prev) => {
+        const next = updater(prev);
+        onJoinsChange?.(next);
+        return next;
+      });
+    },
+    [onJoinsChange],
+  );
+
   useEffect(() => {
-    if (initialPreview) return;
+    if (initialPreview) {
+      onJoinsChange?.(initialPreview.detectedJoins ?? []);
+      return;
+    }
     let cancelled = false;
     setLoadingPreview(true);
     setError(null);
@@ -461,8 +511,10 @@ export function SandboxTourStepOne({
       )
       .then((data: SpreadsheetPreview) => {
         if (cancelled) return;
+        const detected = data.detectedJoins ?? [];
         setPreview(data);
-        setJoins(data.detectedJoins ?? []);
+        setJoins(detected);
+        onJoinsChange?.(detected);
       })
       .catch((e: any) => {
         if (!cancelled) setError(e?.message ?? "Could not load sample Excel preview.");
@@ -590,7 +642,7 @@ export function SandboxTourStepOne({
               <SpreadsheetJoinsSection
                 joins={joins}
                 sheets={preview.sheets ?? null}
-                onChange={setJoins}
+                onChange={updateJoins}
               />
 
               <div className="sandbox-governed-summary" aria-label="Governed semantic model preview">
@@ -612,13 +664,13 @@ export function SandboxTourStepOne({
 
           <div className="sandbox-tour-stage-footer">
             <span className="muted sm">
-              Next: build the clean governed dashboard in Preview mode ($528.2k true Net Sales, $0 fan-out).
+              Next: build the clean governed dashboard ($528.2k cumulative Mar–Aug Net Sales · $145.4k in latest month Aug 2026, $0 fan-out).
             </span>
             <button
               type="button"
               className="primary sandbox-tour-cta"
               disabled={busy}
-              onClick={onBuildDashboard}
+              onClick={() => onBuildDashboard(joins)}
             >
               {busy ? "Cleaning workbook & building dashboard…" : "Clean Workbook & Build Dashboard →"}
             </button>
@@ -637,6 +689,7 @@ export function SandboxTourPresentationStage({
   filtersByTile,
   scopeWarnings,
   drills,
+  digestOverride,
 }: {
   mode: "story" | "infographic";
   spec: DashboardSpec;
@@ -645,6 +698,7 @@ export function SandboxTourPresentationStage({
   filtersByTile: Record<string, FilterSpec[]>;
   scopeWarnings: Record<string, string[]>;
   drills: Record<string, DrillEntry[]>;
+  digestOverride?: string;
 }) {
   const [checks, setChecks] = useState<Record<string, Readiness>>({});
   const record = useCallback(
@@ -655,6 +709,37 @@ export function SandboxTourPresentationStage({
     [],
   );
   const label = mode === "infographic" ? "Broadside Infographic" : "Executive Story";
+  const stageEvidence = useMemo(
+    () =>
+      spec.tiles.length > 0
+        ? {
+            version: 1,
+            mode,
+            title: spec.title,
+            model: model.name,
+            source: model.source,
+            hygieneNotes: model.hygieneNotes ?? [],
+            tiles: spec.tiles.map((t) => ({
+              id: t.id,
+              kind: t.kind ?? "metric",
+              title: t.title ?? t.text ?? "",
+              metrics: t.metrics,
+              dimensions: t.dimensions,
+              where: filtersByTile[t.id] ?? [],
+              drill: drills[t.id] ?? [],
+              evidenceFingerprint: checks[t.id]?.evidenceFingerprint ?? null,
+              window: checks[t.id]?.window ?? null,
+            })),
+          }
+        : undefined,
+    [mode, spec, model.name, model.source, model.hygieneNotes, filtersByTile, drills, checks],
+  );
+  const computedDigest = useEvidenceDigest(digestOverride ? undefined : stageEvidence);
+  const effectiveDigest = digestOverride || computedDigest.digest;
+  const hasAnyLag =
+    Object.values(checks).some((c) => c.hasLag) ||
+    Object.values(model.tables).some((t) => (t.reportingLagDays ?? 0) > 0);
+  const friendlySource = model.source === "duckglue" ? "DuckDB semantic layer" : model.source;
 
   return (
     <div className="sandbox-tour-presentation-wrap" aria-label={`Guided ${label}`}>
@@ -663,13 +748,15 @@ export function SandboxTourPresentationStage({
           <span className="eyebrow">Semantic Canvas · {label}</span>
           <h1>{spec.title}</h1>
           <div className="report-masthead-pills">
-            <span className="masthead-pill">Partial periods hatched</span>
-            <span
-              className="masthead-pill"
-              title="SHA-256 checks content integrity, not analytical correctness or authorship."
-            >
-              Snapshot with integrity checksum (SHA-256)
-            </span>
+            {hasAnyLag && <span className="masthead-pill">Partial periods hatched</span>}
+            {effectiveDigest && (
+              <span
+                className="masthead-pill mono"
+                title={`Full SHA-256 snapshot digest: ${effectiveDigest} (checks content integrity, not analytical correctness or authorship)`}
+              >
+                sha256: {effectiveDigest.slice(0, 12)}…
+              </span>
+            )}
             {model.hygieneNotes && model.hygieneNotes.length > 0 && (
               <span
                 className="hygiene-provenance-pill static"
@@ -680,7 +767,7 @@ export function SandboxTourPresentationStage({
             )}
           </div>
           <p className="report-model">
-            Model: {model.name} ({model.source}) · Governed live DuckDB metrics
+            Model: {model.name} ({friendlySource}) · Governed live DuckDB metrics
           </p>
         </header>
         <MetricColorProvider tiles={spec.tiles}>
@@ -695,6 +782,7 @@ export function SandboxTourPresentationStage({
             drills={drills}
             checks={checks}
             onReadiness={record}
+            digestOverride={effectiveDigest}
           />
         </MetricColorProvider>
       </article>

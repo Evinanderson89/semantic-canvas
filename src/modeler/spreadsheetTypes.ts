@@ -12,6 +12,8 @@ export interface SpreadsheetColumnProfile {
   uniqueCount: number;
   nonEmptyCount: number;
   samples: string[];
+  /** Detected whole-period coverage grain when every row represents a full month or quarter. */
+  periodGrain?: "month" | "quarter";
 }
 
 export type SpreadsheetJoinResolution = "deduplicate" | "one_to_many" | "exclude";
@@ -48,6 +50,8 @@ export interface SpreadsheetDetectedJoin {
   fanoutImpact?: SpreadsheetJoinFanoutImpact;
   resolution?: SpreadsheetJoinResolution;
   unmatchedLeftRows?: number;
+  orphanLeftDollarTotal?: number;
+  orphanMetricLabel?: string;
 }
 
 /** Formats a [0, 1] join matchRate honestly: never rounds <1 up to 100% or >0 down to 0%. */
@@ -70,6 +74,7 @@ export interface SpreadsheetSheetPreview {
   suggestedGrain: string;
   suggestedTimeColumn: string | null;
   suggestedPrimaryKey: string | null;
+  suggestedPeriod?: { column: string; grain: "month" | "quarter" } | null;
   kind: "fact" | "dimension";
 }
 
@@ -84,6 +89,7 @@ export interface SpreadsheetPreview {
   suggestedGrain: string;
   suggestedTimeColumn: string | null;
   suggestedPrimaryKey: string | null;
+  suggestedPeriod?: { column: string; grain: "month" | "quarter" } | null;
   /** All sheets in the workbook (1 for CSV, 1..N for multi-sheet .xlsx). */
   sheets?: SpreadsheetSheetPreview[];
   /** Auto-detected cross-sheet foreign-key joins (when workbook has 2+ sheets). */
@@ -111,6 +117,7 @@ export interface ParsedSpreadsheet {
   headers: string[];
   rows: string[][];
   cleaningNotes?: string[];
+  unpivotedGrain?: "month" | "quarter";
 }
 
 export const SAMPLE_SPREADSHEET_NAME = "Q3_Sales_Performance.csv";

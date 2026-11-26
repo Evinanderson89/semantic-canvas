@@ -309,7 +309,8 @@ export function makeFormatter(f: FormatSpec): NumberFormatter {
   return Object.assign(numberFormatter(f), {
     withPrecision: (digits: number) => numberFormatter({ ...f, decimals: Math.max(1, digits) }),
     exact: (n: number) => f.number === "percent" ? `${d3format(".17~g")(n * 100)}%`
-      : `${f.number === "currency" ? "$" : ""}${d3format(".17~g")(n)}`,
+      : f.number === "currency" ? `${n < 0 ? "-" : ""}$${d3format(".17~g")(Math.abs(n))}`
+      : d3format(".17~g")(n),
   });
 }
 
@@ -330,9 +331,14 @@ function numberFormatter(f: FormatSpec): (n: number) => string {
   const d = f.decimals;
   switch (f.number) {
     case "currency":
-      return (n) => (Math.abs(n) >= 10000 && d == null)
-        ? "$" + d3format(".3~s")(n).replace("G", "B")
-        : d3format(`$,.${d ?? 2}f`)(n);
+      return (n) => {
+        if (Math.abs(n) >= 10000 && d == null) {
+          const abs = d3format(".3~s")(Math.abs(n)).replace("G", "B");
+          return `${n < 0 && /[1-9]/.test(abs) ? "-" : ""}$${abs}`;
+        }
+        const abs = d3format(`,.${d ?? 2}f`)(Math.abs(n));
+        return `${n < 0 && /[1-9]/.test(abs) ? "-" : ""}$${abs}`;
+      };
     case "percent":
       return d == null ? n => preservePercentBoundary(n, d3format(".1%")(n)) : d3format(`.${d}%`);
     case "compact":
@@ -352,8 +358,15 @@ export function makeAxisFormatter(f: FormatSpec, values: unknown[]): NumberForma
   const unit = max >= 1e9 ? 1e9 : max >= 1e6 ? 1e6 : max >= 1e4 ? 1e3 : 1;
   const suffix = unit === 1e9 ? "B" : unit === 1e6 ? "M" : unit === 1e3 ? "k" : "";
   const withPrecision = (digits: number) => {
-    const format = unit === 1 ? d3format(`$,.${digits}f`) : d3format(`,.${digits}~f`);
-    return (n: number) => unit === 1 ? format(n) : `$${format(n / unit)}${suffix}`;
+    const format = unit === 1 ? d3format(`,.${digits}f`) : d3format(`,.${digits}~f`);
+    return (n: number) => {
+      const formatted = format(Math.abs(n) / unit);
+      const sign = n < 0 && /[1-9]/.test(formatted) ? "-" : "";
+      return `${sign}$${formatted}${suffix}`;
+    };
   };
-  return Object.assign(withPrecision(2), { withPrecision, exact: (n: number) => `$${d3format(".17~g")(n / unit)}${suffix}` });
+  return Object.assign(withPrecision(2), {
+    withPrecision,
+    exact: (n: number) => `${n < 0 ? "-" : ""}$${d3format(".17~g")(Math.abs(n) / unit)}${suffix}`,
+  });
 }

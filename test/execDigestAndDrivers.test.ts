@@ -65,9 +65,13 @@ describe("Executive Digest, Verified Brief Bundle & Metric Drivers", () => {
         }
         for (const seg of dim.segments) {
           expect(seg.delta).toBeCloseTo(seg.latest - seg.prior, 6);
-          const expectedShare =
+          const rawShare =
             result.delta === 0 ? 0 : seg.delta / Math.abs(result.delta);
-          expect(seg.shareOfChange).toBeCloseTo(expectedShare, 6);
+          if (Math.abs(rawShare) > 1) {
+            expect(seg.shareOfChange).toBeNull();
+          } else {
+            expect(seg.shareOfChange).toBeCloseTo(rawShare, 6);
+          }
         }
       }
     });

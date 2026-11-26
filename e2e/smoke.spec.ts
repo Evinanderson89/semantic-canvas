@@ -36,7 +36,7 @@ test("the app renders something", async ({ page }) => {
   const errors = watchConsole(page);
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 2 })).toBeVisible();
-  await expect(page.getByText("Suggest a dashboard")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Ask or drop start composer" })).toBeVisible();
   expect(errors, "console errors on load").toEqual([]);
 });
 

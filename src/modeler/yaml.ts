@@ -1,6 +1,10 @@
 import YAML from "yaml";
-import type { JoinCardinality, Metric } from "../semantic/model.ts";
+import type { JoinCardinality, Metric, TimeGrain } from "../semantic/model.ts";
 import type { Proposal } from "./propose.ts";
+
+export type YamlProposalTable = Proposal["tables"][number] & {
+  period?: { column: string; grain: TimeGrain };
+};
 
 export type YamlProposalJoin = Proposal["joins"][number] & {
   cardinality?: JoinCardinality;
@@ -9,10 +13,13 @@ export type YamlProposalJoin = Proposal["joins"][number] & {
 export type YamlProposalMetric = Proposal["metrics"][number] & {
   importance?: number;
   unit?: Metric["unit"];
+  timeGrains?: TimeGrain[];
+  timeDimension?: string;
 };
 
-export type YamlProposal = Omit<Proposal, "model" | "joins" | "metrics"> & {
+export type YamlProposal = Omit<Proposal, "model" | "tables" | "joins" | "metrics"> & {
   model: Proposal["model"] & { hygieneNotes?: string[] };
+  tables: YamlProposalTable[];
   joins: YamlProposalJoin[];
   metrics: YamlProposalMetric[];
   hygieneNotes?: string[];
@@ -37,6 +44,7 @@ export function proposalToYaml(p: YamlProposal): string {
       ...(t.primaryKey ? { primary_key: t.primaryKey } : {}),
       ...(t.reportingLag ? { reporting_lag: t.reportingLag } : {}),
       ...(t.timeColumn ? { default_date_column: t.timeColumn } : {}),
+      ...(t.period ? { period: { column: t.period.column, grain: t.period.grain } } : {}),
       columns: t.columns.map((c) => ({ name: c.name, type: c.type, ...(c.description ? { description: c.description } : {}) })),
     };
   }
@@ -51,6 +59,8 @@ export function proposalToYaml(p: YamlProposal): string {
       expression: m.expression,
       ...(m.unit ? { unit: m.unit } : {}),
       ...(m.importance !== undefined ? { importance: m.importance } : {}),
+      ...(m.timeGrains?.length ? { time_grains: m.timeGrains } : {}),
+      ...(m.timeDimension ? { time_dimension: m.timeDimension } : {}),
       ...(m.description ? { description: m.description } : {}),
     };
   }

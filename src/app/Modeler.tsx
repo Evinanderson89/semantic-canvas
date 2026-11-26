@@ -22,15 +22,44 @@ const publicationSchema = z.object({
 
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^[^a-z]+/, "").slice(0, 40);
 
-export function Modeler({ sources, onPublished, onImportSpreadsheet }: { sources: SourceRow[]; onPublished: (sourceId: string) => void; onImportSpreadsheet?: () => void }) {
-  const [drafts, setDrafts] = useState<DraftSummary[] | null>(null);
+export function Modeler({ sources, sandboxMode = false, onPublished, onImportSpreadsheet }: { sources: SourceRow[]; sandboxMode?: boolean; onPublished: (sourceId: string) => void; onImportSpreadsheet?: () => void }) {
+  const [drafts, setDrafts] = useState<DraftSummary[] | null>(sandboxMode ? [] : null);
   const [open, setOpen] = useState<Draft | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const load = () => fetch("/api/modeler/drafts").then(readResponse).then((d) => setDrafts(d.drafts)).catch((e) => setError(e.message));
-  useEffect(() => { load(); }, []);
+  const load = () => {
+    if (sandboxMode) {
+      setDrafts([]);
+      return Promise.resolve();
+    }
+    return fetch("/api/modeler/drafts")
+      .then(readResponse)
+      .then((d) => { setDrafts(d.drafts ?? []); setError(null); })
+      .catch((e) => { setError(e.message); setDrafts((prev) => prev ?? []); });
+  };
+  useEffect(() => { void load(); }, [sandboxMode]);
   const openDraft = (id: string) => fetch(`/api/modeler/drafts/${encodeURIComponent(id)}`).then(readResponse).then(setOpen).catch((e) => setError(e.message));
 
-  if (open) return <DraftReview draft={open} onBack={() => { setOpen(null); load(); }} onPublished={(id) => { load(); onPublished(id); }} />;
+  if (sandboxMode) {
+    return (
+      <div className="explore modeler">
+        <span className="eyebrow">Modeler</span>
+        <h1>Self-host to customize model</h1>
+        <p className="lede">
+          Authoring and publishing persistent warehouse models is disabled on the shared public sandbox.
+          Run <code className="mono">docker compose up -d</code> locally to connect PostgreSQL, BigQuery, Snowflake, or S3 Parquet lakes—or upload an Excel / CSV sheet into an isolated sandbox session right now.
+        </p>
+        {onImportSpreadsheet && (
+          <div className="story-actions">
+            <button type="button" className="primary small" onClick={onImportSpreadsheet}>
+              ⊞ Drop an Excel (.xlsx) or CSV sheet
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (open) return <DraftReview draft={open} onBack={() => { setOpen(null); void load(); }} onPublished={(id) => { void load(); onPublished(id); }} />;
   return (
     <div className="explore modeler">
       <span className="eyebrow">Modeler</span>

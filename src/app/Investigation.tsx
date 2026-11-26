@@ -128,7 +128,7 @@ export function Investigation({
   // Optimistic activeConfig prevents rapid multi-clicks from dropping views before parent re-render.
   const [activeConfig, setActiveConfig] = useState<DetailConfiguration>(propInitial);
   const [editing, setEditing] = useState(initialMode === "configure" && canKeep);
-  const [smartOpen, setSmartOpen] = useState(initialMode === "smart" && canKeep);
+  const [smartOpen, setSmartOpen] = useState(initialMode === "smart");
   const [showAllSubdetails, setShowAllSubdetails] = useState(false);
   const [draft, setDraft] = useState<DetailConfiguration>(propInitial);
   const [driversState, setDriversState] = useState<"idle" | "loading" | "ready">("idle");
@@ -146,8 +146,8 @@ export function Investigation({
   useEffect(() => {
     if (modeSeq === handledModeSeq.current) return;
     handledModeSeq.current = modeSeq;
-    if (!canKeep) return;
     if (initialMode === "configure") {
+      if (!canKeep) return;
       setSmartOpen(false);
       setDraft(activeConfig);
       setEditing(true);
@@ -174,9 +174,10 @@ export function Investigation({
     [fmtMetric, isPercentMetric],
   );
 
-  // Deterministic factual headline summary from the already-returned result rows.
+  // Deterministic factual headline summary from the already-returned result rows (1D time series only).
   const factualTakeaway = useMemo(() => {
     if (!plan.context?.dateEnd || source.metrics.length !== 1) return "";
+    if (plan.context.query.dimensions.length !== 1 || !plan.context.query.dimensions[0]?.includes(":")) return "";
     const mIdx = result.columns.indexOf(source.metrics[0]);
     if (mIdx < 0 || !result.rows.length) return "";
     const latestVal = numericValue(result.rows.at(-1)?.[mIdx]);
@@ -341,7 +342,7 @@ export function Investigation({
     setActiveConfig((prev) => {
       const normalized = normalizeConfiguration(updater(prev));
       setDraft(normalized);
-      onConfigure(normalized);
+      if (canKeep) onConfigure(normalized);
       return normalized;
     });
   };
@@ -432,9 +433,9 @@ export function Investigation({
               {humanScopeSummary ? ` · ${humanScopeSummary}` : ""}
             </p>
           </div>
-          {!editing && (canKeep || onCopyShareLink) && (
+          {!editing && (plan.options.length > 1 || canKeep || onCopyShareLink) && (
             <div className="detail-heading-actions">
-              {canKeep && plan.options.length > 1 && (
+              {plan.options.length > 1 && (
                 <button
                   ref={smartBtnRef}
                   type="button"
@@ -504,7 +505,7 @@ export function Investigation({
           </p>
         )}
 
-        {smartOpen && !editing && canKeep && (
+        {smartOpen && !editing && (
           <section id={smartPanelId} className="smart-subdetails-panel" aria-label="Smart story subdetails">
             <div className="smart-panel-header">
               <div>

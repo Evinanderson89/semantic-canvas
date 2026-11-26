@@ -34,10 +34,10 @@ actually works, and the natural way to explain what broke.
   design -- a change that makes one of them assume a particular adapter or
   connector is almost always a sign it belongs somewhere else.
 
-## Reporting issues
+## Reporting issues & security disclosures
 
-Open a GitHub issue. For anything that touches row-level security or
-credential handling, please describe the scenario rather than pasting
-real credentials or customer data.
+For general bugs and feature requests, open a GitHub issue with a sanitized reproduction (never paste real credentials or customer data).
+
+For security vulnerabilities—including row-level security, authentication, RBAC, sandbox/session isolation, SSRF, or credential handling—do **not** open a public issue. Follow [SECURITY.md](SECURITY.md) to submit a private vulnerability report.
 
 For changes to metric behavior, add an executable reference-result fixture. For editor changes, exercise save/reopen and undo. For AI actions, test malformed, stale, and unsupported proposals without paid model calls. Keep live-provider verification separate and document what was actually exercised.

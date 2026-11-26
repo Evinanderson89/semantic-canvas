@@ -1,6 +1,7 @@
 import { useSession, signOut } from "./Session.tsx";
 import { useEffect, useState, type ReactNode } from "react";
 import type { Model } from "../semantic/model.ts";
+import { applyThemeToDocument, formatSourceDisplayLabel, resolveInitialTheme, THEME_STORAGE_KEY, type AppTheme } from "./themeInit.ts";
 
 const ICONS: Record<string, string> = {
   home: "M3 9.5 10 4l7 5.5V16a1 1 0 0 1-1 1h-4v-4H8v4H4a1 1 0 0 1-1-1z",
@@ -30,7 +31,8 @@ function Icon({ d }: { d: string }) {
 
 export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, library,
                           principals = [], principal = "", onPrincipal = () => {},
-                          sources = [], activeSource = null }: {
+                          sources = [], activeSource = null,
+                          sandboxMode = false, theme: controlledTheme, onToggleTheme }: {
   model: Model; view: string;
   onView: (v: "home" | "registry" | "model" | "connections" | "modeler") => void;
   collapsed: boolean; onToggle: () => void;
@@ -40,17 +42,29 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
   principal?: string;
   onPrincipal?: (id: string) => void;
   sources?: { id: string; label: string; status: "ready" | "error"; error?: string }[];
-  activeSource?: { label: string; status: "ready" | "error"; error?: string } | null;
+  activeSource?: { id?: string; label: string; status: "ready" | "error"; error?: string } | null;
+  sandboxMode?: boolean;
+  theme?: AppTheme;
+  onToggleTheme?: () => void;
 }) {
   const session = useSession();
   const gatewayUrl = session.gatewayUrl ?? (session.mode === "local" ? import.meta.env.VITE_GATEWAY_PORTAL_URL : undefined);
-  const [theme, setTheme] = useState(() => {
-    try { return localStorage.getItem("sc:theme") === "dark" ? "dark" : "light"; } catch { return "light"; }
-  });
+  const [localTheme, setLocalTheme] = useState<AppTheme>(() => resolveInitialTheme());
+  const [dataSectionOpen, setDataSectionOpen] = useState(true);
+  const theme = controlledTheme ?? localTheme;
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    try { localStorage.setItem("sc:theme", theme); } catch { /* Appearance still works without storage. */ }
-  }, [theme]);
+    if (controlledTheme !== undefined) return;
+    applyThemeToDocument(localTheme);
+    try { localStorage.setItem(THEME_STORAGE_KEY, localTheme); } catch { /* Appearance still works without storage. */ }
+  }, [controlledTheme, localTheme]);
+  const handleToggleTheme = () => {
+    if (onToggleTheme) {
+      onToggleTheme();
+      return;
+    }
+    setLocalTheme((prev) => (prev === "light" ? "dark" : "light"));
+  };
+  const sourceDisplayLabel = formatSourceDisplayLabel(activeSource?.label ?? model.source, activeSource?.id);
 
   return (
     <aside className={"sidebar" + (collapsed ? " collapsed" : "")}>
@@ -77,33 +91,59 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
         <span>Find a metric</span>
       </button>
 
-      <nav>
-        <NavItem icon="home" label="Home" active={view === "home"}
-                 onClick={() => onView("home")} />
-        <NavItem icon="registry" label="Metric Registry" active={view === "registry"}
-                 badge={String(Object.keys(model.metrics).length)}
-                 onClick={() => onView("registry")} />
-        <NavItem icon="db" label="Data Model" active={view === "model"}
-                 badge={String(Object.keys(model.tables).length)}
-                 onClick={() => onView("model")} />
-        <NavItem icon="plug" label="Connections" active={view === "connections"}
-                 badge={String(sources.length)}
-                 onClick={() => onView("connections")} />
-        {session.canAdmin && <NavItem icon="db" label="Modeler" active={view === "modeler"}
-                 onClick={() => onView("modeler")} />}
-      </nav>
+      <div className="sidebar-group" role="group" aria-label="Dashboards">
+        <div className="sidebar-group-label">Dashboards</div>
+        <nav aria-label="Dashboards navigation">
+          <NavItem icon="home" label="Home" active={view === "home"}
+                   onClick={() => onView("home")} />
+        </nav>
+        {/* The library tree is the flexible part of a short sidebar: it scrolls so the footer stays reachable. */}
+        <div className="sidebar-library">{library}</div>
+      </div>
 
-      {/* The library tree is the flexible part of a short sidebar: it scrolls so the footer stays reachable. */}
-      <div className="sidebar-library">{library}</div>
+      <div className="sidebar-group data-group" role="group" aria-label="Data & Metrics">
+        <button
+          type="button"
+          className="sidebar-group-toggle"
+          aria-expanded={dataSectionOpen}
+          onClick={() => setDataSectionOpen((open) => !open)}
+        >
+          <span>Data &amp; Metrics</span>
+          <span aria-hidden="true">{dataSectionOpen ? "⌄" : "›"}</span>
+        </button>
+        {dataSectionOpen && (
+          <nav aria-label="Data & Metrics navigation">
+            <NavItem icon="registry" label="Metric Registry" active={view === "registry"}
+                     badge={String(Object.keys(model.metrics).length)}
+                     onClick={() => onView("registry")} />
+            <NavItem icon="db" label="Data Model" active={view === "model"}
+                     badge={String(Object.keys(model.tables).length)}
+                     onClick={() => onView("model")} />
+            <NavItem icon="plug" label="Connections" active={view === "connections"}
+                     badge={String(sources.length)}
+                     onClick={() => onView("connections")} />
+            {session.canAdmin && !sandboxMode && (
+              <NavItem icon="db" label="Modeler" active={view === "modeler"}
+                       onClick={() => onView("modeler")} />
+            )}
+            {sandboxMode && (
+              <span className="sidebar-sandbox-hint" title="Run docker compose up -d locally to author and publish custom warehouse models">
+                Self-host to customize model
+              </span>
+            )}
+          </nav>
+        )}
+      </div>
+
       <div className="who">
         <button className="workspace-settings" onClick={onSettings}>
           <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true"><path d="M3 6h14M3 14h14" /><circle cx="7" cy="6" r="2" fill="var(--panel)" /><circle cx="13" cy="14" r="2" fill="var(--panel)" /></svg>
           Settings
         </button>
-        <div className="workspace-caption"><span title={session.mode === "team" ? "Access is managed by your company" : "Roles are local previews on this computer, not live accounts"}>{session.mode === "team" ? `Company workspace · ${session.user?.role}` : "Demo mode · Viewing as"}</span>
+        <div className="workspace-caption"><span title={session.mode === "team" ? "Access is managed by your company" : "Roles are local previews, not live company accounts"}>{session.mode === "team" ? `Company workspace · ${session.user?.role}` : sandboxMode ? "Live sandbox · Viewing as" : "Local workspace · Viewing as"}</span>
           {session.policy?.length ? <span className="data-policy" title={"Set at the gateway for your groups. Every chart is filtered by it; a chart that cannot apply it is refused.\n" + session.policy.map((r) => `${r.field} ${r.mode === "only" ? "only" : "not"} ${r.values.join(", ")}`).join("\n")}>Data policy: {session.policy.map((r) => `${r.field.split(".").pop()} ${r.mode === "only" ? "in" : "not in"} ${r.values.slice(0, 3).join(", ")}${r.values.length > 3 ? "…" : ""}`).join("; ")}</span> : null}
           <button className="theme-toggle" aria-label={`Switch to ${theme === "light" ? "dark" : "light"} appearance`}
-            title={`Switch to ${theme === "light" ? "dark" : "light"} appearance`} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>
+            title={`Switch to ${theme === "light" ? "dark" : "light"} appearance`} onClick={handleToggleTheme}>
             {theme === "light" ? "◐" : "◑"}
           </button>
         </div>
@@ -121,10 +161,10 @@ export function Sidebar({ model, view, onView, collapsed, onToggle, onSettings, 
         {session.mode === "team" && <button className="link" onClick={signOut}>Sign out</button>}
         <button className="who-source" onClick={() => onView("connections")}
                 title={activeSource
-                  ? `${activeSource.label}${activeSource.status === "error" ? ` — ${activeSource.error}` : ""}`
-                  : model.source}>
+                  ? `${sourceDisplayLabel}${activeSource.status === "error" ? ` — ${activeSource.error}` : ""}`
+                  : sourceDisplayLabel}>
           <span className={"dot " + (activeSource?.status ?? "ready")} />
-          <span>{activeSource?.label ?? model.source}</span>
+          <span>{sourceDisplayLabel}</span>
         </button>
       </div>
     </aside>
